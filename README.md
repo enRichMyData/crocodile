@@ -1,6 +1,6 @@
 # Crocodile
 
-![Crocodile Logo](logo.webp)
+<img src="logo.webp" alt="Crocodile Logo" width="400"/>
 
 **Crocodile** is a Python library designed to perform entity linking over tabular data with ease and efficiency. This library is particularly useful for anyone working with datasets that require entity resolution, enabling quick and accurate linking of entities across different tables or within a single table.
 

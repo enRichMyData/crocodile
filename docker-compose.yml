@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0.6
+    container_name: crocodile_mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./mongo_data:/data/db  # Local directory for MongoDB data
+    
+  jupyter:
+    image: roby944/jupyter-extended:latest
+    container_name: crocodile_jupyter
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./crocodile:/home/jovyan/crocodile
+    command: start-notebook.sh --NotebookApp.token='' --NotebookApp.password=''
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+    env_file:
+      - .env  # Load environment variables from .env file
+    depends_on:
+      - mongodb

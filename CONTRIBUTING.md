@@ -8,7 +8,7 @@ The following is a set of guidelines for contributing to the Crocodile Python li
 
 ### 1. Reporting Bugs
 
-If you find a bug, please report it by opening a [GitHub issue](https://github.com/your-repo/crocodile/issues). Include as much detail as possible to help us resolve the issue faster:
+If you find a bug, please report it by opening a [GitHub issue](https://github.com/enRichMyData/crocodile). Include as much detail as possible to help us resolve the issue faster:
 
 - **Use a clear and descriptive title** for the issue to identify the problem.
 - **Describe the exact steps which reproduce the problem** in as much detail as possible.
@@ -19,7 +19,7 @@ If you find a bug, please report it by opening a [GitHub issue](https://github.c
 
 Enhancement suggestions are also welcome! To suggest an enhancement:
 
-- Open a [GitHub issue](https://github.com/your-repo/crocodile/issues) and describe:
+- Open a [GitHub issue](https://github.com/enRichMyData/crocodile) and describe:
   - The feature you would like to see.
   - The problem it would solve.
   - Why you think it would be beneficial for others.

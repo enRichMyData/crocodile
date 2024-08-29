@@ -4,6 +4,8 @@
 
 **Crocodile** is a Python library designed to perform entity linking over tabular data with ease and efficiency. This library is particularly useful for anyone working with datasets that require entity resolution, enabling quick and accurate linking of entities across different tables or within a single table.
 
+> **Fun Fact:** Of the two reptiles, the crocodile would win in a face-to-face combat. Although the alligator is faster, here are the reasons why the crocodile would win: Crocodiles are usually bigger and heavier. Crocs have a more lethal bite due to their size and strength.
+
 ## Features
 
 - **Entity Linking:** Efficiently link entities within tabular data.

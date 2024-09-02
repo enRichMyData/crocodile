@@ -2,19 +2,19 @@
 
 <img src="logo.webp" alt="Crocodile Logo" width="400"/>
 
-**Crocodile** is a Python library designed to perform entity linking over tabular data with ease and efficiency. This library is particularly useful for anyone working with datasets that require entity resolution, enabling quick and accurate linking of entities across different tables or within a single table.
+**Crocodile** is a powerful Python library designed for efficient entity linking over tabular data. Whether you're working with large datasets or need to resolve entities across multiple tables, Crocodile provides a scalable and easy-to-integrate solution to streamline your data processing pipeline.
 
-> **Fun Fact:** Of the two reptiles, the crocodile would win in a face-to-face combat. Although the alligator is faster, here are the reasons why the crocodile would win: Crocodiles are usually bigger and heavier. Crocs have a more lethal bite due to their size and strength.
+> **Fun Fact:** If a crocodile and an alligator were to meet, the crocodile would likely win in a face-to-face combat. While the alligator is faster, the crocodile has the advantage of being bigger, heavier, and having a more lethal bite due to its size and strength ([Bayou Swamp Tours](https://www.bayouswamptours.com/blog/difference-between-alligator-crocodile/)).
 
 ## Features
 
-- **Entity Linking:** Efficiently link entities within tabular data.
-- **Scalable:** Handles large datasets with ease.
-- **Easy Integration:** Seamlessly integrates with existing data pipelines.
+- **Entity Linking:** Seamlessly link entities within tabular data.
+- **Scalable:** Designed to handle large datasets efficiently.
+- **Easy Integration:** Can be easily integrated into existing data processing pipelines.
 
 ## Installation
 
-You can install the Crocodile library via pip:
+Install the Crocodile library via pip:
 
 ```bash
 pip install crocodile
@@ -24,7 +24,7 @@ pip install crocodile
 
 ### 1. Onboarding Data
 
-Before running the entity linking process, you'll need to onboard your data into MongoDB.
+Before running the entity linking process, onboard your data into MongoDB:
 
 ```python
 import pandas as pd

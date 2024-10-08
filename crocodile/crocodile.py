@@ -3,15 +3,10 @@ import time
 from pymongo import MongoClient
 import multiprocessing as mp
 import logging
-import Levenshtein
-from difflib import SequenceMatcher
 import traceback
 from datetime import datetime
 import base64
 import gzip
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-from collections import Counter
 from nltk.tokenize import word_tokenize
 import nltk
 import pickle
@@ -194,10 +189,8 @@ class Crocodile:
         bow_similarity = candidate['features'].get('bow_similarity', 0.0)
 
         # Incorporate BoW similarity into the total score
-        total_score = (ed_score + desc_score + desc_ngram_score) / 3
-        total_score += bow_similarity
-        if total_score > 1:
-            total_score = 1.0
+        total_score = (ed_score + desc_score + desc_ngram_score + bow_similarity) / 4
+       
         candidate['score'] = round(total_score, 2)
 
         return candidate
@@ -246,33 +239,9 @@ class Crocodile:
     def tokenize_text(self, text):
         """Tokenize and clean the text."""
         tokens = word_tokenize(text.lower())
-        return set(t for t in tokens if t.isalpha() and t not in stop_words)
+        return set(t for t in tokens if t not in stop_words)
 
-    def bow_old_similarity(self, row_text, candidate_vectors):
-        """Old BoW similarity computation using cosine similarity."""
-        if candidate_vectors is None:
-            logging.error("No candidate vectors available to compute BoW similarity.")
-            return {}
-
-        row_tokens = self.tokenize_text(row_text)
-        row_bow = Counter(row_tokens)
-
-        # Ensure consistent shared vocabulary
-        shared_vocab = set(row_bow.keys())
-        for vector in candidate_vectors.values():
-            shared_vocab.update(vector.keys())
-        shared_vocab = list(shared_vocab)
-
-        row_bow_vector = np.array([row_bow.get(word, 0) for word in shared_vocab])
-
-        similarities = {}
-        for qid, candidate_bow in candidate_vectors.items():
-            candidate_bow_vector = np.array([candidate_bow.get(word, 0) for word in shared_vocab])
-            similarity = cosine_similarity([row_bow_vector], [candidate_bow_vector])[0][0]
-            similarities[qid] = similarity
-        return similarities
-
-    def bow_new_similarity(self, row_text, candidate_vectors):
+    def compute_bow_similarity(self, row_text, candidate_vectors):
         """New BoW similarity computation using Jaccard similarity."""
         if candidate_vectors is None:
             logging.error("No candidate vectors available to compute BoW similarity.")
@@ -295,16 +264,8 @@ class Crocodile:
 
         return similarity_scores, matched_words
 
-    def compute_bow_similarity(self, row_text, candidate_vectors, method="new"):
-        """Compute similarity between row's BoW and candidate BoWs based on the chosen method."""
-        if method == "old":
-            return self.bow_old_similarity(row_text, candidate_vectors)
-        elif method == "new":
-            return self.bow_new_similarity(row_text, candidate_vectors)
-        else:
-            raise ValueError(f"Unknown similarity method: {method}")
-
-    def link_entity(self, row, ne_columns, context_columns, correct_qids, dataset_name, table_name, row_index, similarity_method="new"):
+   
+    def link_entity(self, row, ne_columns, context_columns, correct_qids, dataset_name, table_name, row_index):
         linked_entities = {}
         training_candidates_by_ne_column = {}
 
@@ -322,10 +283,11 @@ class Crocodile:
                     candidate_bows = self.get_bow_from_api(candidate_qids)
 
                     # Compute BoW similarity with the row
-                    bow_similarities, matched_words = self.compute_bow_similarity(row_text, candidate_bows, method=similarity_method)
+                    bow_similarities, matched_words = self.compute_bow_similarity(row_text, candidate_bows)
 
                     # Add BoW similarity to each candidate's features
                     for candidate in candidates:
+                        candidate['matched_words'] = matched_words.get(candidate['id'], [])
                         candidate['features']['bow_similarity'] = round(bow_similarities.get(candidate['id'], 0.0), 4)
 
                     # Re-score the candidates after computing BoW similarity

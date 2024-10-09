@@ -48,6 +48,14 @@ class Crocodile:
         db = client[self.db_name]
         trace_collection = db[self.trace_collection_name]
 
+        # Retrieve the existing trace document
+        trace = trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
+
+        if not trace:
+            return
+
+        total_rows = trace.get("total_rows", 0)
+        processed_rows = trace.get("processed_rows", 0) + increment
         update_fields = {}
 
         if increment:
@@ -58,6 +66,8 @@ class Crocodile:
 
         if start_time:
             update_fields["start_time"] = start_time
+        else:
+            start_time = trace.get("start_time")    
 
         if end_time:
             update_fields["end_time"] = end_time
@@ -66,14 +76,42 @@ class Crocodile:
         if row_time:
             update_fields["last_row_time"] = row_time
 
-        update_query = {}
+        # Check if the process is completed
+        if processed_rows >= total_rows and total_rows > 0:
+            # Set completed progress estimations
+            update_fields["estimated_seconds"] = 0
+            update_fields["estimated_hours"] = 0
+            update_fields["estimated_days"] = 0
+            update_fields["percentage_complete"] = 100.0
+        elif start_time and total_rows > 0 and processed_rows > 0:
+            # Calculate elapsed time
+            elapsed_time = (datetime.now() - start_time).total_seconds()
 
+            # Estimate remaining time and progress percentage
+            avg_time_per_row = elapsed_time / processed_rows
+            remaining_rows = total_rows - processed_rows
+            estimated_time_left = remaining_rows * avg_time_per_row
+
+            # Format the estimated time in different units
+            estimated_seconds = estimated_time_left
+            estimated_hours = estimated_seconds / 3600
+            estimated_days = estimated_hours / 24
+            percentage_complete = (processed_rows / total_rows) * 100
+
+            # Add estimation data to the update fields
+            update_fields["estimated_seconds"] = round(estimated_seconds, 2)
+            update_fields["estimated_hours"] = round(estimated_hours, 2)
+            update_fields["estimated_days"] = round(estimated_days, 2)
+            update_fields["percentage_complete"] = round(percentage_complete, 2)
+
+        # Build the update query
+        update_query = {}
         if update_fields:
             if "processed_rows" in update_fields:
                 update_query["$inc"] = {"processed_rows": update_fields.pop("processed_rows")}
-            if update_fields:
-                update_query["$set"] = update_fields
+            update_query["$set"] = update_fields
 
+        # Update the trace document
         trace_collection.update_one(
             {"dataset_name": dataset_name, "table_name": table_name},
             update_query,
@@ -154,9 +192,13 @@ class Crocodile:
     def map_nertype_to_numeric(self, nertype):
         """Map NERtype to a numeric value."""
         mapping = {
+            'LOCATION': 1,
             'LOC': 1,
+            'ORGANIZATION': 2,
             'ORG': 2,
+            'PERSON': 3,
             'PERS': 3,
+            'OTHER': 4,
             'OTHERS': 4
         }
         return mapping.get(nertype, 4)
@@ -271,12 +313,12 @@ class Crocodile:
 
         row_text = ' '.join([str(value) for col, value in row.items() if col in context_columns and value is not None])
 
-        for ne_column in ne_columns:
+        for ne_column, ner_type in ne_columns.items(): 
             if row.get(ne_column):
                 candidates = self.fetch_candidates(row.get(ne_column), row_text)
 
                 if candidates:
-                    correct_qid = correct_qids.get(ne_column, None)
+                    correct_qid = correct_qids.get((ne_column, row_index), None)  # Access the correct QID using (column, row)
 
                     # Fetch BoW vectors for the candidates
                     candidate_qids = [candidate['id'] for candidate in candidates]
@@ -285,10 +327,14 @@ class Crocodile:
                     # Compute BoW similarity with the row
                     bow_similarities, matched_words = self.compute_bow_similarity(row_text, candidate_bows)
 
+                    # Map NER type from input to numeric (extended names)
+                    ner_type_numeric = self.map_nertype_to_numeric(ner_type)
+                    
                     # Add BoW similarity to each candidate's features
                     for candidate in candidates:
                         candidate['matched_words'] = matched_words.get(candidate['id'], [])
                         candidate['features']['bow_similarity'] = round(bow_similarities.get(candidate['id'], 0.0), 4)
+                        candidate['features']['column_NERtype'] = ner_type_numeric  # Add the NER type from the column
 
                     # Re-score the candidates after computing BoW similarity
                     ranked_candidates = self.score_candidates(row.get(ne_column), candidates)

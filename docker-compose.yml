@@ -3,7 +3,7 @@ services:
     image: mongo:7.0.6
     container_name: crocodile_mongodb
     ports:
-      - "27017:27017"
+      - "${MONGO_SERVER_PORT}:27017"
     volumes:
       - ./mongo_data:/data/db  # Local directory for MongoDB data
     
@@ -11,10 +11,11 @@ services:
     image: roby944/jupyter-extended:latest
     container_name: crocodile_jupyter
     ports:
-      - "8888:8888"
+      - "${JUPYTER_SERVER_PORT}:8888"
     volumes:
       - ./notebooks:/home/jovyan/work
-      - ./crocodile:/home/jovyan/crocodile
+      - ./crocodile:/home/jovyan/work/crocodile
+      - ./tables:/home/jovyan/work/tables
     command: start-notebook.sh --NotebookApp.token='' --NotebookApp.password=''
     environment:
       - JUPYTER_ENABLE_LAB=yes

@@ -118,14 +118,18 @@ class Crocodile:
             upsert=True
         )
 
-    def fetch_candidates(self, entity_name, row_text):
-        """Fetch candidates for a given entity synchronously, with a configurable limit."""
+    def fetch_candidates(self, entity_name, row_text, qid=None):
+        """Fetch candidates for a given entity synchronously, with an optional QID parameter."""
         try:
             if not self.entity_retrieval_endpoint or not self.entity_retrieval_token:
                 raise ValueError("Entity retrieval endpoint and token must be provided.")
 
             # Construct the URL
             url = f"{self.entity_retrieval_endpoint}?name={entity_name}&limit={self.candidate_retrieval_limit}&token={self.entity_retrieval_token}"
+            
+            # Add QID to the URL if provided
+            if qid:
+                url += f"&ids={qid}"
 
             response = requests.get(url, headers={'accept': 'application/json'}, timeout=10)
             response.raise_for_status()
@@ -311,14 +315,21 @@ class Crocodile:
         linked_entities = {}
         training_candidates_by_ne_column = {}
 
-        row_text = ' '.join([str(value) for col, value in row.items() if col in context_columns and value is not None])
+        row_values = list(row.values())  # Ensure we access the values in the correct order
+        
+        # Build the row_text using context columns only (converting to integers since context_columns are strings)
+        row_text = ' '.join([str(row_values[int(col_index)]) for col_index in context_columns if int(col_index) < len(row_values)])
 
-        for ne_column, ner_type in ne_columns.items(): 
-            if row.get(ne_column):
-                candidates = self.fetch_candidates(row.get(ne_column), row_text)
+        for col_index, ner_type in ne_columns.items():
+            col_index = str(col_index)  # Column index as a string
+            if int(col_index) < len(row_values):  # Avoid out-of-range access
+                ne_value = row_values[int(col_index)]
+                if ne_value:
+                    correct_qid = correct_qids.get(f"{row_index}-{col_index}", None)  # Access the correct QID using (row_index, col_index)
 
-                if candidates:
-                    correct_qid = correct_qids.get((ne_column, row_index), None)  # Access the correct QID using (column, row)
+                    candidates = self.fetch_candidates(ne_value, row_text, correct_qid)
+
+                    print(f"{row_index}-{col_index}", correct_qid, flush=True)
 
                     # Fetch BoW vectors for the candidates
                     candidate_qids = [candidate['id'] for candidate in candidates]
@@ -337,7 +348,7 @@ class Crocodile:
                         candidate['features']['column_NERtype'] = ner_type_numeric  # Add the NER type from the column
 
                     # Re-score the candidates after computing BoW similarity
-                    ranked_candidates = self.score_candidates(row.get(ne_column), candidates)
+                    ranked_candidates = self.score_candidates(ne_value, candidates)
 
                     if correct_qid and correct_qid not in [c['id'] for c in ranked_candidates[:self.max_training_candidates]]:
                         correct_candidate = next((c for c in ranked_candidates if c['id'] == correct_qid), None)
@@ -345,9 +356,9 @@ class Crocodile:
                             ranked_candidates = ranked_candidates[:self.max_training_candidates - 1] + [correct_candidate]
 
                     el_results_candidates = ranked_candidates[:self.max_candidates]
-                    linked_entities[ne_column] = el_results_candidates
+                    linked_entities[col_index] = el_results_candidates
 
-                    training_candidates_by_ne_column[ne_column] = ranked_candidates[:self.max_training_candidates]
+                    training_candidates_by_ne_column[col_index] = ranked_candidates[:self.max_training_candidates]
 
         self.save_candidates_for_training(training_candidates_by_ne_column, dataset_name, table_name, row_index)
 

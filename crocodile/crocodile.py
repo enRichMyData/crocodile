@@ -20,14 +20,18 @@ from nltk.corpus import stopwords
 stop_words = set(stopwords.words('english'))
 
 class Crocodile:
-    def __init__(self, mongo_uri="mongodb://mongodb:27017/", db_name="crocodile_db", collection_name="input_data", 
-                 trace_collection_name="processing_trace", training_collection_name="training_data", max_workers=None, 
-                 max_candidates=5, max_training_candidates=10, entity_retrieval_endpoint=None, entity_bow_endpoint=None, 
-                 entity_retrieval_token=None, selected_features=None, candidate_retrieval_limit=100):
+    def __init__(self, mongo_uri="mongodb://mongodb:27017/", db_name="crocodile_db", 
+                 table_trace_collection_name="table_trace", dataset_trace_collection_name="dataset_trace", 
+                 collection_name="input_data", training_collection_name="training_data", 
+                 max_workers=None, max_candidates=5, max_training_candidates=10, 
+                 entity_retrieval_endpoint=None, entity_bow_endpoint=None, entity_retrieval_token=None, 
+                 selected_features=None, candidate_retrieval_limit=100):
+        
         self.mongo_uri = mongo_uri
         self.db_name = db_name
         self.collection_name = collection_name
-        self.trace_collection_name = trace_collection_name
+        self.table_trace_collection_name = table_trace_collection_name
+        self.dataset_trace_collection_name = dataset_trace_collection_name
         self.training_collection_name = training_collection_name
         self.max_workers = max_workers or mp.cpu_count()
         self.max_candidates = max_candidates
@@ -42,14 +46,13 @@ class Crocodile:
         ]
         logging.basicConfig(filename='crocodile.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    def update_trace(self, dataset_name, table_name, increment=0, status=None, start_time=None, end_time=None, row_time=None):
-        """Update the processing trace for a given dataset and table."""
+    def update_table_trace(self, dataset_name, table_name, increment=0, status=None, start_time=None, end_time=None, row_time=None):
+        """Update the processing trace for a given table."""
         client = MongoClient(self.mongo_uri)
         db = client[self.db_name]
-        trace_collection = db[self.trace_collection_name]
+        table_trace_collection = db[self.table_trace_collection_name]
 
-        # Retrieve the existing trace document
-        trace = trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
+        trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
 
         if not trace:
             return
@@ -67,7 +70,7 @@ class Crocodile:
         if start_time:
             update_fields["start_time"] = start_time
         else:
-            start_time = trace.get("start_time")    
+            start_time = trace.get("start_time")
 
         if end_time:
             update_fields["end_time"] = end_time
@@ -76,45 +79,94 @@ class Crocodile:
         if row_time:
             update_fields["last_row_time"] = row_time
 
-        # Check if the process is completed
         if processed_rows >= total_rows and total_rows > 0:
-            # Set completed progress estimations
             update_fields["estimated_seconds"] = 0
             update_fields["estimated_hours"] = 0
             update_fields["estimated_days"] = 0
             update_fields["percentage_complete"] = 100.0
         elif start_time and total_rows > 0 and processed_rows > 0:
-            # Calculate elapsed time
             elapsed_time = (datetime.now() - start_time).total_seconds()
-
-            # Estimate remaining time and progress percentage
             avg_time_per_row = elapsed_time / processed_rows
             remaining_rows = total_rows - processed_rows
             estimated_time_left = remaining_rows * avg_time_per_row
 
-            # Format the estimated time in different units
             estimated_seconds = estimated_time_left
             estimated_hours = estimated_seconds / 3600
             estimated_days = estimated_hours / 24
             percentage_complete = (processed_rows / total_rows) * 100
 
-            # Add estimation data to the update fields
             update_fields["estimated_seconds"] = round(estimated_seconds, 2)
             update_fields["estimated_hours"] = round(estimated_hours, 2)
             update_fields["estimated_days"] = round(estimated_days, 2)
             update_fields["percentage_complete"] = round(percentage_complete, 2)
 
-        # Build the update query
         update_query = {}
         if update_fields:
             if "processed_rows" in update_fields:
                 update_query["$inc"] = {"processed_rows": update_fields.pop("processed_rows")}
             update_query["$set"] = update_fields
 
-        # Update the trace document
-        trace_collection.update_one(
+        table_trace_collection.update_one(
             {"dataset_name": dataset_name, "table_name": table_name},
             update_query,
+            upsert=True
+        )
+
+    def update_dataset_trace(self, dataset_name):
+        """Update the dataset-level trace based on the progress of tables."""
+        client = MongoClient(self.mongo_uri)
+        db = client[self.db_name]
+        table_trace_collection = db[self.table_trace_collection_name]
+        dataset_trace_collection = db[self.dataset_trace_collection_name]
+
+        dataset_trace = dataset_trace_collection.find_one({"dataset_name": dataset_name})
+
+        if not dataset_trace:
+            return
+
+        # Fetch all tables for the dataset
+        tables = list(table_trace_collection.find({"dataset_name": dataset_name}))
+
+        total_tables = len(tables)
+        processed_tables = sum(1 for table in tables if table.get("status") == "COMPLETED")
+
+        total_rows = sum(table.get("total_rows", 0) for table in tables)
+        processed_rows = sum(table.get("processed_rows", 0) for table in tables)
+
+        # Check if dataset processing is completed
+        status = "IN_PROGRESS"
+        if processed_tables == total_tables:
+            status = "COMPLETED"
+
+        elapsed_time = sum(table.get("duration", 0) for table in tables if table.get("duration", 0) > 0)
+        if processed_rows > 0:
+            avg_time_per_row = elapsed_time / processed_rows
+            remaining_rows = total_rows - processed_rows
+            estimated_time_left = remaining_rows * avg_time_per_row
+
+            estimated_seconds = round(estimated_time_left, 2)
+            estimated_hours = round(estimated_seconds / 3600, 2)
+            estimated_days = round(estimated_hours / 24, 2)
+        else:
+            estimated_seconds = estimated_hours = estimated_days = 0
+
+        percentage_complete = round((processed_rows / total_rows) * 100, 2) if total_rows > 0 else 0
+
+        update_fields = {
+            "total_tables": total_tables,
+            "processed_tables": processed_tables,
+            "total_rows": total_rows,
+            "processed_rows": processed_rows,
+            "estimated_seconds": estimated_seconds,
+            "estimated_hours": estimated_hours,
+            "estimated_days": estimated_days,
+            "percentage_complete": percentage_complete,
+            "status": status
+        }
+
+        dataset_trace_collection.update_one(
+            {"dataset_name": dataset_name},
+            {"$set": update_fields},
             upsert=True
         )
 
@@ -408,7 +460,7 @@ class Crocodile:
 
             row_end_time = datetime.now()
             row_duration = (row_end_time - row_start_time).total_seconds()
-            self.update_trace(dataset_name, table_name, increment=1, row_time=row_duration)
+            self.update_table_trace(dataset_name, table_name, increment=1, row_time=row_duration)
 
         except Exception as e:
             logging.error(f"Error processing row with _id {doc_id}: {str(e)}\n{traceback.format_exc()}")
@@ -416,7 +468,7 @@ class Crocodile:
 
     def run(self, dataset_name, table_name):
         start_time = datetime.now()
-        self.update_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
+        self.update_table_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
 
         with mp.Pool(processes=self.max_workers) as pool:
             while True:
@@ -428,7 +480,7 @@ class Crocodile:
 
                 if not todo_docs:
                     end_time = datetime.now()
-                    self.update_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
+                    self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
                     break
 
                 doc_ids = [doc['_id'] for doc in todo_docs]
@@ -437,3 +489,6 @@ class Crocodile:
 
                 logging.info("Processed a batch of documents.")
                 time.sleep(1)
+
+        # After processing the table, update dataset trace
+        self.update_dataset_trace(dataset_name)

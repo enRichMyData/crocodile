@@ -16,6 +16,7 @@ services:
       - ./notebooks:/home/jovyan/work
       - ./crocodile:/home/jovyan/work/crocodile
       - ./tables:/home/jovyan/work/tables
+      - ./training/:/home/jovyan/work/training
     command: start-notebook.sh --NotebookApp.token='' --NotebookApp.password=''
     environment:
       - JUPYTER_ENABLE_LAB=yes

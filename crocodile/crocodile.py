@@ -170,14 +170,14 @@ class Crocodile:
             upsert=True
         )
 
-    def fetch_candidates(self, entity_name, row_text, qid=None):
+    def fetch_candidates(self, entity_name, row_text, fuzzy=False, qid=None):
         """Fetch candidates for a given entity synchronously, with an optional QID parameter."""
         try:
             if not self.entity_retrieval_endpoint or not self.entity_retrieval_token:
                 raise ValueError("Entity retrieval endpoint and token must be provided.")
 
             # Construct the URL
-            url = f"{self.entity_retrieval_endpoint}?name={entity_name}&limit={self.candidate_retrieval_limit}&token={self.entity_retrieval_token}"
+            url = f"{self.entity_retrieval_endpoint}?name={entity_name}&limit={self.candidate_retrieval_limit}&fuzzy={fuzzy}&token={self.entity_retrieval_token}"
             
             # Add QID to the URL if provided
             if qid:
@@ -379,9 +379,7 @@ class Crocodile:
                 if ne_value:
                     correct_qid = correct_qids.get(f"{row_index}-{col_index}", None)  # Access the correct QID using (row_index, col_index)
 
-                    candidates = self.fetch_candidates(ne_value, row_text, correct_qid)
-
-                    print(f"{row_index}-{col_index}", correct_qid, flush=True)
+                    candidates = self.fetch_candidates(ne_value, row_text, qid=correct_qid)
 
                     # Fetch BoW vectors for the candidates
                     candidate_qids = [candidate['id'] for candidate in candidates]

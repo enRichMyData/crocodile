@@ -495,7 +495,8 @@ class Crocodile:
                         "table_name": table_name,
                         "status": "TODO"
                     }, 
-                    {"_id": 1}).limit(self.max_workers))
+                    {"_id": 1}).limit(self.max_workers)
+                )
 
                 if not todo_docs:
                     end_time = datetime.now()

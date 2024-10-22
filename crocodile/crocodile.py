@@ -23,6 +23,7 @@ class Crocodile:
     def __init__(self, mongo_uri="mongodb://mongodb:27017/", db_name="crocodile_db", 
                  table_trace_collection_name="table_trace", dataset_trace_collection_name="dataset_trace", 
                  collection_name="input_data", training_collection_name="training_data", 
+                 error_log_collection_name="error_logs",  
                  max_workers=None, max_candidates=5, max_training_candidates=10, 
                  entity_retrieval_endpoint=None, entity_bow_endpoint=None, entity_retrieval_token=None, 
                  selected_features=None, candidate_retrieval_limit=100):
@@ -33,6 +34,7 @@ class Crocodile:
         self.table_trace_collection_name = table_trace_collection_name
         self.dataset_trace_collection_name = dataset_trace_collection_name
         self.training_collection_name = training_collection_name
+        self.error_log_collection_name = error_log_collection_name  # Assign it here
         self.max_workers = max_workers or mp.cpu_count()
         self.max_candidates = max_candidates
         self.max_training_candidates = max_training_candidates
@@ -45,6 +47,20 @@ class Crocodile:
             "popularity", "ed_score", "jaccard_score", "jaccardNgram_score", "bow_similarity", "desc", "descNgram"
         ]
         logging.basicConfig(filename='crocodile.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    def log_error_to_db(self, error_message, trace):
+        """Log errors to the MongoDB error log collection."""
+        client = MongoClient(self.mongo_uri)
+        db = client[self.db_name]
+        error_log_collection = db[self.error_log_collection_name]
+
+        error_document = {
+            "timestamp": datetime.now(),
+            "error_message": error_message,
+            "traceback": trace
+        }
+
+        error_log_collection.insert_one(error_document)
 
     def update_table_trace(self, dataset_name, table_name, increment=0, status=None, start_time=None, end_time=None, row_time=None):
         """Update the processing trace for a given table."""
@@ -183,7 +199,7 @@ class Crocodile:
             if qid:
                 url += f"&ids={qid}"
 
-            response = requests.get(url, headers={'accept': 'application/json'}, timeout=10)
+            response = requests.get(url, headers={'accept': 'application/json'}, timeout=120)
             response.raise_for_status()
 
             candidates = response.json()
@@ -232,7 +248,7 @@ class Crocodile:
             return filtered_candidates
 
         except Exception as e:
-            logging.error(f"Error occurred while fetching candidates for {entity_name}: {str(e)}\n{traceback.format_exc()}")
+            self.log_error_to_db(f"Error fetching candidates for {entity_name}", traceback.format_exc())
             return []
 
     def map_kind_to_numeric(self, kind):
@@ -366,20 +382,20 @@ class Crocodile:
     def link_entity(self, row, ne_columns, context_columns, correct_qids, dataset_name, table_name, row_index):
         linked_entities = {}
         training_candidates_by_ne_column = {}
-
-        row_values = list(row.values())  # Ensure we access the values in the correct order
         
         # Build the row_text using context columns only (converting to integers since context_columns are strings)
-        row_text = ' '.join([str(row_values[int(col_index)]) for col_index in context_columns if int(col_index) < len(row_values)])
+        row_text = ' '.join([str(row[int(col_index)]) for col_index in context_columns if int(col_index) < len(row)])
 
         for col_index, ner_type in ne_columns.items():
             col_index = str(col_index)  # Column index as a string
-            if int(col_index) < len(row_values):  # Avoid out-of-range access
-                ne_value = row_values[int(col_index)]
+            if int(col_index) < len(row):  # Avoid out-of-range access
+                ne_value = row[int(col_index)]
                 if ne_value:
                     correct_qid = correct_qids.get(f"{row_index}-{col_index}", None)  # Access the correct QID using (row_index, col_index)
 
                     candidates = self.fetch_candidates(ne_value, row_text, qid=correct_qid)
+                    if len(candidates) == 1:
+                        candidates = self.fetch_candidates(ne_value, row_text, fuzzy=True, qid=correct_qid)
 
                     # Fetch BoW vectors for the candidates
                     candidate_qids = [candidate['id'] for candidate in candidates]
@@ -461,7 +477,7 @@ class Crocodile:
             self.update_table_trace(dataset_name, table_name, increment=1, row_time=row_duration)
 
         except Exception as e:
-            logging.error(f"Error processing row with _id {doc_id}: {str(e)}\n{traceback.format_exc()}")
+            self.log_error_to_db(f"Error processing row with _id {doc_id}", traceback.format_exc())
             collection.update_one({'_id': doc_id}, {'$set': {'status': 'TODO'}})
 
     def run(self, dataset_name, table_name):
@@ -474,7 +490,12 @@ class Crocodile:
                 db = client[self.db_name]
                 collection = db[self.collection_name]
 
-                todo_docs = list(collection.find({"status": "TODO"}, {"_id": 1}).limit(self.max_workers))
+                todo_docs = list(collection.find({
+                        "dataset_name": dataset_name,
+                        "table_name": table_name,
+                        "status": "TODO"
+                    }, 
+                    {"_id": 1}).limit(self.max_workers))
 
                 if not todo_docs:
                     end_time = datetime.now()

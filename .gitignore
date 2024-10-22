@@ -166,5 +166,6 @@ mongo_data/
 
 .DS_Store
 *.csv
+*.zip
 training/datasets/
 tables/

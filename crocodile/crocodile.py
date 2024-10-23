@@ -35,7 +35,7 @@ class Crocodile:
         self.dataset_trace_collection_name = dataset_trace_collection_name
         self.training_collection_name = training_collection_name
         self.error_log_collection_name = error_log_collection_name  # Assign it here
-        self.max_workers = max_workers or mp.cpu_count()
+        self.max_workers = max_workers or mp.cpu_count() - 2
         self.max_candidates = max_candidates
         self.max_training_candidates = max_training_candidates
         self.entity_retrieval_endpoint = entity_retrieval_endpoint

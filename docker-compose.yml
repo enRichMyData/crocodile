@@ -8,7 +8,6 @@ services:
       - ./mongo_data:/data/db  # Local directory for MongoDB data
       - ./mongod.conf:/etc/mongod.conf  # Custom MongoDB config
     command: mongod --config /etc/mongod.conf
-    mem_limit: 1G  # Limit MongoDB to 2GB of memory
     restart: always  # Restart policy to always restart the container
 
   jupyter:

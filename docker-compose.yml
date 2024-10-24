@@ -6,7 +6,11 @@ services:
       - "${MONGO_SERVER_PORT}:27017"
     volumes:
       - ./mongo_data:/data/db  # Local directory for MongoDB data
-    
+      - ./mongod.conf:/etc/mongod.conf  # Custom MongoDB config
+    command: mongod --config /etc/mongod.conf
+    mem_limit: 1G  # Limit MongoDB to 2GB of memory
+    restart: always  # Restart policy to always restart the container
+
   jupyter:
     image: roby944/jupyter-minimal-extended:latest
     container_name: crocodile_jupyter
@@ -24,3 +28,4 @@ services:
       - .env  # Load environment variables from .env file
     depends_on:
       - mongodb
+    restart: always  # Restart policy to always restart the container

@@ -1,0 +1,74 @@
+[
+    {
+        "_id": {
+            "$oid": "672b7f61244318e8fb9228cb"
+        },
+        "dataset_name": "test",
+        "table_name": "imdb_top_1000",
+        "header": [
+            "Series_Title",
+            "Released_Year",
+            "Runtime (min)",
+            "Genre",
+            "IMDB_Rating",
+            "Overview",
+            "Meta_score",
+            "Director",
+            "Star1",
+            "No_of_Votes",
+            "Gross"
+        ],
+        "total_rows": 1000,
+        "processed_rows": 1000,
+        "status": "COMPLETED",
+        "start_time": {
+            "$date": "2024-11-06T14:38:25.157+0000"
+        },
+        "estimated_days": 0,
+        "estimated_hours": 0,
+        "estimated_seconds": 0,
+        "last_row_time": 2.134545,
+        "percentage_complete": 100.0,
+        "rows_per_second": 2.8209839443614175,
+        "duration": 355.501127,
+        "end_time": {
+            "$date": "2024-11-06T14:44:20.658+0000"
+        }
+    },
+    {
+        "_id": {
+            "$oid": "672b82ce244318e8fb92314f"
+        },
+        "dataset_name": "test",
+        "table_name": "imdb_top_1000_speed_test1",
+        "header": [
+            "Series_Title",
+            "Released_Year",
+            "Runtime (min)",
+            "Genre",
+            "IMDB_Rating",
+            "Overview",
+            "Meta_score",
+            "Director",
+            "Star1",
+            "No_of_Votes",
+            "Gross"
+        ],
+        "total_rows": 1000,
+        "processed_rows": 1000,
+        "status": "COMPLETED",
+        "start_time": {
+            "$date": "2024-11-06T14:53:02.677+0000"
+        },
+        "estimated_days": 0,
+        "estimated_hours": 0,
+        "estimated_seconds": 0,
+        "last_row_time": 2.021603,
+        "percentage_complete": 100.0,
+        "rows_per_second": 3.411682706289194,
+        "duration": 294.127091,
+        "end_time": {
+            "$date": "2024-11-06T14:57:56.804+0000"
+        }
+    }
+]

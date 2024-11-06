@@ -9,6 +9,8 @@ import base64
 import gzip
 from nltk.tokenize import word_tokenize
 import nltk
+
+
 import pickle
 
 # Download NLTK resources if not already downloaded
@@ -476,9 +478,32 @@ class Crocodile:
             row_duration = (row_end_time - row_start_time).total_seconds()
             self.update_table_trace(dataset_name, table_name, increment=1, row_time=row_duration)
 
+            # Save row duration to trace average speed
+            self.log_processing_speed(dataset_name, table_name)
         except Exception as e:
             self.log_error_to_db(f"Error processing row with _id {doc_id}", traceback.format_exc())
             collection.update_one({'_id': doc_id}, {'$set': {'status': 'TODO'}})
+
+    def log_processing_speed(self, dataset_name, table_name):
+        client = MongoClient(self.mongo_uri)
+        db = client[self.db_name]
+        table_trace_collection = db[self.table_trace_collection_name]
+
+        # Retrieve trace document for the table
+        trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
+        if not trace:
+            return
+
+        processed_rows = trace.get("processed_rows", 1)
+        start_time = trace.get("start_time")
+        elapsed_time = (datetime.now() - start_time).total_seconds()
+
+        # Calculate and update average speed
+        rows_per_second = processed_rows / elapsed_time if elapsed_time > 0 else 0
+        table_trace_collection.update_one(
+            {"dataset_name": dataset_name, "table_name": table_name},
+            {"$set": {"rows_per_second": rows_per_second}}
+        )
 
     def run(self, dataset_name, table_name):
         start_time = datetime.now()

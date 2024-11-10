@@ -9,6 +9,8 @@ import base64
 import gzip
 from nltk.tokenize import word_tokenize
 import nltk
+from collections import OrderedDict
+from multiprocessing import Lock
 
 
 import pickle
@@ -20,6 +22,45 @@ from nltk.corpus import stopwords
 
 # Global stopwords to avoid reinitializing repeatedly
 stop_words = set(stopwords.words('english'))
+
+# Define a shared LRU cache for compressed data
+class LRUCacheCompressed:
+    """In-memory LRU cache with compression and eviction policy, shared across processes."""
+    
+    def __init__(self, max_size):
+        self.cache = OrderedDict()
+        self.max_size = max_size
+        self.cache_lock = Lock()  # Use an instance-specific lock
+
+    def get(self, key):
+        with self.cache_lock:
+            if key in self.cache:
+                # Move accessed item to the end (most recently used)
+                self.cache.move_to_end(key)
+                # Decompress data before returning
+                compressed_data = self.cache[key]
+                decompressed_data = pickle.loads(gzip.decompress(base64.b64decode(compressed_data)))
+                return decompressed_data
+            return None
+
+    def put(self, key, value):
+        with self.cache_lock:
+            # Compress the data before storing it
+            compressed_data = base64.b64encode(gzip.compress(pickle.dumps(value))).decode('utf-8')
+            if key in self.cache:
+                # Update existing item and mark as most recently used
+                self.cache.move_to_end(key)
+            self.cache[key] = compressed_data
+            # Evict the oldest item if the cache exceeds the max size
+            if len(self.cache) > self.max_size:
+                self.cache.popitem(last=False)
+
+# Define compressed LRU caches with descriptive names
+CACHE_MAX_SIZE = 100_000  # Set maximum size for each cache
+
+# Initialize compressed caches
+candidate_cache = LRUCacheCompressed(CACHE_MAX_SIZE)  # For candidate entities
+bow_cache = LRUCacheCompressed(CACHE_MAX_SIZE)        # For BoW vectors
 
 class Crocodile:
     def __init__(self, mongo_uri="mongodb://mongodb:27017/", db_name="crocodile_db", 
@@ -48,21 +89,21 @@ class Crocodile:
             "ntoken_mention", "ntoken_entity", "length_mention", "length_entity",
             "popularity", "ed_score", "jaccard_score", "jaccardNgram_score", "bow_similarity", "desc", "descNgram"
         ]
-        logging.basicConfig(filename='crocodile.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
-    def log_error_to_db(self, error_message, trace):
-        """Log errors to the MongoDB error log collection."""
+    def log_to_db(self, level, message, trace=None):
+        """Log a message to MongoDB with the specified level (e.g., INFO, WARNING, ERROR) and optional traceback."""
         client = MongoClient(self.mongo_uri)
         db = client[self.db_name]
-        error_log_collection = db[self.error_log_collection_name]
+        log_collection = db[self.error_log_collection_name]
 
-        error_document = {
+        log_entry = {
             "timestamp": datetime.now(),
-            "error_message": error_message,
-            "traceback": trace
+            "level": level,
+            "message": message,
+            "traceback": trace  # Include traceback only if provided
         }
 
-        error_log_collection.insert_one(error_document)
+        log_collection.insert_one(log_entry)
 
     def update_table_trace(self, dataset_name, table_name, increment=0, status=None, start_time=None, end_time=None, row_time=None):
         """Update the processing trace for a given table."""
@@ -188,70 +229,91 @@ class Crocodile:
             upsert=True
         )
 
-    def fetch_candidates(self, entity_name, row_text, fuzzy=False, qid=None):
-        """Fetch candidates for a given entity synchronously, with an optional QID parameter."""
-        try:
-            if not self.entity_retrieval_endpoint or not self.entity_retrieval_token:
-                raise ValueError("Entity retrieval endpoint and token must be provided.")
+    def fetch_candidates(self, entity_name, row_text, fuzzy=False, qid=None, max_retries=5, base_timeout=2, backoff_factor=1.5):
+        """
+        Fetch candidates for a given entity with retry, timeout, and compressed caching.
+        """
+        cache_key = f"{entity_name}_{fuzzy}_{qid}"
+        cached_result = candidate_cache.get(cache_key)  # Use the candidate cache
+        if cached_result is not None:
+            return cached_result
 
-            # Construct the URL
-            url = f"{self.entity_retrieval_endpoint}?name={entity_name}&limit={self.candidate_retrieval_limit}&fuzzy={fuzzy}&token={self.entity_retrieval_token}"
-            
-            # Add QID to the URL if provided
-            if qid:
-                url += f"&ids={qid}"
+        # Define URL for the API request
+        url = f"{self.entity_retrieval_endpoint}?name={entity_name}&limit={self.candidate_retrieval_limit}&fuzzy={fuzzy}&token={self.entity_retrieval_token}"
+        if qid:
+            url += f"&ids={qid}"
 
-            response = requests.get(url, headers={'accept': 'application/json'}, timeout=120)
-            response.raise_for_status()
+        for attempt in range(1, max_retries + 1):
+            timeout = base_timeout * (backoff_factor ** (attempt - 1))
+            try:
+                response = requests.get(url, headers={'accept': 'application/json'}, timeout=timeout)
+                response.raise_for_status()  # Check if the request was successful (HTTP 200)
+                candidates = response.json()
 
-            candidates = response.json()
+                # Process candidates and add to compressed cache
+                row_tokens = set(self.tokenize_text(row_text))
+                filtered_candidates = self._process_candidates(candidates, entity_name, row_tokens)
+                
+                # Store in compressed candidate cache and return
+                candidate_cache.put(cache_key, filtered_candidates)
+                return filtered_candidates
 
-            # Tokenize the row_text for desc similarity
-            row_tokens = set(self.tokenize_text(row_text))
+            except requests.exceptions.Timeout:
+                pass  # Retry on timeout errors
+            except requests.exceptions.RequestException as e:
+                self.log_to_db("ERROR", f"Request error for '{entity_name}' with QID '{qid}': {str(e)}")
+                break  # Exit retry loop on non-recoverable errors like 4xx status codes
+            except Exception as e:
+                self.log_to_db("ERROR", f"Unexpected error for '{entity_name}' with QID '{qid}': {traceback.format_exc()}")
+                break  # Stop retrying for unexpected errors
 
-            # Process candidates by adding features and fallback
-            filtered_candidates = []
-            for candidate in candidates:
-                candidate_name = candidate.get('name', '')
-                candidate_description = candidate.get('description', '') if candidate.get('description') is not None else ""
+            time.sleep(1)  # Optional delay between retries
 
-                # Add kind and NERtype with mapping to numerical values
-                kind = candidate.get('kind', 'entity')
-                nertype = candidate.get('NERtype', 'OTHERS')
+        self.log_to_db("ERROR", f"Failed to retrieve candidates for '{entity_name}' with QID '{qid}' after {max_retries} attempts.")
+        return []
+    
+    def _process_candidates(self, candidates, entity_name, row_tokens):
+        """
+        Process retrieved candidates by adding features and formatting.
+        
+        Parameters:
+            candidates (list): List of raw candidate entities.
+            entity_name (str): The name of the entity.
+            row_tokens (set): Tokenized words from row text.
 
-                kind_numeric = self.map_kind_to_numeric(kind)
-                nertype_numeric = self.map_nertype_to_numeric(nertype)
+        Returns:
+            list: List of processed candidates with calculated features.
+        """
+        processed_candidates = []
+        for candidate in candidates:
+            candidate_name = candidate.get('name', '')
+            candidate_description = candidate.get('description', '') or ""
+            kind_numeric = self.map_kind_to_numeric(candidate.get('kind', 'entity'))
+            nertype_numeric = self.map_nertype_to_numeric(candidate.get('NERtype', 'OTHERS'))
 
-                # Group all features in a dictionary called 'features'
-                features = {
-                    'ntoken_mention': round(candidate.get('ntoken_mention', len(entity_name.split())), 4),
-                    'length_mention': round(candidate.get('length_mention', len(entity_name)), 4),
-                    'ntoken_entity': round(candidate.get('ntoken_entity', len(candidate_name.split())), 4),
-                    'length_entity': round(candidate.get('length_entity', len(candidate_name)), 4),
-                    'popularity': round(candidate.get('popularity', 0.0), 4),
-                    'ed_score': round(candidate.get('ed_score', 0.0), 4),
-                    'desc': round(self.calculate_token_overlap(row_tokens, set(self.tokenize_text(candidate_description))), 4),
-                    'descNgram': round(self.calculate_ngram_similarity(row_text, candidate_description), 4),
-                    'bow_similarity': 0.0,
-                    'kind': kind_numeric,
-                    'NERtype': nertype_numeric
-                }
+            features = {
+                'ntoken_mention': round(candidate.get('ntoken_mention', len(entity_name.split())), 4),
+                'length_mention': round(candidate.get('length_mention', len(entity_name)), 4),
+                'ntoken_entity': round(candidate.get('ntoken_entity', len(candidate_name.split())), 4),
+                'length_entity': round(candidate.get('length_entity', len(candidate_name)), 4),
+                'popularity': round(candidate.get('popularity', 0.0), 4),
+                'ed_score': round(candidate.get('ed_score', 0.0), 4),
+                'desc': round(self.calculate_token_overlap(row_tokens, set(self.tokenize_text(candidate_description))), 4),
+                'descNgram': round(self.calculate_ngram_similarity(entity_name, candidate_description), 4),
+                'bow_similarity': 0.0,
+                'kind': kind_numeric,
+                'NERtype': nertype_numeric
+            }
 
-                filtered_candidate = {
-                    'id': candidate.get('id'),
-                    'name': candidate_name,
-                    'description': candidate_description,
-                    'types': candidate.get('types'),
-                    'features': features
-                }
-
-                filtered_candidates.append(filtered_candidate)
-
-            return filtered_candidates
-
-        except Exception as e:
-            self.log_error_to_db(f"Error fetching candidates for {entity_name}", traceback.format_exc())
-            return []
+            processed_candidate = {
+                'id': candidate.get('id'),
+                'name': candidate_name,
+                'description': candidate_description,
+                'types': candidate.get('types'),
+                'features': features
+            }
+            processed_candidates.append(processed_candidate)
+        return processed_candidates
 
     def map_kind_to_numeric(self, kind):
         """Map kind to a numeric value."""
@@ -321,36 +383,45 @@ class Crocodile:
         scored_candidates.sort(key=lambda x: x['score'], reverse=True)
         return scored_candidates
 
-    def get_bow_from_api(self, qids):
-        """Fetch BoW vectors from the API."""
+    def get_bow_from_api(self, row_text, qids):
+        """Fetch BoW vectors from the API with per-QID caching."""
         if not self.entity_bow_endpoint or not self.entity_retrieval_token:
             raise ValueError("BoW API endpoint and token must be provided.")
 
+        # Separate cached and uncached QIDs
+        cached_vectors = {qid: bow_cache.get(qid) for qid in qids if bow_cache.get(qid) is not None}
+        uncached_qids = [qid for qid in qids if qid not in cached_vectors]
+
+        # If all QIDs are cached, return the cached vectors
+        if not uncached_qids:
+            return cached_vectors
+
+        # Fetch uncached QIDs from the API
         url = f'{self.entity_bow_endpoint}?token={self.entity_retrieval_token}'
+        headers = {'accept': 'application/json', 'Content-Type': 'application/json'}
 
         try:
             response = requests.post(
                 url,
-                headers={'accept': 'application/json', 'Content-Type': 'application/json'},
-                json={"json": qids}
+                headers=headers,
+                json={"json": {"text": row_text, "qids": uncached_qids}}
             )
             if response.status_code != 200:
-                logging.error(f"Error fetching BoW vectors: {response.status_code}")
-                return None
+                self.log_to_db("ERROR", f"Error fetching BoW vectors: {response.status_code}")
+                return cached_vectors  # Return only cached results on error
 
+            # Parse and cache the fetched BoW vectors
             bow_data = response.json()
-            decoded_vectors = {}
-            for qid, encoded_data in bow_data.items():
-                compressed_bytes = base64.b64decode(encoded_data)
-                decompressed_vector = pickle.loads(gzip.decompress(compressed_bytes))
-                bow_vector = decompressed_vector
-                decoded_vectors[qid] = bow_vector
+            for qid, bow_info in bow_data.items():
+                bow_cache.put(qid, bow_info)  # Cache the `similarity_score` and `matched_words`
 
-            return decoded_vectors
+            # Combine cached and newly fetched vectors
+            cached_vectors.update(bow_data)
+            return cached_vectors
 
         except Exception as e:
-            logging.error(f"Exception while fetching BoW vectors: {str(e)}")
-            return None
+            self.log_to_db("ERROR", f"Exception while fetching BoW vectors: {str(e)}")
+            return cached_vectors  # Return only cached results on exception
 
     def tokenize_text(self, text):
         """Tokenize and clean the text."""
@@ -360,7 +431,7 @@ class Crocodile:
     def compute_bow_similarity(self, row_text, candidate_vectors):
         """New BoW similarity computation using Jaccard similarity."""
         if candidate_vectors is None:
-            logging.error("No candidate vectors available to compute BoW similarity.")
+            self.log_to_db("ERROR", "No candidate vectors available to compute BoW similarity.")
             return {}
 
         row_tokens = self.tokenize_text(row_text)
@@ -401,18 +472,17 @@ class Crocodile:
 
                     # Fetch BoW vectors for the candidates
                     candidate_qids = [candidate['id'] for candidate in candidates]
-                    candidate_bows = self.get_bow_from_api(candidate_qids)
-
-                    # Compute BoW similarity with the row
-                    bow_similarities, matched_words = self.compute_bow_similarity(row_text, candidate_bows)
+                    candidate_bows = self.get_bow_from_api(row_text, candidate_qids)
 
                     # Map NER type from input to numeric (extended names)
                     ner_type_numeric = self.map_nertype_to_numeric(ner_type)
                     
                     # Add BoW similarity to each candidate's features
                     for candidate in candidates:
-                        candidate['matched_words'] = matched_words.get(candidate['id'], [])
-                        candidate['features']['bow_similarity'] = round(bow_similarities.get(candidate['id'], 0.0), 4)
+                        qid = candidate['id']
+                        bow_data = candidate_bows.get(qid, {})
+                        candidate['matched_words'] = bow_data.get('matched_words', [])
+                        candidate['features']['bow_similarity'] = bow_data.get('similarity_score', 0.0)
                         candidate['features']['column_NERtype'] = ner_type_numeric  # Add the NER type from the column
 
                     # Re-score the candidates after computing BoW similarity
@@ -481,7 +551,7 @@ class Crocodile:
             # Save row duration to trace average speed
             self.log_processing_speed(dataset_name, table_name)
         except Exception as e:
-            self.log_error_to_db(f"Error processing row with _id {doc_id}", traceback.format_exc())
+            self.log_to_db("ERROR", f"Error processing row with _id {doc_id}", traceback.format_exc())
             collection.update_one({'_id': doc_id}, {'$set': {'status': 'TODO'}})
 
     def log_processing_speed(self, dataset_name, table_name):
@@ -532,8 +602,8 @@ class Crocodile:
 
                 pool.starmap(self.process_row, [(doc_id, dataset_name, table_name) for doc_id in doc_ids])
 
-                logging.info("Processed a batch of documents.")
                 time.sleep(1)
 
+        print(f"Processing for table {table_name} in dataset {dataset_name} completed.")
         # After processing the table, update dataset trace
         self.update_dataset_trace(dataset_name)

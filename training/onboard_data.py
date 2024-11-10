@@ -47,6 +47,9 @@ def onboard_data_batch(dataset_name, table_name, df, ne_cols, lit_cols, correct_
 
     documents = []
     for index, row in df.iterrows():
+        # Filter correct QIDs relevant for the current row
+        correct_qids_for_row = {key: value for key, value in correct_qids.items() if key.startswith(f"{index}-")}
+        
         documents.append({
             "dataset_name": dataset_name,
             "table_name": table_name,
@@ -58,7 +61,7 @@ def onboard_data_batch(dataset_name, table_name, df, ne_cols, lit_cols, correct_
                 "UNCLASSIFIED": list(unclassified_columns)
             },
             "context_columns": list(all_columns),
-            "correct_qids": correct_qids,
+            "correct_qids": correct_qids_for_row,
             "status": "TODO"
         })
     

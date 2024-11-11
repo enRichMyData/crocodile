@@ -167,4 +167,4 @@ def process_table_batch(batch_tables_data, batch_table_names):
             onboard_data_batch(dataset, table_name, df, ne_cols_classified, lit_cols_classified, correct_qids)
 
 # Example of running the function with batching and debug mode
-process_tables(datasets, max_tables_at_once=10, debug_n_tables=2)  # Use debug_n_tables to onboard 2 tables per dataset
+process_tables(datasets, max_tables_at_once=10)  # Use debug_n_tables to onboard 2 tables per dataset

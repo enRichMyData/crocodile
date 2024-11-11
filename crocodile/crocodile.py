@@ -2,7 +2,6 @@ import requests
 import time
 from pymongo import MongoClient
 import multiprocessing as mp
-import logging
 import traceback
 from datetime import datetime
 import base64
@@ -11,7 +10,19 @@ from nltk.tokenize import word_tokenize
 import nltk
 from collections import OrderedDict
 from multiprocessing import Lock
+import numpy as np
+import warnings
+import absl.logging
+import tensorflow as tf
 
+# Suppress specific Keras warnings
+warnings.filterwarnings("ignore", category=UserWarning, message="Do not pass an `input_shape`/`input_dim` argument to a layer.*")
+warnings.filterwarnings("ignore", category=UserWarning, message="Compiled the loaded model, but the compiled metrics have yet to be built.*")
+warnings.filterwarnings("ignore", category=UserWarning, message="Error in loading the saved optimizer state.*")
+
+# Set Abseil and TensorFlow logging levels to suppress specific warnings
+tf.get_logger().setLevel('ERROR')
+absl.logging.set_verbosity(absl.logging.ERROR)
 
 import pickle
 
@@ -60,7 +71,6 @@ CACHE_MAX_SIZE = 100_000  # Set maximum size for each cache
 
 # Initialize compressed caches
 candidate_cache = LRUCacheCompressed(CACHE_MAX_SIZE)  # For candidate entities
-bow_cache = LRUCacheCompressed(CACHE_MAX_SIZE)        # For BoW vectors
 
 class Crocodile:
     def __init__(self, mongo_uri="mongodb://mongodb:27017/", db_name="crocodile_db", 
@@ -69,7 +79,8 @@ class Crocodile:
                  error_log_collection_name="error_logs",  
                  max_workers=None, max_candidates=5, max_training_candidates=10, 
                  entity_retrieval_endpoint=None, entity_bow_endpoint=None, entity_retrieval_token=None, 
-                 selected_features=None, candidate_retrieval_limit=100):
+                 selected_features=None, candidate_retrieval_limit=100,
+                 model_path=None):
         
         self.mongo_uri = mongo_uri
         self.db_name = db_name
@@ -87,8 +98,12 @@ class Crocodile:
         self.candidate_retrieval_limit = candidate_retrieval_limit
         self.selected_features = selected_features or [
             "ntoken_mention", "ntoken_entity", "length_mention", "length_entity",
-            "popularity", "ed_score", "jaccard_score", "jaccardNgram_score", "bow_similarity", "desc", "descNgram"
+            "popularity", "ed_score", "jaccard_score", "jaccardNgram_score", "desc", "descNgram", 
+            "bow_similarity", "kind", "NERtype", "column_NERtype"
         ]
+
+        # ML Model-related parameters
+        self.model_path = model_path
     
     def log_to_db(self, level, message, trace=None):
         """Log a message to MongoDB with the specified level (e.g., INFO, WARNING, ERROR) and optional traceback."""
@@ -290,19 +305,22 @@ class Crocodile:
             candidate_description = candidate.get('description', '') or ""
             kind_numeric = self.map_kind_to_numeric(candidate.get('kind', 'entity'))
             nertype_numeric = self.map_nertype_to_numeric(candidate.get('NERtype', 'OTHERS'))
-
+        
             features = {
                 'ntoken_mention': round(candidate.get('ntoken_mention', len(entity_name.split())), 4),
-                'length_mention': round(candidate.get('length_mention', len(entity_name)), 4),
                 'ntoken_entity': round(candidate.get('ntoken_entity', len(candidate_name.split())), 4),
+                'length_mention': round(candidate.get('length_mention', len(entity_name)), 4),
                 'length_entity': round(candidate.get('length_entity', len(candidate_name)), 4),
                 'popularity': round(candidate.get('popularity', 0.0), 4),
                 'ed_score': round(candidate.get('ed_score', 0.0), 4),
+                'jaccard_score': round(candidate.get('jaccard_score', 0.0), 4),
+                'jaccardNgram_score': round(candidate.get('jaccardNgram_score', 0.0), 4),
                 'desc': round(self.calculate_token_overlap(row_tokens, set(self.tokenize_text(candidate_description))), 4),
                 'descNgram': round(self.calculate_ngram_similarity(entity_name, candidate_description), 4),
                 'bow_similarity': 0.0,
                 'kind': kind_numeric,
-                'NERtype': nertype_numeric
+                'NERtype': nertype_numeric,
+                'column_NERtype': None  # Placeholder for column NER type
             }
 
             processed_candidate = {
@@ -358,9 +376,8 @@ class Crocodile:
         tokens = [string[i:i+n] for i in range(len(string)-n+1)]
         return tokens
 
-    def score_candidate(self, ne_value, candidate):
-        ne_value = ne_value if ne_value is not None else ""
-
+    def score_candidate(self, candidate):
+        """Score a candidate entity based on its features."""
         ed_score = candidate['features'].get('ed_score', 0.0)
         desc_score = candidate['features'].get('desc', 0.0)
         desc_ngram_score = candidate['features'].get('descNgram', 0.0)
@@ -373,30 +390,21 @@ class Crocodile:
 
         return candidate
 
-    def score_candidates(self, ne_value, candidates):
+    def rank_with_feature_scoring(self, candidates):
+        """Rank candidates using a feature-based scoring method."""
         scored_candidates = []
         for candidate in candidates:
-            scored_candidate = self.score_candidate(ne_value, candidate)
+            scored_candidate = self.score_candidate(candidate)
             scored_candidates.append(scored_candidate)
-
-        # Sort candidates by score in descending order
-        scored_candidates.sort(key=lambda x: x['score'], reverse=True)
-        return scored_candidates
-
+        
+        # Sort by feature-based score in descending order
+        return sorted(scored_candidates, key=lambda x: x['score'], reverse=True)
+        
     def get_bow_from_api(self, row_text, qids):
-        """Fetch BoW vectors from the API with per-QID caching."""
+        """Fetch BoW vectors directly from the API without caching."""
         if not self.entity_bow_endpoint or not self.entity_retrieval_token:
             raise ValueError("BoW API endpoint and token must be provided.")
 
-        # Separate cached and uncached QIDs
-        cached_vectors = {qid: bow_cache.get(qid) for qid in qids if bow_cache.get(qid) is not None}
-        uncached_qids = [qid for qid in qids if qid not in cached_vectors]
-
-        # If all QIDs are cached, return the cached vectors
-        if not uncached_qids:
-            return cached_vectors
-
-        # Fetch uncached QIDs from the API
         url = f'{self.entity_bow_endpoint}?token={self.entity_retrieval_token}'
         headers = {'accept': 'application/json', 'Content-Type': 'application/json'}
 
@@ -404,24 +412,16 @@ class Crocodile:
             response = requests.post(
                 url,
                 headers=headers,
-                json={"json": {"text": row_text, "qids": uncached_qids}}
+                json={"json": {"text": row_text, "qids": qids}}
             )
             if response.status_code != 200:
                 self.log_to_db("ERROR", f"Error fetching BoW vectors: {response.status_code}")
-                return cached_vectors  # Return only cached results on error
+                return {}
 
-            # Parse and cache the fetched BoW vectors
-            bow_data = response.json()
-            for qid, bow_info in bow_data.items():
-                bow_cache.put(qid, bow_info)  # Cache the `similarity_score` and `matched_words`
-
-            # Combine cached and newly fetched vectors
-            cached_vectors.update(bow_data)
-            return cached_vectors
-
+            return response.json()
         except Exception as e:
             self.log_to_db("ERROR", f"Exception while fetching BoW vectors: {str(e)}")
-            return cached_vectors  # Return only cached results on exception
+            return {}
 
     def tokenize_text(self, text):
         """Tokenize and clean the text."""
@@ -451,11 +451,9 @@ class Crocodile:
 
         return similarity_scores, matched_words
 
-   
     def link_entity(self, row, ne_columns, context_columns, correct_qids, dataset_name, table_name, row_index):
         linked_entities = {}
         training_candidates_by_ne_column = {}
-        
         # Build the row_text using context columns only (converting to integers since context_columns are strings)
         row_text = ' '.join([str(row[int(col_index)]) for col_index in context_columns if int(col_index) < len(row)])
 
@@ -485,9 +483,9 @@ class Crocodile:
                         candidate['features']['bow_similarity'] = bow_data.get('similarity_score', 0.0)
                         candidate['features']['column_NERtype'] = ner_type_numeric  # Add the NER type from the column
 
-                    # Re-score the candidates after computing BoW similarity
-                    ranked_candidates = self.score_candidates(ne_value, candidates)
-
+                    # Rank candidates based on the selected method (ML or traditional)
+                    ranked_candidates = self.rank_with_feature_scoring(candidates)
+                   
                     if correct_qid and correct_qid not in [c['id'] for c in ranked_candidates[:self.max_training_candidates]]:
                         correct_candidate = next((c for c in ranked_candidates if c['id'] == correct_qid), None)
                         if correct_candidate:
@@ -512,12 +510,14 @@ class Crocodile:
             "datasetName": dataset_name,
             "tableName": table_name,
             "idRow": row_index,
-            "candidates": candidates_by_ne_column
+            "candidates": candidates_by_ne_column,
+            "ml_ranked": False
         }
 
         training_collection.insert_one(training_document)
 
     def process_row(self, doc_id, dataset_name, table_name):
+        """Process a single row from the input data."""
         row_start_time = datetime.now()
         try:
             client = MongoClient(self.mongo_uri)
@@ -599,11 +599,127 @@ class Crocodile:
                     break
 
                 doc_ids = [doc['_id'] for doc in todo_docs]
-
-                pool.starmap(self.process_row, [(doc_id, dataset_name, table_name) for doc_id in doc_ids])
+                tasks = [(doc_id, dataset_name, table_name) for doc_id in doc_ids]
+                pool.starmap(self.process_row, tasks)
 
                 time.sleep(1)
 
         print(f"Processing for table {table_name} in dataset {dataset_name} completed.")
         # After processing the table, update dataset trace
         self.update_dataset_trace(dataset_name)
+        self.apply_ml_ranking(dataset_name, table_name)
+
+    def apply_ml_ranking(self, dataset_name, table_name):
+        # Load the ML model once for this task
+        model = self.load_ml_model()
+        client = MongoClient(self.mongo_uri)
+        db = client[self.db_name]
+        training_collection = db[self.training_collection_name]
+        input_collection = db[self.collection_name]
+        table_trace_collection = db[self.table_trace_collection_name]
+
+        batch_size = 1000
+        processed_count = 0
+        total_count = training_collection.count_documents(
+            {"datasetName": dataset_name, "tableName": table_name, "ml_ranked": False}
+        )
+        print(f"Total unprocessed documents: {total_count}")
+
+        while processed_count < total_count:
+            # Retrieve 1000 unprocessed documents at a time from training_data
+            batch_docs = list(training_collection.find(
+                {"datasetName": dataset_name, "tableName": table_name, "ml_ranked": False},
+                limit=batch_size
+            ))
+
+            if not batch_docs:
+                break  # Exit if there are no more unprocessed documents
+
+            # Create a dictionary for direct access by document _id
+            doc_map = {doc["_id"]: doc for doc in batch_docs}
+
+            # Prepare features for the ML model
+            all_candidates = []
+            doc_info = []
+
+            for doc in batch_docs:
+                row_index = doc["idRow"]
+                candidates_by_column = doc["candidates"]
+
+                for col_index, candidates in candidates_by_column.items():
+                    features = [self.extract_features(candidate) for candidate in candidates]
+                    all_candidates.extend(features)
+                    doc_info.extend([(doc["_id"], row_index, col_index, idx) for idx in range(len(candidates))])
+
+            # Predict scores for all candidates in the batch
+            candidate_features = np.array(all_candidates)
+            print(f"Predicting scores for {len(candidate_features)} candidates...")
+            ml_scores = model.predict(candidate_features, batch_size=128)[:, 1]  # Assuming index 1 is the score for the positive class
+            print("Scores predicted.")
+
+            # Map predicted scores back to candidates using doc_map
+            for i, (doc_id, row_index, col_index, candidate_idx) in enumerate(doc_info):
+                candidate = doc_map[doc_id]["candidates"][col_index][candidate_idx]
+                candidate["score"] = float(ml_scores[i])
+
+            # Update ranked candidates in training_data and input_data
+            for doc_id, doc in doc_map.items():
+                row_index = doc["idRow"]
+                updated_candidates_by_column = {}
+
+                for col_index, candidates in doc["candidates"].items():
+                    # Sort candidates by score in descending order
+                    ranked_candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)
+                    updated_candidates_by_column[col_index] = ranked_candidates[:self.max_candidates]
+
+                # Update training_data with ranked candidates and mark as ML-ranked
+                training_collection.update_one(
+                    {"_id": doc_id},
+                    {"$set": {"candidates": doc["candidates"], "ml_ranked": True}}
+                )
+
+                # Update input_data for entity linking results
+                input_collection.update_one(
+                    {"dataset_name": dataset_name, "table_name": table_name, "row_id": row_index},
+                    {"$set": {"el_results": updated_candidates_by_column}}
+                )
+
+            # Update progress
+            processed_count += len(batch_docs)
+            progress = (processed_count / total_count) * 100
+
+            # Log progress in table_trace_collection
+            table_trace_collection.update_one(
+                {"dataset_name": dataset_name, "table_name": table_name},
+                {"$set": {"ml_ranking_progress": round(progress, 2)}}
+            )
+            print(f"ML ranking progress: {progress:.2f}% completed")
+
+        # Finalize status in table_trace_collection
+        table_trace_collection.update_one(
+            {"dataset_name": dataset_name, "table_name": table_name},
+            {"$set": {"ml_ranking_progress": 100.0, "status": "ML_RANKING_COMPLETED"}}
+        )
+        print("ML ranking completed.")
+
+    def extract_features(self, candidate):
+        """
+        Extract only numerical features from a candidate's feature dictionary,
+        excluding any target label.
+
+        Parameters:
+            candidate (dict): A dictionary containing candidate information with features.
+
+        Returns:
+            list: A list of extracted numerical feature values.
+        """
+        numerical_features = [
+            'ntoken_mention', 'length_mention', 'ntoken_entity', 'length_entity',
+            'popularity', 'ed_score', 'desc', 'descNgram', 'bow_similarity',
+            'kind', 'NERtype', 'column_NERtype'
+        ]
+        return [candidate['features'].get(feature, 0.0) for feature in numerical_features]
+
+    def load_ml_model(self):
+        from tensorflow.keras.models import load_model
+        return load_model(self.model_path)

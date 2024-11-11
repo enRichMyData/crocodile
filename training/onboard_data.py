@@ -19,6 +19,7 @@ def ensure_indexes():
     input_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING), ("status", ASCENDING)])  # Ensure fast retrieval of items by status
     input_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)])  # Ensure fast retrieval of items by dataset and table
     table_trace_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True)
+    table_trace_collection.create_index([("dataset_name", ASCENDING)])  # Ensure fast retrieval of items by status
     dataset_trace_collection.create_index([("dataset_name", ASCENDING)], unique=True)
     process_queue.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True)
     process_queue.create_index([("status", ASCENDING)])  # Ensure fast retrieval of items by status

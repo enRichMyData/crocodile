@@ -12,7 +12,7 @@ from crocodile import Crocodile
 client = MongoClient("mongodb://mongodb:27017/")
 db = client["crocodile_db"]
 process_queue = db["process_queue"]
-model_path = "./training/trained_models/neural_ranker.h5"
+model_path = "./trained_models/neural_ranker.h5"
 # Create an instance of Crocodile
 crocodile_instance = Crocodile(
     mongo_uri="mongodb://mongodb:27017/",

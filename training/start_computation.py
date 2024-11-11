@@ -12,7 +12,7 @@ from crocodile import Crocodile
 client = MongoClient("mongodb://mongodb:27017/")
 db = client["crocodile_db"]
 process_queue = db["process_queue"]
-
+model_path = "./training/trained_models/neural_ranker.h5"
 # Create an instance of Crocodile
 crocodile_instance = Crocodile(
     mongo_uri="mongodb://mongodb:27017/",
@@ -23,8 +23,9 @@ crocodile_instance = Crocodile(
     entity_retrieval_endpoint=os.environ["ENTITY_RETRIEVAL_ENDPOINT"],  # Access the entity retrieval endpoint directly from environment variables
     entity_bow_endpoint=os.environ["ENTITY_BOW_ENDPOINT"],  # Access the entity BoW endpoint directly from environment variables
     entity_retrieval_token=os.environ["ENTITY_RETRIEVAL_TOKEN"],  # Access the entity retrieval token directly from environment variables
-    max_workers=100,
-    candidate_retrieval_limit=10
+    max_workers=50,
+    candidate_retrieval_limit=10,
+    model_path=model_path
 )
 
 def process_entity_linking():
@@ -63,7 +64,7 @@ def process_entity_linking():
                     {"$set": {"status": "COMPLETED"}}
                 )
 
-                print(f"Entity linking completed for dataset '{dataset_name}', table '{table_name}'.")
+                #print(f"Entity linking completed for dataset '{dataset_name}', table '{table_name}'.")
 
             except Exception as e:
                 # If there's an error, update the status to FAILED and log the error

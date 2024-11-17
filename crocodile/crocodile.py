@@ -14,6 +14,7 @@ import numpy as np
 import warnings
 import absl.logging
 import tensorflow as tf
+import pandas as pd
 
 # Suppress specific Keras warnings
 warnings.filterwarnings("ignore", category=UserWarning, message="Do not pass an `input_shape`/`input_dim` argument to a layer.*")
@@ -76,7 +77,8 @@ class Crocodile:
     def __init__(self, mongo_uri="mongodb://mongodb:27017/", db_name="crocodile_db", 
                  table_trace_collection_name="table_trace", dataset_trace_collection_name="dataset_trace", 
                  collection_name="input_data", training_collection_name="training_data", 
-                 error_log_collection_name="error_logs",  
+                 error_log_collection_name="error_logs",
+                 timing_collection_name="timing_trace",  
                  max_workers=None, max_candidates=5, max_training_candidates=10, 
                  entity_retrieval_endpoint=None, entity_bow_endpoint=None, entity_retrieval_token=None, 
                  selected_features=None, candidate_retrieval_limit=100,
@@ -88,7 +90,8 @@ class Crocodile:
         self.table_trace_collection_name = table_trace_collection_name
         self.dataset_trace_collection_name = dataset_trace_collection_name
         self.training_collection_name = training_collection_name
-        self.error_log_collection_name = error_log_collection_name  # Assign it here
+        self.error_log_collection_name = error_log_collection_name 
+        self.timing_collection_name = timing_collection_name  
         self.max_workers = max_workers or mp.cpu_count() 
         self.max_candidates = max_candidates
         self.max_training_candidates = max_training_candidates
@@ -105,22 +108,54 @@ class Crocodile:
         # ML Model-related parameters
         self.model_path = model_path
     
+    def set_context(self, dataset_name, table_name):
+        """Set the current dataset and table for the context."""
+        self.current_dataset = dataset_name
+        self.current_table = table_name
+    
+    def log_time(self, operation_name, dataset_name, table_name, start_time, end_time):
+        """Log the timing for an operation."""
+        client = MongoClient(self.mongo_uri)
+        db = client[self.db_name]
+        self.timing_collection = db[self.timing_collection_name]
+        duration = end_time - start_time
+        self.timing_collection.insert_one({
+            "operation_name": operation_name,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "start_time": datetime.fromtimestamp(start_time),
+            "end_time": datetime.fromtimestamp(end_time),
+            "duration_seconds": duration
+        })
+
     def log_to_db(self, level, message, trace=None):
-        """Log a message to MongoDB with the specified level (e.g., INFO, WARNING, ERROR) and optional traceback."""
+        """
+        Log a message to MongoDB with the specified level (e.g., INFO, WARNING, ERROR), optional traceback,
+        and associated dataset/table information.
+
+        Parameters:
+            level (str): Log level (e.g., INFO, WARNING, ERROR).
+            message (str): Log message.
+            trace (str, optional): Optional traceback information.
+            dataset_name (str, optional): The name of the dataset associated with the log.
+            table_name (str, optional): The name of the table associated with the log.
+        """
         client = MongoClient(self.mongo_uri)
         db = client[self.db_name]
         log_collection = db[self.error_log_collection_name]
 
         log_entry = {
+            "dataset_name": self.current_dataset,
+            "table_name": self.current_table,
             "timestamp": datetime.now(),
             "level": level,
             "message": message,
-            "traceback": trace  # Include traceback only if provided
+            "traceback": trace
         }
 
         log_collection.insert_one(log_entry)
 
-    def update_table_trace(self, dataset_name, table_name, increment=0, status=None, start_time=None, end_time=None, row_time=None):
+    def update_table_trace(self, dataset_name, table_name, increment=0, status=None, ml_ranking_status=None, start_time=None, end_time=None, row_time=None):
         """Update the processing trace for a given table."""
         client = MongoClient(self.mongo_uri)
         db = client[self.db_name]
@@ -139,7 +174,10 @@ class Crocodile:
             update_fields["processed_rows"] = increment
 
         if status:
-            update_fields["status"] = status
+            update_fields["status"] = status  # Main task status
+
+        if ml_ranking_status:
+            update_fields["ml_ranking_status"] = ml_ranking_status  # ML ranking status
 
         if start_time:
             update_fields["start_time"] = start_time
@@ -158,6 +196,8 @@ class Crocodile:
             update_fields["estimated_hours"] = 0
             update_fields["estimated_days"] = 0
             update_fields["percentage_complete"] = 100.0
+            if trace.get("status") != "COMPLETED":
+                update_fields["status"] = "COMPLETED"  # Set to COMPLETED only when rows are done
         elif start_time and total_rows > 0 and processed_rows > 0:
             elapsed_time = (datetime.now() - start_time).total_seconds()
             avg_time_per_row = elapsed_time / processed_rows
@@ -186,7 +226,7 @@ class Crocodile:
             upsert=True
         )
 
-    def update_dataset_trace(self, dataset_name):
+    def update_dataset_trace(self, dataset_name, start_time=None, end_time=None):
         """Update the dataset-level trace based on the progress of tables."""
         client = MongoClient(self.mongo_uri)
         db = client[self.db_name]
@@ -194,9 +234,6 @@ class Crocodile:
         dataset_trace_collection = db[self.dataset_trace_collection_name]
 
         dataset_trace = dataset_trace_collection.find_one({"dataset_name": dataset_name})
-
-        if not dataset_trace:
-            return
 
         # Fetch all tables for the dataset
         tables = list(table_trace_collection.find({"dataset_name": dataset_name}))
@@ -211,6 +248,8 @@ class Crocodile:
         status = "IN_PROGRESS"
         if processed_tables == total_tables:
             status = "COMPLETED"
+            if not end_time:
+                end_time = datetime.now()  # Set the end time for dataset processing
 
         elapsed_time = sum(table.get("duration", 0) for table in tables if table.get("duration", 0) > 0)
         if processed_rows > 0:
@@ -235,8 +274,16 @@ class Crocodile:
             "estimated_hours": estimated_hours,
             "estimated_days": estimated_days,
             "percentage_complete": percentage_complete,
-            "status": status
+            "status": status,
         }
+
+        # Update start and end time
+        if start_time:
+            update_fields["start_time"] = start_time
+        if end_time:
+            update_fields["end_time"] = end_time
+            if start_time:
+                update_fields["duration_seconds"] = (end_time - start_time).total_seconds()
 
         dataset_trace_collection.update_one(
             {"dataset_name": dataset_name},
@@ -248,9 +295,12 @@ class Crocodile:
         """
         Fetch candidates for a given entity with retry, timeout, and compressed caching.
         """
-        cache_key = f"{entity_name}_{fuzzy}_{qid}"
+        start_time = time.time()  # Start timing
+        cache_key = f"{entity_name}_{fuzzy}"
         cached_result = candidate_cache.get(cache_key)  # Use the candidate cache
         if cached_result is not None:
+            end_time = time.time()  # End timing
+            self.log_time("Fetch Candidates (from Cache)", self.current_dataset, self.current_table, start_time, end_time)
             return cached_result
 
         # Define URL for the API request
@@ -271,20 +321,24 @@ class Crocodile:
                 
                 # Store in compressed candidate cache and return
                 candidate_cache.put(cache_key, filtered_candidates)
+                
+                end_time = time.time()  # End timing
+                self.log_time("Fetch Candidates (from API)", self.current_dataset, self.current_table, start_time, end_time)
+                
                 return filtered_candidates
 
             except requests.exceptions.Timeout:
                 pass  # Retry on timeout errors
             except requests.exceptions.RequestException as e:
-                self.log_to_db("ERROR", f"Request error for '{entity_name}' with QID '{qid}': {str(e)}")
-                break  # Exit retry loop on non-recoverable errors like 4xx status codes
+                self.log_to_db("ERROR", f"Request error on attempt {attempt} for '{entity_name}' with QID '{qid}': {str(e)}")
             except Exception as e:
-                self.log_to_db("ERROR", f"Unexpected error for '{entity_name}' with QID '{qid}': {traceback.format_exc()}")
-                break  # Stop retrying for unexpected errors
+                self.log_to_db("ERROR", f"Unexpected error on attempt {attempt} for '{entity_name}' with QID '{qid}': {traceback.format_exc()}")
 
             time.sleep(1)  # Optional delay between retries
 
+        end_time = time.time()  # End timing
         self.log_to_db("ERROR", f"Failed to retrieve candidates for '{entity_name}' with QID '{qid}' after {max_retries} attempts.")
+        self.log_time("Fetch Candidates (Failed)", self.current_dataset, self.current_table, start_time, end_time)
         return []
     
     def _process_candidates(self, candidates, entity_name, row_tokens):
@@ -400,28 +454,53 @@ class Crocodile:
         # Sort by feature-based score in descending order
         return sorted(scored_candidates, key=lambda x: x['score'], reverse=True)
         
-    def get_bow_from_api(self, row_text, qids):
-        """Fetch BoW vectors directly from the API without caching."""
-        if not self.entity_bow_endpoint or not self.entity_retrieval_token:
-            raise ValueError("BoW API endpoint and token must be provided.")
+    def get_bow_from_api(self, row_text, qids, max_retries=5, base_timeout=2, backoff_factor=1.5):
+        """
+        Fetch BoW vectors directly from the API with a retry mechanism.
 
+        Parameters:
+            row_text (str): The text for which to compute BoW vectors.
+            qids (list): List of QIDs to query.
+            max_retries (int): Maximum number of retries for the request.
+            base_timeout (float): Initial timeout in seconds.
+            backoff_factor (float): Backoff factor for exponential timeout increase.
+
+        Returns:
+            dict: BoW vectors with QID as key or an empty dictionary on failure.
+        """
+        if not self.entity_bow_endpoint:
+            raise ValueError("BoW API endpoint must be provided.")
+
+        start_time = time.time()  # Start timing
         url = f'{self.entity_bow_endpoint}?token={self.entity_retrieval_token}'
         headers = {'accept': 'application/json', 'Content-Type': 'application/json'}
 
-        try:
-            response = requests.post(
-                url,
-                headers=headers,
-                json={"json": {"text": row_text, "qids": qids}}
-            )
-            if response.status_code != 200:
-                self.log_to_db("ERROR", f"Error fetching BoW vectors: {response.status_code}")
-                return {}
+        for attempt in range(1, max_retries + 1):
+            timeout = base_timeout * (backoff_factor ** (attempt - 1))
+            try:
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    json={"json": {"text": row_text, "qids": qids}},
+                    timeout=timeout
+                )
+                response.raise_for_status()  # Ensure the request was successful
+                end_time = time.time()  # End timing
+                self.log_time("BoW Fetch (from API)", self.current_dataset, self.current_table, start_time, end_time)
+                return response.json()
+            except requests.exceptions.Timeout:
+                print(f"Timeout on attempt {attempt} for BoW request. Retrying...")
+            except requests.exceptions.RequestException as e:
+                print(f"Request error on attempt {attempt} for BoW request: {str(e)}")
+            except Exception as e:
+                print(f"Unexpected error on attempt {attempt} for BoW request: {traceback.format_exc()}")
 
-            return response.json()
-        except Exception as e:
-            self.log_to_db("ERROR", f"Exception while fetching BoW vectors: {str(e)}")
-            return {}
+            time.sleep(1)  # Optional delay between retries
+
+        end_time = time.time()  # End timing
+        self.log_to_db("ERROR", f"Failed to retrieve BoW vectors after {max_retries} attempts.")
+        self.log_time("BoW Fetch (from API)", self.current_dataset, self.current_table, start_time, end_time)
+        return {}
 
     def tokenize_text(self, text):
         """Tokenize and clean the text."""
@@ -461,7 +540,8 @@ class Crocodile:
             col_index = str(col_index)  # Column index as a string
             if int(col_index) < len(row):  # Avoid out-of-range access
                 ne_value = row[int(col_index)]
-                if ne_value:
+                if ne_value and pd.notna(ne_value):
+                    ne_value = str(ne_value)  # Convert to string for consistency
                     correct_qid = correct_qids.get(f"{row_index}-{col_index}", None)  # Access the correct QID using (row_index, col_index)
 
                     candidates = self.fetch_candidates(ne_value, row_text, qid=correct_qid)
@@ -575,41 +655,68 @@ class Crocodile:
             {"$set": {"rows_per_second": rows_per_second}}
         )
 
-    def run(self, dataset_name, table_name):
-        start_time = datetime.now()
-        self.update_table_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
+    def run(self):
+        """
+        Continuously process data from the input_data collection as long as there are tasks available.
+        """
+        client = MongoClient(self.mongo_uri)
+        db = client[self.db_name]
+        collection = db[self.collection_name]  # Collection storing input data
 
         with mp.Pool(processes=self.max_workers) as pool:
             while True:
-                client = MongoClient(self.mongo_uri)
-                db = client[self.db_name]
-                collection = db[self.collection_name]
-
-                todo_docs = list(collection.find({
-                        "dataset_name": dataset_name,
-                        "table_name": table_name,
-                        "status": "TODO"
-                    }, 
-                    {"_id": 1}).limit(self.max_workers)
-                )
+                # Fetch a batch of tasks with status "TODO"
+                todo_docs = list(collection.find(
+                    {"status": "TODO"},
+                    {"_id": 1, "dataset_name": 1, "table_name": 1}
+                ).limit(self.max_workers))
 
                 if not todo_docs:
-                    end_time = datetime.now()
-                    self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
+                    print("No more tasks to process.")
                     break
 
-                doc_ids = [doc['_id'] for doc in todo_docs]
-                tasks = [(doc_id, dataset_name, table_name) for doc_id in doc_ids]
-                pool.starmap(self.process_row, tasks)
+                # Group tasks by dataset and table to maintain trace consistency
+                tasks_by_table = {}
+                for doc in todo_docs:
+                    dataset_table_key = (doc["dataset_name"], doc["table_name"])
+                    tasks_by_table.setdefault(dataset_table_key, []).append(doc["_id"])
 
-                time.sleep(1)
+                for (dataset_name, table_name), doc_ids in tasks_by_table.items():
+                    # Set context for the current dataset and table
+                    self.set_context(dataset_name, table_name)
 
-        print(f"Processing for table {table_name} in dataset {dataset_name} completed.")
-        # After processing the table, update dataset trace
-        self.update_dataset_trace(dataset_name)
-        self.apply_ml_ranking(dataset_name, table_name)
+                    start_time = datetime.now()
+                    self.update_dataset_trace(dataset_name, start_time=start_time)
+                    self.update_table_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
+
+                    # Process rows in parallel
+                    tasks = [(doc_id, dataset_name, table_name) for doc_id in doc_ids]
+                    pool.starmap(self.process_row, tasks)
+
+                    # Update dataset trace and check if table processing is complete
+                    processed_count = collection.count_documents({
+                        "dataset_name": dataset_name,
+                        "table_name": table_name,
+                        "status": "DONE"
+                    })
+                    total_count = collection.count_documents({
+                        "dataset_name": dataset_name,
+                        "table_name": table_name
+                    })
+
+                    if processed_count == total_count:
+                        end_time = datetime.now()
+                        self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
+                        self.apply_ml_ranking(dataset_name, table_name)
+
+                    # Regularly update dataset trace
+                    self.update_dataset_trace(dataset_name)
+                    time.sleep(1)
+
+            print("All tasks have been processed.")
 
     def apply_ml_ranking(self, dataset_name, table_name):
+        """Perform ML-based ranking on candidates and update their scores."""
         # Load the ML model once for this task
         model = self.load_ml_model()
         client = MongoClient(self.mongo_uri)
@@ -689,16 +796,16 @@ class Crocodile:
             progress = (processed_count / total_count) * 100
 
             # Log progress in table_trace_collection
-            table_trace_collection.update_one(
-                {"dataset_name": dataset_name, "table_name": table_name},
-                {"$set": {"ml_ranking_progress": round(progress, 2)}}
+            self.update_table_trace(
+                dataset_name, table_name,
+                ml_ranking_status=f"{progress:.2f}%"
             )
             print(f"ML ranking progress: {progress:.2f}% completed")
 
-        # Finalize status in table_trace_collection
-        table_trace_collection.update_one(
-            {"dataset_name": dataset_name, "table_name": table_name},
-            {"$set": {"ml_ranking_progress": 100.0, "status": "ML_RANKING_COMPLETED"}}
+        # Finalize ML ranking status
+        self.update_table_trace(
+            dataset_name, table_name,
+            ml_ranking_status="ML_RANKING_COMPLETED"
         )
         print("ML ranking completed.")
 

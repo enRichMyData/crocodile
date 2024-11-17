@@ -26,7 +26,7 @@ def ensure_indexes():
 
 ensure_indexes()
 
-datasets = ["Round1_T2D", "Round3_2019", "2T_2020", "Round4_2020", "HardTablesR2", "HardTablesR3"]
+datasets = ["Round4_2020"]
 
 # Initialize the column classifier
 classifier = ColumnClassifier(model_type='fast')
@@ -95,12 +95,16 @@ def onboard_data_batch(dataset_name, table_name, df, ne_cols, lit_cols, correct_
     )
 
 # Main processing loop for onboarding datasets with debug mode
-def process_tables(datasets, max_tables_at_once=5, debug_n_tables=None):
+def process_tables(datasets, max_tables_at_once=5, debug_n_tables=None, debug_tables=None):
     for dataset in datasets:
         cea_gt = pd.read_csv(f"./Datasets/{dataset}/gt/cea.csv", header=None)
         tables = os.listdir(f"./Datasets/{dataset}/tables")
-        if debug_n_tables:
-            tables = tables[:debug_n_tables]  # Limit the number of tables for debugging
+        if debug_tables:
+            # Use only the specified tables for debugging
+            tables = [f"{table}.csv" for table in debug_tables if f"{table}.csv" in tables]
+        elif debug_n_tables:
+            # Limit the number of tables for debugging
+            tables = tables[:debug_n_tables]
         batch_tables_data = []
         batch_table_names = []
 

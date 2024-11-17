@@ -1,7 +1,6 @@
 from pymongo import MongoClient
 import sys
 import os
-import time
 from tqdm import tqdm  # Import tqdm for progress bar
 
 # Adding the level above to sys.path for crocodile module visibility
@@ -11,8 +10,9 @@ from crocodile import Crocodile
 # MongoDB connection
 client = MongoClient("mongodb://mongodb:27017/")
 db = client["crocodile_db"]
-process_queue = db["process_queue"]
-model_path = "./training/trained_models/neural_ranker.h5"
+input_data = db["input_data"]
+model_path = "./trained_models/neural_ranker.h5"
+
 # Create an instance of Crocodile
 crocodile_instance = Crocodile(
     mongo_uri="mongodb://mongodb:27017/",
@@ -23,60 +23,37 @@ crocodile_instance = Crocodile(
     entity_retrieval_endpoint=os.environ["ENTITY_RETRIEVAL_ENDPOINT"],  # Access the entity retrieval endpoint directly from environment variables
     entity_bow_endpoint=os.environ["ENTITY_BOW_ENDPOINT"],  # Access the entity BoW endpoint directly from environment variables
     entity_retrieval_token=os.environ["ENTITY_RETRIEVAL_TOKEN"],  # Access the entity retrieval token directly from environment variables
-    max_workers=50,
+    max_workers=32,
     candidate_retrieval_limit=10,
     model_path=model_path
 )
 
 def process_entity_linking():
-    """Fetch tasks from the process queue and run entity linking for each table."""
-    # Count the total number of tasks that are in QUEUED status
-    total_tasks = process_queue.count_documents({"status": "QUEUED"})
-    
-    if total_tasks == 0:
-        print("No tasks in the queue!")
-        return
+    """Run the entity linking process continuously as long as there are tasks in input_data."""
+    while True:
+        # Count the total number of rows in input_data that need processing
+        total_rows = input_data.count_documents({"status": "TODO"})
 
-    with tqdm(total=total_tasks, desc="Processing tasks") as pbar:
-        while True:
-            # Fetch the first QUEUED item from the process queue
-            task = process_queue.find_one_and_update(
-                {"status": "QUEUED"},
-                {"$set": {"status": "PROCESSING"}},  # Update the status to PROCESSING
-                return_document=True
-            )
+        if total_rows == 0:
+            print("No more rows to process in input_data!")
+            break
 
-            if not task:
-                print("No more tasks in the queue!")
-                break
+        print(f"Found {total_rows} rows in input_data to process. Starting computation...")
 
-            dataset_name = task["dataset_name"]
-            table_name = task["table_name"]
-
+        with tqdm(total=total_rows, desc="Processing input data") as pbar:
             try:
-                # Run the entity linking process using Crocodile
-                print(f"Starting entity linking for dataset '{dataset_name}', table '{table_name}'...")
-                crocodile_instance.run(dataset_name=dataset_name, table_name=table_name)
-
-                # Update the task status to COMPLETED
-                process_queue.update_one(
-                    {"dataset_name": dataset_name, "table_name": table_name},
-                    {"$set": {"status": "COMPLETED"}}
-                )
-
-                #print(f"Entity linking completed for dataset '{dataset_name}', table '{table_name}'.")
-
+                # Run the Crocodile instance to process rows continuously
+                crocodile_instance.run()
             except Exception as e:
-                # If there's an error, update the status to FAILED and log the error
-                process_queue.update_one(
-                    {"dataset_name": dataset_name, "table_name": table_name},
-                    {"$set": {"status": "FAILED"}}
-                )
-                print(f"Error processing dataset '{dataset_name}', table '{table_name}': {str(e)}")
+                print(f"Error during entity linking process: {str(e)}")
+                continue
 
+            finally:
+                # Update the progress bar based on completed rows
+                completed_rows = input_data.count_documents({"status": "DONE"})
+                pbar.update(completed_rows - pbar.n)  # Adjust progress based on actual completion
 
-            # Update the progress bar
-            pbar.update(1)
+        print("Finished processing input_data.")
 
 if __name__ == "__main__":
     process_entity_linking()

@@ -16,6 +16,8 @@ import absl.logging
 import tensorflow as tf
 import pandas as pd
 from tqdm import tqdm
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 
 # Suppress specific Keras warnings
 warnings.filterwarnings("ignore", category=UserWarning, message="Do not pass an `input_shape`/`input_dim` argument to a layer.*")
@@ -121,6 +123,21 @@ class Crocodile:
 
         # ML Model-related parameters
         self.model_path = model_path
+        self.session = self._initialize_session()
+
+    def _initialize_session(self):
+        """Initialize a session with retries for robust HTTP handling."""
+        session = requests.Session()
+        retries = Retry(
+            total=5,  # Total number of retries
+            backoff_factor=1,  # Backoff factor for retries (e.g., 1, 2, 4 seconds)
+            status_forcelist=[429, 500, 502, 503, 504],  # Retry on these HTTP status codes
+            allowed_methods=["GET", "POST"],  # Retry for safe methods
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
     
     def get_db(self):
         """
@@ -308,9 +325,9 @@ class Crocodile:
             upsert=True
         )
 
-    def fetch_candidates(self, entity_name, row_text, fuzzy=False, qid=None, max_retries=5, base_timeout=2, backoff_factor=1.5):
+    def fetch_candidates(self, entity_name, row_text, fuzzy=False, qid=None):
         """
-        Fetch candidates for a given entity with retry, timeout, and compressed caching.
+        Fetch candidates for a given entity with retry and session handling.
         """
         start_time = time.time()  # Start timing
         cache_key = f"{entity_name}_{fuzzy}"
@@ -325,38 +342,29 @@ class Crocodile:
         if qid:
             url += f"&ids={qid}"
 
-        for attempt in range(1, max_retries + 1):
-            timeout = base_timeout * (backoff_factor ** (attempt - 1))
-            try:
-                response = requests.get(url, headers={'accept': 'application/json'}, timeout=timeout)
-                response.raise_for_status()  # Check if the request was successful (HTTP 200)
-                candidates = response.json()
+        try:
+            response = self.session.get(url, headers={'accept': 'application/json'})
+            response.raise_for_status()  # Check if the request was successful
+            candidates = response.json()
 
-                # Process candidates and add to compressed cache
-                row_tokens = set(self.tokenize_text(row_text))
-                filtered_candidates = self._process_candidates(candidates, entity_name, row_tokens)
-                
-                # Store in compressed candidate cache and return
-                candidate_cache.put(cache_key, filtered_candidates)
-                
-                end_time = time.time()  # End timing
-                self.log_time("Fetch Candidates (from API)", self.current_dataset, self.current_table, start_time, end_time)
-                
-                return filtered_candidates
+            # Process candidates and add to compressed cache
+            row_tokens = set(self.tokenize_text(row_text))
+            filtered_candidates = self._process_candidates(candidates, entity_name, row_tokens)
 
-            except requests.exceptions.Timeout:
-                pass  # Retry on timeout errors
-            except requests.exceptions.RequestException as e:
-                self.log_to_db("ERROR", f"Request error on attempt {attempt} for '{entity_name}' with QID '{qid}': {str(e)}")
-            except Exception as e:
-                self.log_to_db("ERROR", f"Unexpected error on attempt {attempt} for '{entity_name}' with QID '{qid}': {traceback.format_exc()}")
+            # Store in compressed candidate cache and return
+            candidate_cache.put(cache_key, filtered_candidates)
+            
+            end_time = time.time()  # End timing
+            self.log_time("Fetch Candidates (from API)", self.current_dataset, self.current_table, start_time, end_time)
+            
+            return filtered_candidates
 
-            time.sleep(1)  # Optional delay between retries
-
-        end_time = time.time()  # End timing
-        self.log_to_db("ERROR", f"Failed to retrieve candidates for '{entity_name}' with QID '{qid}' after {max_retries} attempts.")
-        self.log_time("Fetch Candidates (Failed)", self.current_dataset, self.current_table, start_time, end_time)
-        return []
+        except requests.exceptions.RequestException as e:
+            self.log_to_db("ERROR", f"Request error for '{entity_name}' with QID '{qid}': {str(e)}")
+            return []
+        except Exception as e:
+            self.log_to_db("ERROR", f"Unexpected error for '{entity_name}' with QID '{qid}': {traceback.format_exc()}")
+            return []
     
     def _process_candidates(self, candidates, entity_name, row_tokens):
         """
@@ -471,16 +479,13 @@ class Crocodile:
         # Sort by feature-based score in descending order
         return sorted(scored_candidates, key=lambda x: x['score'], reverse=True)
         
-    def get_bow_from_api(self, row_text, qids, max_retries=5, base_timeout=2, backoff_factor=1.5):
+    def get_bow_from_api(self, row_text, qids):
         """
-        Fetch BoW vectors directly from the API with a retry mechanism.
+        Fetch BoW vectors directly from the API.
 
         Parameters:
             row_text (str): The text for which to compute BoW vectors.
             qids (list): List of QIDs to query.
-            max_retries (int): Maximum number of retries for the request.
-            base_timeout (float): Initial timeout in seconds.
-            backoff_factor (float): Backoff factor for exponential timeout increase.
 
         Returns:
             dict: BoW vectors with QID as key or an empty dictionary on failure.
@@ -491,33 +496,26 @@ class Crocodile:
         start_time = time.time()  # Start timing
         url = f'{self.entity_bow_endpoint}?token={self.entity_retrieval_token}'
         headers = {'accept': 'application/json', 'Content-Type': 'application/json'}
+        payload = {"json": {"text": row_text, "qids": qids}}
 
-        for attempt in range(1, max_retries + 1):
-            timeout = base_timeout * (backoff_factor ** (attempt - 1))
-            try:
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    json={"json": {"text": row_text, "qids": qids}},
-                    timeout=timeout
-                )
-                response.raise_for_status()  # Ensure the request was successful
-                end_time = time.time()  # End timing
-                self.log_time("BoW Fetch (from API)", self.current_dataset, self.current_table, start_time, end_time)
-                return response.json()
-            except requests.exceptions.Timeout:
-                print(f"Timeout on attempt {attempt} for BoW request. Retrying...")
-            except requests.exceptions.RequestException as e:
-                print(f"Request error on attempt {attempt} for BoW request: {str(e)}")
-            except Exception as e:
-                print(f"Unexpected error on attempt {attempt} for BoW request: {traceback.format_exc()}")
-
-            time.sleep(1)  # Optional delay between retries
-
-        end_time = time.time()  # End timing
-        self.log_to_db("ERROR", f"Failed to retrieve BoW vectors after {max_retries} attempts.")
-        self.log_time("BoW Fetch (from API)", self.current_dataset, self.current_table, start_time, end_time)
-        return {}
+        try:
+            response = self.session.post(
+                url,
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()  # Ensure the request was successful
+            end_time = time.time()  # End timing
+            self.log_time("BoW Fetch (from API)", self.current_dataset, self.current_table, start_time, end_time)
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            # Log any request-related errors
+            self.log_to_db("ERROR", f"Request error for BoW API: {str(e)}")
+            return {}
+        except Exception as e:
+            # Catch all other exceptions and log them
+            self.log_to_db("ERROR", f"Unexpected error for BoW API: {traceback.format_exc()}")
+            return {}
 
     def tokenize_text(self, text):
         """Tokenize and clean the text."""

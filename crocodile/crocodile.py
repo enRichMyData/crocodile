@@ -15,6 +15,7 @@ import warnings
 import absl.logging
 import tensorflow as tf
 import pandas as pd
+from tqdm import tqdm
 
 # Suppress specific Keras warnings
 warnings.filterwarnings("ignore", category=UserWarning, message="Do not pass an `input_shape`/`input_dim` argument to a layer.*")
@@ -72,6 +73,19 @@ CACHE_MAX_SIZE = 100_000  # Set maximum size for each cache
 
 # Initialize compressed caches
 candidate_cache = LRUCacheCompressed(CACHE_MAX_SIZE)  # For candidate entities
+ 
+# Dictionary to store client instances per process
+_process_clients = {}
+
+def get_mongo_client(uri="mongodb://localhost:27017/"):
+    """
+    Get or create a MongoDB client specific to the current process.
+    """
+    pid = mp.current_process().pid  # Identify the current process
+    if pid not in _process_clients:
+        # Create a new client for the current process
+        _process_clients[pid] = MongoClient(uri, maxPoolSize=10)  # Adjust pool size as needed
+    return _process_clients[pid]
 
 class Crocodile:
     def __init__(self, mongo_uri="mongodb://mongodb:27017/", db_name="crocodile_db", 
@@ -108,6 +122,13 @@ class Crocodile:
         # ML Model-related parameters
         self.model_path = model_path
     
+    def get_db(self):
+        """
+        Get the database instance using the process-local MongoClient.
+        """
+        client = get_mongo_client(self.mongo_uri)
+        return client[self.db_name]
+    
     def set_context(self, dataset_name, table_name):
         """Set the current dataset and table for the context."""
         self.current_dataset = dataset_name
@@ -115,8 +136,7 @@ class Crocodile:
     
     def log_time(self, operation_name, dataset_name, table_name, start_time, end_time):
         """Log the timing for an operation."""
-        client = MongoClient(self.mongo_uri)
-        db = client[self.db_name]
+        db = self.get_db()
         self.timing_collection = db[self.timing_collection_name]
         duration = end_time - start_time
         self.timing_collection.insert_one({
@@ -140,8 +160,7 @@ class Crocodile:
             dataset_name (str, optional): The name of the dataset associated with the log.
             table_name (str, optional): The name of the table associated with the log.
         """
-        client = MongoClient(self.mongo_uri)
-        db = client[self.db_name]
+        db = self.get_db()
         log_collection = db[self.error_log_collection_name]
 
         log_entry = {
@@ -157,8 +176,7 @@ class Crocodile:
 
     def update_table_trace(self, dataset_name, table_name, increment=0, status=None, ml_ranking_status=None, start_time=None, end_time=None, row_time=None):
         """Update the processing trace for a given table."""
-        client = MongoClient(self.mongo_uri)
-        db = client[self.db_name]
+        db = self.get_db()
         table_trace_collection = db[self.table_trace_collection_name]
 
         trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
@@ -228,8 +246,7 @@ class Crocodile:
 
     def update_dataset_trace(self, dataset_name, start_time=None, end_time=None):
         """Update the dataset-level trace based on the progress of tables."""
-        client = MongoClient(self.mongo_uri)
-        db = client[self.db_name]
+        db = self.get_db()
         table_trace_collection = db[self.table_trace_collection_name]
         dataset_trace_collection = db[self.dataset_trace_collection_name]
 
@@ -582,8 +599,7 @@ class Crocodile:
 
     def save_candidates_for_training(self, candidates_by_ne_column, dataset_name, table_name, row_index):
         """Save all candidates for a row into the training data."""
-        client = MongoClient(self.mongo_uri)
-        db = client[self.db_name]
+        db = self.get_db()
         training_collection = db[self.training_collection_name]
 
         training_document = {
@@ -600,8 +616,7 @@ class Crocodile:
         """Process a single row from the input data."""
         row_start_time = datetime.now()
         try:
-            client = MongoClient(self.mongo_uri)
-            db = client[self.db_name]
+            db = self.get_db()
             collection = db[self.collection_name]
 
             doc = collection.find_one_and_update(
@@ -635,8 +650,8 @@ class Crocodile:
             collection.update_one({'_id': doc_id}, {'$set': {'status': 'TODO'}})
 
     def log_processing_speed(self, dataset_name, table_name):
-        client = MongoClient(self.mongo_uri)
-        db = client[self.db_name]
+        """Log the processing speed for a table."""
+        db = self.get_db()
         table_trace_collection = db[self.table_trace_collection_name]
 
         # Retrieve trace document for the table
@@ -659,68 +674,76 @@ class Crocodile:
         """
         Continuously process data from the input_data collection as long as there are tasks available.
         """
-        client = MongoClient(self.mongo_uri)
-        db = client[self.db_name]
+        db = self.get_db()
         collection = db[self.collection_name]  # Collection storing input data
 
-        with mp.Pool(processes=self.max_workers) as pool:
-            while True:
-                # Fetch a batch of tasks with status "TODO"
-                todo_docs = list(collection.find(
-                    {"status": "TODO"},
-                    {"_id": 1, "dataset_name": 1, "table_name": 1}
-                ).limit(self.max_workers))
+        total_rows = collection.count_documents({"status": "TODO"})
+        if total_rows == 0:
+            print("No more tasks to process.")
+            return
 
-                if not todo_docs:
-                    print("No more tasks to process.")
-                    break
+        print(f"Found {total_rows} tasks to process.")
 
-                # Group tasks by dataset and table to maintain trace consistency
-                tasks_by_table = {}
-                for doc in todo_docs:
-                    dataset_table_key = (doc["dataset_name"], doc["table_name"])
-                    tasks_by_table.setdefault(dataset_table_key, []).append(doc["_id"])
+        with tqdm(total=total_rows, desc="Processing tasks", unit="rows") as pbar:
+            with mp.Pool(processes=self.max_workers) as pool:
+                while True:
+                    # Fetch a batch of tasks with status "TODO"
+                    todo_docs = list(collection.find(
+                        {"status": "TODO"},
+                        {"_id": 1, "dataset_name": 1, "table_name": 1}
+                    ).limit(self.max_workers))
 
-                for (dataset_name, table_name), doc_ids in tasks_by_table.items():
-                    # Set context for the current dataset and table
-                    self.set_context(dataset_name, table_name)
+                    if not todo_docs:
+                        print("No more tasks to process.")
+                        break
 
-                    start_time = datetime.now()
-                    self.update_dataset_trace(dataset_name, start_time=start_time)
-                    self.update_table_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
+                    # Group tasks by dataset and table to maintain trace consistency
+                    tasks_by_table = {}
+                    for doc in todo_docs:
+                        dataset_table_key = (doc["dataset_name"], doc["table_name"])
+                        tasks_by_table.setdefault(dataset_table_key, []).append(doc["_id"])
 
-                    # Process rows in parallel
-                    tasks = [(doc_id, dataset_name, table_name) for doc_id in doc_ids]
-                    pool.starmap(self.process_row, tasks)
+                    for (dataset_name, table_name), doc_ids in tasks_by_table.items():
+                        # Set context for the current dataset and table
+                        self.set_context(dataset_name, table_name)
 
-                    # Update dataset trace and check if table processing is complete
-                    processed_count = collection.count_documents({
-                        "dataset_name": dataset_name,
-                        "table_name": table_name,
-                        "status": "DONE"
-                    })
-                    total_count = collection.count_documents({
-                        "dataset_name": dataset_name,
-                        "table_name": table_name
-                    })
+                        start_time = datetime.now()
+                        self.update_dataset_trace(dataset_name, start_time=start_time)
+                        self.update_table_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
 
-                    if processed_count == total_count:
-                        end_time = datetime.now()
-                        self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
-                        self.apply_ml_ranking(dataset_name, table_name)
+                        # Process rows in parallel
+                        tasks = [(doc_id, dataset_name, table_name) for doc_id in doc_ids]
+                        pool.starmap(self.process_row, tasks)
 
-                    # Regularly update dataset trace
-                    self.update_dataset_trace(dataset_name)
-                    time.sleep(1)
+                        # Update progress bar after processing
+                        pbar.update(len(doc_ids))
 
-            print("All tasks have been processed.")
+                        # Update dataset trace and check if table processing is complete
+                        processed_count = collection.count_documents({
+                            "dataset_name": dataset_name,
+                            "table_name": table_name,
+                            "status": "DONE"
+                        })
+                        total_count = collection.count_documents({
+                            "dataset_name": dataset_name,
+                            "table_name": table_name
+                        })
+
+                        if processed_count == total_count:
+                            end_time = datetime.now()
+                            self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
+                            self.apply_ml_ranking(dataset_name, table_name)
+
+                        # Regularly update dataset trace
+                        self.update_dataset_trace(dataset_name)
+
+        print("All tasks have been processed.")
 
     def apply_ml_ranking(self, dataset_name, table_name):
         """Perform ML-based ranking on candidates and update their scores."""
         # Load the ML model once for this task
         model = self.load_ml_model()
-        client = MongoClient(self.mongo_uri)
-        db = client[self.db_name]
+        db = self.get_db()
         training_collection = db[self.training_collection_name]
         input_collection = db[self.collection_name]
         table_trace_collection = db[self.table_trace_collection_name]
@@ -757,6 +780,10 @@ class Crocodile:
                     features = [self.extract_features(candidate) for candidate in candidates]
                     all_candidates.extend(features)
                     doc_info.extend([(doc["_id"], row_index, col_index, idx) for idx in range(len(candidates))])
+            
+            if len(all_candidates) == 0:
+                print(f"No candidates to predict for dataset {dataset_name}, table {table_name}. Skipping...")
+                return  # Safely exit this batch if no candidates are found
 
             # Predict scores for all candidates in the batch
             candidate_features = np.array(all_candidates)

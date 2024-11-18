@@ -29,31 +29,13 @@ crocodile_instance = Crocodile(
 )
 
 def process_entity_linking():
-    """Run the entity linking process continuously as long as there are tasks in input_data."""
-    while True:
-        # Count the total number of rows in input_data that need processing
-        total_rows = input_data.count_documents({"status": "TODO"})
-
-        if total_rows == 0:
-            print("No more rows to process in input_data!")
-            break
-
-        print(f"Found {total_rows} rows in input_data to process. Starting computation...")
-
-        with tqdm(total=total_rows, desc="Processing input data") as pbar:
-            try:
-                # Run the Crocodile instance to process rows continuously
-                crocodile_instance.run()
-            except Exception as e:
-                print(f"Error during entity linking process: {str(e)}")
-                continue
-
-            finally:
-                # Update the progress bar based on completed rows
-                completed_rows = input_data.count_documents({"status": "DONE"})
-                pbar.update(completed_rows - pbar.n)  # Adjust progress based on actual completion
-
-        print("Finished processing input_data.")
+    try:
+        # Run the Crocodile instance to process rows continuously
+        crocodile_instance.run()
+    except Exception as e:
+        print(f"Error during entity linking process: {str(e)}")
+        
+    print("Finished processing input_data.")
 
 if __name__ == "__main__":
     process_entity_linking()

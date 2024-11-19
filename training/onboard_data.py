@@ -12,6 +12,7 @@ table_trace_collection = db["table_trace"]
 dataset_trace_collection = db["dataset_trace"]
 process_queue = db["process_queue"]
 training_data_collection = db["training_data"]
+timing_trace_collection = db["timing_trace"]
 
 # Ensure indexes for uniqueness and performance
 def ensure_indexes():
@@ -22,6 +23,7 @@ def ensure_indexes():
     table_trace_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True)
     dataset_trace_collection.create_index([("dataset_name", ASCENDING)], unique=True)
     training_data_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING), ("ml_ranked", ASCENDING)])  # Ensure fast retrieval of items by dataset, table, and ml_ranked
+    timing_trace_collection.create_index([("duration_seconds", ASCENDING)])  # Ensure fast retrieval of items by duration_seconds
 
 ensure_indexes()
 

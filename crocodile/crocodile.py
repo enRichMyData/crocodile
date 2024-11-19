@@ -124,6 +124,170 @@ class Crocodile:
         # ML Model-related parameters
         self.model_path = model_path
         self.session = self._initialize_session()
+        self.current_dataset = None
+        self.current_table = None
+    
+    def time_mongo_operation(self, operation_name, query_function, *args, **kwargs):
+        """
+        Time a MongoDB operation and log its duration in the timing trace collection.
+
+        Parameters:
+            operation_name (str): The name of the operation being performed.
+            query_function (callable): The MongoDB query function to execute.
+            *args: Positional arguments for the query function.
+            **kwargs: Keyword arguments for the query function.
+
+        Returns:
+            The result of the query function.
+        """
+        start_time = time.time()
+        db = self.get_db()
+        timing_trace_collection = db[self.timing_collection_name]
+
+        try:
+            result = query_function(*args, **kwargs)  # Execute the MongoDB operation
+        except Exception as e:
+            # Capture and log exception details
+            end_time = time.time()  # Even in failure, log the time
+            duration = end_time - start_time
+            timing_trace_collection.insert_one({
+                "operation_name": operation_name,
+                "start_time": datetime.fromtimestamp(start_time),
+                "end_time": datetime.fromtimestamp(end_time),
+                "duration_seconds": duration,
+                "args": str(args),  # Log arguments for debugging
+                "kwargs": str(kwargs),
+                "error": str(e),
+                "status": "FAILED",
+            })
+            # Re-raise the exception after logging
+            raise
+        else:
+            # Log successful operation timing
+            end_time = time.time()
+            duration = end_time - start_time
+            timing_trace_collection.insert_one({
+                "operation_name": operation_name,
+                "start_time": datetime.fromtimestamp(start_time),
+                "end_time": datetime.fromtimestamp(end_time),
+                "duration_seconds": duration,
+                "args": str(args),  # Optional: Log arguments for debugging
+                "kwargs": str(kwargs),
+                "status": "SUCCESS",
+            })
+            return result
+
+    def update_document(self, collection, query, update, upsert=False):
+        """
+        Wrapper for MongoDB update_one query with timing logging.
+        """
+        operation_name = f"update_document:{collection.name}"
+        return self.time_mongo_operation(
+            operation_name,
+            collection.update_one,
+            query,
+            update,
+            upsert=upsert
+        )
+
+    def update_documents(self, collection, query, update, upsert=False):
+        """
+        Wrapper for MongoDB update_many query with timing logging.
+        """
+        operation_name = f"update_documents:{collection.name}"
+        return self.time_mongo_operation(
+            operation_name,
+            collection.update_many,
+            query,
+            update,
+            upsert=upsert
+        )
+
+    def find_documents(self, collection, query, projection=None, limit=None):
+        """
+        Wrapper for MongoDB find query with timing logging.
+        """
+        operation_name = f"find_documents:{collection.name}"
+
+        # Inner function to handle the actual query
+        def query_function(query, projection=None):
+            cursor = collection.find(query, projection)
+            if limit is not None:  # Apply limit if specified
+                cursor = cursor.limit(limit)
+            return list(cursor)
+
+        # Use the time_mongo_operation wrapper
+        return self.time_mongo_operation(operation_name, query_function, query, projection)
+
+
+    def count_documents(self, collection, query):
+        """
+        Wrapper for MongoDB count_documents query with timing logging.
+        """
+        operation_name = f"count_documents:{collection.name}"
+        return self.time_mongo_operation(
+            operation_name,
+            collection.count_documents,
+            query
+        )
+
+    def find_one_document(self, collection, query, projection=None):
+        """
+        Wrapper for MongoDB find_one query with timing logging.
+        """
+        operation_name = f"find_one_document:{collection.name}"
+        return self.time_mongo_operation(
+            operation_name,
+            collection.find_one,
+            query,
+            projection=projection
+        )
+
+    def find_one_and_update(self, collection, query, update, return_document=False):
+        """
+        Wrapper for MongoDB find_one_and_update query with timing logging.
+        """
+        operation_name = f"find_one_and_update:{collection.name}"
+        return self.time_mongo_operation(
+            operation_name,
+            collection.find_one_and_update,
+            query,
+            update,
+            return_document=return_document
+        )
+
+    def insert_one_document(self, collection, document):
+        """
+        Wrapper for MongoDB insert_one query with timing logging.
+        """
+        operation_name = f"insert_one_document:{collection.name}"
+        return self.time_mongo_operation(
+            operation_name,
+            collection.insert_one,
+            document
+        )
+
+    def insert_many_documents(self, collection, documents):
+        """
+        Wrapper for MongoDB insert_many query with timing logging.
+        """
+        operation_name = f"insert_many_documents:{collection.name}"
+        return self.time_mongo_operation(
+            operation_name,
+            collection.insert_many,
+            documents
+        )
+
+    def delete_documents(self, collection, query):
+        """
+        Wrapper for MongoDB delete_many query with timing logging.
+        """
+        operation_name = f"delete_documents:{collection.name}"
+        return self.time_mongo_operation(
+            operation_name,
+            collection.delete_many,
+            query
+        )
 
     def _initialize_session(self):
         """Initialize a session with retries for robust HTTP handling."""
@@ -196,7 +360,8 @@ class Crocodile:
         db = self.get_db()
         table_trace_collection = db[self.table_trace_collection_name]
 
-        trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
+        # Fetch the trace document for the table
+        trace = self.find_one_document(table_trace_collection, {"dataset_name": dataset_name, "table_name": table_name})
 
         if not trace:
             return
@@ -214,52 +379,44 @@ class Crocodile:
         if ml_ranking_status:
             update_fields["ml_ranking_status"] = ml_ranking_status  # ML ranking status
 
-        if start_time:
+        existing_start_time = trace.get("start_time")
+        if not existing_start_time and start_time:
             update_fields["start_time"] = start_time
         else:
-            start_time = trace.get("start_time")
+            start_time = existing_start_time or start_time
 
         if end_time:
             update_fields["end_time"] = end_time
-            update_fields["duration"] = (end_time - start_time).total_seconds()
+            if start_time:
+                update_fields["duration"] = (end_time - start_time).total_seconds()
 
         if row_time:
             update_fields["last_row_time"] = row_time
 
         if processed_rows >= total_rows and total_rows > 0:
-            update_fields["estimated_seconds"] = 0
-            update_fields["estimated_hours"] = 0
-            update_fields["estimated_days"] = 0
-            update_fields["percentage_complete"] = 100.0
+            update_fields.update({
+                "estimated_seconds": 0,
+                "estimated_hours": 0,
+                "estimated_days": 0,
+                "percentage_complete": 100.0,
+            })
             if trace.get("status") != "COMPLETED":
-                update_fields["status"] = "COMPLETED"  # Set to COMPLETED only when rows are done
+                update_fields["status"] = "COMPLETED"  # Mark as completed
+
         elif start_time and total_rows > 0 and processed_rows > 0:
             elapsed_time = (datetime.now() - start_time).total_seconds()
             avg_time_per_row = elapsed_time / processed_rows
             remaining_rows = total_rows - processed_rows
             estimated_time_left = remaining_rows * avg_time_per_row
 
-            estimated_seconds = estimated_time_left
-            estimated_hours = estimated_seconds / 3600
-            estimated_days = estimated_hours / 24
-            percentage_complete = (processed_rows / total_rows) * 100
+            update_fields.update({
+                "estimated_seconds": round(estimated_time_left, 2),
+                "estimated_hours": round(estimated_time_left / 3600, 2),
+                "estimated_days": round(estimated_time_left / 86400, 2),
+                "percentage_complete": round((processed_rows / total_rows) * 100, 2),
+            })
 
-            update_fields["estimated_seconds"] = round(estimated_seconds, 2)
-            update_fields["estimated_hours"] = round(estimated_hours, 2)
-            update_fields["estimated_days"] = round(estimated_days, 2)
-            update_fields["percentage_complete"] = round(percentage_complete, 2)
-
-        update_query = {}
-        if update_fields:
-            if "processed_rows" in update_fields:
-                update_query["$inc"] = {"processed_rows": update_fields.pop("processed_rows")}
-            update_query["$set"] = update_fields
-
-        table_trace_collection.update_one(
-            {"dataset_name": dataset_name, "table_name": table_name},
-            update_query,
-            upsert=True
-        )
+        self.update_document(table_trace_collection, {"dataset_name": dataset_name, "table_name": table_name}, {"$set": update_fields}, upsert=True)
 
     def update_dataset_trace(self, dataset_name, start_time=None, end_time=None):
         """Update the dataset-level trace based on the progress of tables."""
@@ -267,23 +424,18 @@ class Crocodile:
         table_trace_collection = db[self.table_trace_collection_name]
         dataset_trace_collection = db[self.dataset_trace_collection_name]
 
-        dataset_trace = dataset_trace_collection.find_one({"dataset_name": dataset_name})
-
-        # Fetch all tables for the dataset
-        tables = list(table_trace_collection.find({"dataset_name": dataset_name}))
-
+        tables = list(self.find_documents(table_trace_collection, {"dataset_name": dataset_name}))
         total_tables = len(tables)
         processed_tables = sum(1 for table in tables if table.get("status") == "COMPLETED")
 
         total_rows = sum(table.get("total_rows", 0) for table in tables)
         processed_rows = sum(table.get("processed_rows", 0) for table in tables)
 
-        # Check if dataset processing is completed
         status = "IN_PROGRESS"
         if processed_tables == total_tables:
             status = "COMPLETED"
             if not end_time:
-                end_time = datetime.now()  # Set the end time for dataset processing
+                end_time = datetime.now()
 
         elapsed_time = sum(table.get("duration", 0) for table in tables if table.get("duration", 0) > 0)
         if processed_rows > 0:
@@ -299,6 +451,9 @@ class Crocodile:
 
         percentage_complete = round((processed_rows / total_rows) * 100, 2) if total_rows > 0 else 0
 
+        dataset_trace = self.find_one_document(dataset_trace_collection, {"dataset_name": dataset_name})
+        existing_start_time = dataset_trace.get("start_time") if dataset_trace else None
+
         update_fields = {
             "total_tables": total_tables,
             "processed_tables": processed_tables,
@@ -311,19 +466,14 @@ class Crocodile:
             "status": status,
         }
 
-        # Update start and end time
-        if start_time:
+        if not existing_start_time and start_time:
             update_fields["start_time"] = start_time
         if end_time:
             update_fields["end_time"] = end_time
-            if start_time:
-                update_fields["duration_seconds"] = (end_time - start_time).total_seconds()
+            if existing_start_time or start_time:
+                update_fields["duration_seconds"] = (end_time - (existing_start_time or start_time)).total_seconds()
 
-        dataset_trace_collection.update_one(
-            {"dataset_name": dataset_name},
-            {"$set": update_fields},
-            upsert=True
-        )
+        self.update_document(dataset_trace_collection, {"dataset_name": dataset_name}, {"$set": update_fields}, upsert=True)
 
     def fetch_candidates(self, entity_name, row_text, fuzzy=False, qid=None):
         """
@@ -342,30 +492,34 @@ class Crocodile:
         if qid:
             url += f"&ids={qid}"
 
-        try:
-            response = self.session.get(url, headers={'accept': 'application/json'})
-            response.raise_for_status()  # Check if the request was successful
-            candidates = response.json()
+        attempts = 0  # Track the number of attempts
+        while attempts < 5:  # Retry up to 5 times
+            attempts += 1
+            try:
+                response = self.session.get(url, headers={'accept': 'application/json'})
+                response.raise_for_status()  # Check if the request was successful
+                candidates = response.json()
 
-            # Process candidates and add to compressed cache
-            row_tokens = set(self.tokenize_text(row_text))
-            filtered_candidates = self._process_candidates(candidates, entity_name, row_tokens)
+                # Process candidates and add to compressed cache
+                row_tokens = set(self.tokenize_text(row_text))
+                filtered_candidates = self._process_candidates(candidates, entity_name, row_tokens)
 
-            # Store in compressed candidate cache and return
-            candidate_cache.put(cache_key, filtered_candidates)
-            
-            end_time = time.time()  # End timing
-            self.log_time("Fetch Candidates (from API)", self.current_dataset, self.current_table, start_time, end_time)
-            
-            return filtered_candidates
+                # Store in compressed candidate cache and return
+                candidate_cache.put(cache_key, filtered_candidates)
 
-        except requests.exceptions.RequestException as e:
-            self.log_to_db("ERROR", f"Request error for '{entity_name}' with QID '{qid}': {str(e)}")
-            return []
-        except Exception as e:
-            self.log_to_db("ERROR", f"Unexpected error for '{entity_name}' with QID '{qid}': {traceback.format_exc()}")
-            return []
-    
+                end_time = time.time()  # End timing
+                self.log_time("Fetch Candidates (from API)", self.current_dataset, self.current_table, start_time, end_time)
+                return filtered_candidates
+
+            except requests.exceptions.RequestException as e:
+                self.log_to_db("WARNING", f"Request attempt {attempts} failed for '{entity_name}': {str(e)}")
+            except Exception as e:
+                self.log_to_db("ERROR", f"Unexpected error on attempt {attempts} for '{entity_name}': {traceback.format_exc()}")
+
+        # Log failure after retries
+        self.log_to_db("ERROR", f"Fetch Candidates failed after {attempts} attempts for '{entity_name}'")
+        return []
+
     def _process_candidates(self, candidates, entity_name, row_tokens):
         """
         Process retrieved candidates by adding features and formatting.
@@ -496,26 +650,29 @@ class Crocodile:
         start_time = time.time()  # Start timing
         url = f'{self.entity_bow_endpoint}?token={self.entity_retrieval_token}'
         headers = {'accept': 'application/json', 'Content-Type': 'application/json'}
-        payload = {"json": {"text": row_text, "qids": qids}}
+        payload = {"json":{"text": row_text, "qids": qids}}
 
-        try:
-            response = self.session.post(
-                url,
-                headers=headers,
-                json=payload
-            )
-            response.raise_for_status()  # Ensure the request was successful
-            end_time = time.time()  # End timing
-            self.log_time("BoW Fetch (from API)", self.current_dataset, self.current_table, start_time, end_time)
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            # Log any request-related errors
-            self.log_to_db("ERROR", f"Request error for BoW API: {str(e)}")
-            return {}
-        except Exception as e:
-            # Catch all other exceptions and log them
-            self.log_to_db("ERROR", f"Unexpected error for BoW API: {traceback.format_exc()}")
-            return {}
+        attempts = 0  # Track the number of attempts
+        while attempts < 5:  # Retry up to 5 times
+            attempts += 1
+            try:
+                response = self.session.post(
+                    url,
+                    headers=headers,
+                    json=payload
+                )
+                response.raise_for_status()  # Ensure the request was successful
+                end_time = time.time()  # End timing
+                self.log_time("BoW Fetch (from API)", self.current_dataset, self.current_table, start_time, end_time)
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                self.log_to_db("WARNING", f"BoW Fetch attempt {attempts} failed for QIDs {qids}: {str(e)}")
+            except Exception as e:
+                self.log_to_db("ERROR", f"Unexpected error on BoW Fetch attempt {attempts} for QIDs {qids}: {traceback.format_exc()}")
+
+        # Log failure after retries
+        self.log_to_db("ERROR", f"BoW Fetch failed after {attempts} attempts for QIDs: {qids}")
+        return {}
 
     def tokenize_text(self, text):
         """Tokenize and clean the text."""
@@ -617,11 +774,12 @@ class Crocodile:
             db = self.get_db()
             collection = db[self.collection_name]
 
-            doc = collection.find_one_and_update(
-                {"_id": doc_id, "status": "TODO"},
-                {"$set": {"status": "DOING"}},
-                return_document=True
-            )
+            # doc = collection.find_one_and_update(
+            #     {"_id": doc_id, "status": "TODO"},
+            #     {"$set": {"status": "DOING"}},
+            #     return_document=True
+            # )
+            doc = self.find_one_and_update(collection, {"_id": doc_id, "status": "TODO"}, {"$set": {"status": "DOING"}}, return_document=True)
 
             if not doc:
                 return
@@ -669,13 +827,10 @@ class Crocodile:
         )
 
     def run(self):
-        """
-        Continuously process data from the input_data collection as long as there are tasks available.
-        """
         db = self.get_db()
-        collection = db[self.collection_name]  # Collection storing input data
+        collection = db[self.collection_name]
 
-        total_rows = collection.count_documents({"status": "TODO"})
+        total_rows = self.count_documents(collection, {"status": "TODO"})
         if total_rows == 0:
             print("No more tasks to process.")
             return
@@ -685,44 +840,34 @@ class Crocodile:
         with tqdm(total=total_rows, desc="Processing tasks", unit="rows") as pbar:
             with mp.Pool(processes=self.max_workers) as pool:
                 while True:
-                    # Fetch a batch of tasks with status "TODO"
-                    todo_docs = list(collection.find(
-                        {"status": "TODO"},
-                        {"_id": 1, "dataset_name": 1, "table_name": 1}
-                    ).limit(self.max_workers))
-
+                    todo_docs = list(self.find_documents(collection, {"status": "TODO"}, {"_id": 1, "dataset_name": 1, "table_name": 1}, limit=self.max_workers))
                     if not todo_docs:
                         print("No more tasks to process.")
                         break
 
-                    # Group tasks by dataset and table to maintain trace consistency
                     tasks_by_table = {}
                     for doc in todo_docs:
                         dataset_table_key = (doc["dataset_name"], doc["table_name"])
                         tasks_by_table.setdefault(dataset_table_key, []).append(doc["_id"])
 
                     for (dataset_name, table_name), doc_ids in tasks_by_table.items():
-                        # Set context for the current dataset and table
                         self.set_context(dataset_name, table_name)
 
                         start_time = datetime.now()
                         self.update_dataset_trace(dataset_name, start_time=start_time)
                         self.update_table_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
 
-                        # Process rows in parallel
                         tasks = [(doc_id, dataset_name, table_name) for doc_id in doc_ids]
                         pool.starmap(self.process_row, tasks)
 
-                        # Update progress bar after processing
                         pbar.update(len(doc_ids))
 
-                        # Update dataset trace and check if table processing is complete
-                        processed_count = collection.count_documents({
+                        processed_count = self.count_documents(collection, {
                             "dataset_name": dataset_name,
                             "table_name": table_name,
                             "status": "DONE"
                         })
-                        total_count = collection.count_documents({
+                        total_count = self.count_documents(collection, {
                             "dataset_name": dataset_name,
                             "table_name": table_name
                         })
@@ -732,10 +877,10 @@ class Crocodile:
                             self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
                             self.apply_ml_ranking(dataset_name, table_name)
 
-                        # Regularly update dataset trace
                         self.update_dataset_trace(dataset_name)
 
         print("All tasks have been processed.")
+
 
     def apply_ml_ranking(self, dataset_name, table_name):
         """Perform ML-based ranking on candidates and update their scores."""
@@ -748,9 +893,10 @@ class Crocodile:
 
         batch_size = 1000
         processed_count = 0
-        total_count = training_collection.count_documents(
-            {"datasetName": dataset_name, "tableName": table_name, "ml_ranked": False}
-        )
+        # total_count = training_collection.count_documents(
+        #     {"datasetName": dataset_name, "tableName": table_name, "ml_ranked": False}
+        # )
+        total_count = self.count_documents(training_collection, {"datasetName": dataset_name, "tableName": table_name, "ml_ranked": False})
         print(f"Total unprocessed documents: {total_count}")
 
         while processed_count < total_count:

@@ -315,19 +315,36 @@ class Crocodile:
         self.current_dataset = dataset_name
         self.current_table = table_name
     
-    def log_time(self, operation_name, dataset_name, table_name, start_time, end_time):
-        """Log the timing for an operation."""
+    def log_time(self, operation_name, dataset_name, table_name, start_time, end_time, details=None):
+        """
+        Log the timing for an operation with optional additional details.
+
+        Parameters:
+            operation_name (str): The name of the operation being logged.
+            dataset_name (str): Name of the dataset being processed.
+            table_name (str): Name of the table being processed.
+            start_time (float): Start time of the operation.
+            end_time (float): End time of the operation.
+            details (dict, optional): Additional details to log, such as payload or query information.
+        """
         db = self.get_db()
         self.timing_collection = db[self.timing_collection_name]
         duration = end_time - start_time
-        self.timing_collection.insert_one({
+
+        log_entry = {
             "operation_name": operation_name,
             "dataset_name": dataset_name,
             "table_name": table_name,
             "start_time": datetime.fromtimestamp(start_time),
             "end_time": datetime.fromtimestamp(end_time),
-            "duration_seconds": duration
-        })
+            "duration_seconds": duration,
+        }
+
+        # Add additional details if provided
+        if details:
+            log_entry["details"] = details
+
+        self.timing_collection.insert_one(log_entry)
 
     def log_to_db(self, level, message, trace=None):
         """
@@ -355,13 +372,13 @@ class Crocodile:
 
         log_collection.insert_one(log_entry)
 
-    def update_table_trace(self, dataset_name, table_name, increment=0, status=None, ml_ranking_status=None, start_time=None, end_time=None, row_time=None):
+    def update_table_trace(self, dataset_name, table_name, increment=0, status=None, start_time=None, end_time=None, row_time=None, ml_ranking_status=None):
         """Update the processing trace for a given table."""
-        db = self.get_db()
+        client = MongoClient(self.mongo_uri)
+        db = client[self.db_name]
         table_trace_collection = db[self.table_trace_collection_name]
 
-        # Fetch the trace document for the table
-        trace = self.find_one_document(table_trace_collection, {"dataset_name": dataset_name, "table_name": table_name})
+        trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
 
         if not trace:
             return
@@ -374,72 +391,104 @@ class Crocodile:
             update_fields["processed_rows"] = increment
 
         if status:
-            update_fields["status"] = status  # Main task status
+            update_fields["status"] = status
 
         if ml_ranking_status:
-            update_fields["ml_ranking_status"] = ml_ranking_status  # ML ranking status
+            update_fields["ml_ranking_status"] = ml_ranking_status  # Add ML ranking status
 
-        existing_start_time = trace.get("start_time")
-        if not existing_start_time and start_time:
+        start_time = trace.get("start_time") or start_time
+        if start_time:
             update_fields["start_time"] = start_time
         else:
-            start_time = existing_start_time or start_time
+            start_time = trace.get("start_time")
 
         if end_time:
             update_fields["end_time"] = end_time
-            if start_time:
-                update_fields["duration"] = (end_time - start_time).total_seconds()
+            update_fields["duration"] = (end_time - start_time).total_seconds()
 
         if row_time:
             update_fields["last_row_time"] = row_time
 
         if processed_rows >= total_rows and total_rows > 0:
-            update_fields.update({
-                "estimated_seconds": 0,
-                "estimated_hours": 0,
-                "estimated_days": 0,
-                "percentage_complete": 100.0,
-            })
-            if trace.get("status") != "COMPLETED":
-                update_fields["status"] = "COMPLETED"  # Mark as completed
-
+            update_fields["estimated_seconds"] = 0
+            update_fields["estimated_hours"] = 0
+            update_fields["estimated_days"] = 0
+            update_fields["percentage_complete"] = 100.0
         elif start_time and total_rows > 0 and processed_rows > 0:
             elapsed_time = (datetime.now() - start_time).total_seconds()
             avg_time_per_row = elapsed_time / processed_rows
             remaining_rows = total_rows - processed_rows
             estimated_time_left = remaining_rows * avg_time_per_row
 
-            update_fields.update({
-                "estimated_seconds": round(estimated_time_left, 2),
-                "estimated_hours": round(estimated_time_left / 3600, 2),
-                "estimated_days": round(estimated_time_left / 86400, 2),
-                "percentage_complete": round((processed_rows / total_rows) * 100, 2),
-            })
+            estimated_seconds = estimated_time_left
+            estimated_hours = estimated_seconds / 3600
+            estimated_days = estimated_hours / 24
+            percentage_complete = (processed_rows / total_rows) * 100
 
-        self.update_document(table_trace_collection, {"dataset_name": dataset_name, "table_name": table_name}, {"$set": update_fields}, upsert=True)
+            update_fields["estimated_seconds"] = round(estimated_seconds, 2)
+            update_fields["estimated_hours"] = round(estimated_hours, 2)
+            update_fields["estimated_days"] = round(estimated_days, 2)
+            update_fields["percentage_complete"] = round(percentage_complete, 2)
 
-    def update_dataset_trace(self, dataset_name, start_time=None, end_time=None):
+        update_query = {}
+        if update_fields:
+            if "processed_rows" in update_fields:
+                update_query["$inc"] = {"processed_rows": update_fields.pop("processed_rows")}
+            update_query["$set"] = update_fields
+
+        table_trace_collection.update_one(
+            {"dataset_name": dataset_name, "table_name": table_name},
+            update_query,
+            upsert=True
+        )
+
+    def update_dataset_trace(self, dataset_name, start_time=None):
         """Update the dataset-level trace based on the progress of tables."""
-        db = self.get_db()
+        client = MongoClient(self.mongo_uri)
+        db = client[self.db_name]
         table_trace_collection = db[self.table_trace_collection_name]
         dataset_trace_collection = db[self.dataset_trace_collection_name]
 
-        tables = list(self.find_documents(table_trace_collection, {"dataset_name": dataset_name}))
+        # Fetch the dataset trace document
+        dataset_trace = dataset_trace_collection.find_one({"dataset_name": dataset_name})
+
+        # Use the provided start_time only if it's the first call (no existing trace or no recorded start_time)
+        if dataset_trace:
+            if "start_time" in dataset_trace:
+                start_time = datetime.fromisoformat(dataset_trace["start_time"])  # Retrieve start_time from the document
+            elif start_time is not None:
+                # Save the initial start_time
+                dataset_trace_collection.update_one(
+                    {"dataset_name": dataset_name},
+                    {"$set": {"start_time": start_time.isoformat()}},
+                    upsert=True
+                )
+
+        # Fetch all tables for the dataset
+        tables = list(table_trace_collection.find({"dataset_name": dataset_name}))
+
         total_tables = len(tables)
         processed_tables = sum(1 for table in tables if table.get("status") == "COMPLETED")
 
         total_rows = sum(table.get("total_rows", 0) for table in tables)
         processed_rows = sum(table.get("processed_rows", 0) for table in tables)
 
+        # Check if dataset processing is completed
         status = "IN_PROGRESS"
         if processed_tables == total_tables:
             status = "COMPLETED"
-            if not end_time:
-                end_time = datetime.now()
 
-        elapsed_time = sum(table.get("duration", 0) for table in tables if table.get("duration", 0) > 0)
+        # Calculate duration from table-level traces
+        duration_from_tables = sum(table.get("duration", 0) for table in tables if table.get("duration", 0) > 0)
+
+        # Calculate duration from start_time if available
+        if start_time:
+            duration_from_start = (datetime.now() - start_time).total_seconds()
+        else:
+            duration_from_start = None
+
         if processed_rows > 0:
-            avg_time_per_row = elapsed_time / processed_rows
+            avg_time_per_row = duration_from_tables / processed_rows
             remaining_rows = total_rows - processed_rows
             estimated_time_left = remaining_rows * avg_time_per_row
 
@@ -451,9 +500,6 @@ class Crocodile:
 
         percentage_complete = round((processed_rows / total_rows) * 100, 2) if total_rows > 0 else 0
 
-        dataset_trace = self.find_one_document(dataset_trace_collection, {"dataset_name": dataset_name})
-        existing_start_time = dataset_trace.get("start_time") if dataset_trace else None
-
         update_fields = {
             "total_tables": total_tables,
             "processed_tables": processed_tables,
@@ -464,24 +510,35 @@ class Crocodile:
             "estimated_days": estimated_days,
             "percentage_complete": percentage_complete,
             "status": status,
+            "duration_from_tables": round(duration_from_tables, 2)
         }
 
-        if not existing_start_time and start_time:
-            update_fields["start_time"] = start_time
-        if end_time:
-            update_fields["end_time"] = end_time
-            if existing_start_time or start_time:
-                update_fields["duration_seconds"] = (end_time - (existing_start_time or start_time)).total_seconds()
+        # Add duration from start if available
+        if duration_from_start is not None:
+            update_fields["duration_from_start"] = round(duration_from_start, 2)
 
-        self.update_document(dataset_trace_collection, {"dataset_name": dataset_name}, {"$set": update_fields}, upsert=True)
+        dataset_trace_collection.update_one(
+            {"dataset_name": dataset_name},
+            {"$set": update_fields},
+            upsert=True
+        )
 
     def fetch_candidates(self, entity_name, row_text, fuzzy=False, qid=None):
         """
-        Fetch candidates for a given entity with retry and session handling.
+        Fetch candidates for a given entity with robust retry and backoff logic.
+
+        Parameters:
+            entity_name (str): The name of the entity to fetch candidates for.
+            row_text (str): Contextual row text for fetching candidates.
+            fuzzy (bool): Whether to perform fuzzy matching.
+            qid (str, optional): Specific QID to filter candidates.
+
+        Returns:
+            list: List of processed candidates or an empty list on failure.
         """
         start_time = time.time()  # Start timing
-        cache_key = f"{entity_name}_{fuzzy}"
-        cached_result = candidate_cache.get(cache_key)  # Use the candidate cache
+        cache_key = f"{entity_name}_{fuzzy}"  # Cache key
+        cached_result = candidate_cache.get(cache_key)  # Check if result is cached
         if cached_result is not None:
             end_time = time.time()  # End timing
             self.log_time("Fetch Candidates (from Cache)", self.current_dataset, self.current_table, start_time, end_time)
@@ -493,31 +550,54 @@ class Crocodile:
             url += f"&ids={qid}"
 
         attempts = 0  # Track the number of attempts
+        backoff = 1  # Initial backoff in seconds
+
         while attempts < 5:  # Retry up to 5 times
             attempts += 1
             try:
                 response = self.session.get(url, headers={'accept': 'application/json'})
-                response.raise_for_status()  # Check if the request was successful
-                candidates = response.json()
+                response.raise_for_status()  # Ensure the request was successful
 
                 # Process candidates and add to compressed cache
+                candidates = response.json()
                 row_tokens = set(self.tokenize_text(row_text))
                 filtered_candidates = self._process_candidates(candidates, entity_name, row_tokens)
 
-                # Store in compressed candidate cache and return
+                # Cache the processed candidates
                 candidate_cache.put(cache_key, filtered_candidates)
 
-                end_time = time.time()  # End timing
-                self.log_time("Fetch Candidates (from API)", self.current_dataset, self.current_table, start_time, end_time)
+                # Log success timing
+                end_time = time.time()
+                self.log_time(
+                    "Fetch Candidates (from API)",
+                    self.current_dataset,
+                    self.current_table,
+                    start_time,
+                    end_time,
+                    details={"attempts": attempts, "entity_name": entity_name}
+                )
                 return filtered_candidates
 
             except requests.exceptions.RequestException as e:
-                self.log_to_db("WARNING", f"Request attempt {attempts} failed for '{entity_name}': {str(e)}")
+                self.log_to_db(
+                    "WARNING",
+                    f"Fetch Candidates attempt {attempts} failed for '{entity_name}': {str(e)}"
+                )
             except Exception as e:
-                self.log_to_db("ERROR", f"Unexpected error on attempt {attempts} for '{entity_name}': {traceback.format_exc()}")
+                self.log_to_db(
+                    "ERROR",
+                    f"Unexpected error on Fetch Candidates attempt {attempts} for '{entity_name}': {traceback.format_exc()}"
+                )
 
-        # Log failure after retries
-        self.log_to_db("ERROR", f"Fetch Candidates failed after {attempts} attempts for '{entity_name}'")
+            # Exponential backoff with a cap
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 16)  # Cap the backoff at 16 seconds
+
+        # Log final failure after retries
+        self.log_to_db(
+            "ERROR",
+            f"Fetch Candidates failed after {attempts} attempts for '{entity_name}'"
+        )
         return []
 
     def _process_candidates(self, candidates, entity_name, row_tokens):
@@ -633,9 +713,24 @@ class Crocodile:
         # Sort by feature-based score in descending order
         return sorted(scored_candidates, key=lambda x: x['score'], reverse=True)
         
+    def log_retry_attempt(self, retry_state):
+        """
+        Logs retry attempt details to MongoDB.
+        """
+        attempt_number = retry_state.attempt_number
+        operation_name = retry_state.fn.__name__
+        last_exception = str(retry_state.outcome.exception()) if retry_state.outcome else "Unknown error"
+
+        self.log_collection.insert_one({
+            "operation_name": operation_name,
+            "attempt": attempt_number,
+            "timestamp": datetime.now(),
+            "error_message": last_exception
+        })
+
     def get_bow_from_api(self, row_text, qids):
         """
-        Fetch BoW vectors directly from the API.
+        Fetch BoW vectors directly from the API with robust retry and backoff logic.
 
         Parameters:
             row_text (str): The text for which to compute BoW vectors.
@@ -650,28 +745,49 @@ class Crocodile:
         start_time = time.time()  # Start timing
         url = f'{self.entity_bow_endpoint}?token={self.entity_retrieval_token}'
         headers = {'accept': 'application/json', 'Content-Type': 'application/json'}
-        payload = {"json":{"text": row_text, "qids": qids}}
+        payload = {"json": {"text": row_text, "qids": qids}}
 
         attempts = 0  # Track the number of attempts
+        backoff = 1  # Initial backoff in seconds
+
         while attempts < 5:  # Retry up to 5 times
             attempts += 1
             try:
-                response = self.session.post(
-                    url,
-                    headers=headers,
-                    json=payload
-                )
+                response = self.session.post(url, headers=headers, json=payload)
                 response.raise_for_status()  # Ensure the request was successful
-                end_time = time.time()  # End timing
-                self.log_time("BoW Fetch (from API)", self.current_dataset, self.current_table, start_time, end_time)
-                return response.json()
-            except requests.exceptions.RequestException as e:
-                self.log_to_db("WARNING", f"BoW Fetch attempt {attempts} failed for QIDs {qids}: {str(e)}")
-            except Exception as e:
-                self.log_to_db("ERROR", f"Unexpected error on BoW Fetch attempt {attempts} for QIDs {qids}: {traceback.format_exc()}")
 
-        # Log failure after retries
-        self.log_to_db("ERROR", f"BoW Fetch failed after {attempts} attempts for QIDs: {qids}")
+                # Log success timing
+                end_time = time.time()
+                self.log_time(
+                    "BoW Fetch (from API)",
+                    self.current_dataset,
+                    self.current_table,
+                    start_time,
+                    end_time,
+                    details={"attempts": attempts, "text":row_text, "qids": qids}
+                )
+                return response.json()
+
+            except requests.exceptions.RequestException as e:
+                self.log_to_db(
+                    "WARNING",
+                    f"BoW Fetch attempt {attempts} failed for QIDs {qids}: {str(e)}"
+                )
+            except Exception as e:
+                self.log_to_db(
+                    "ERROR",
+                    f"Unexpected error on BoW Fetch attempt {attempts} for QIDs {qids}: {traceback.format_exc()}"
+                )
+
+            # Exponential backoff with a cap
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 16)  # Cap the backoff at 16 seconds
+
+        # Log final failure after retries
+        self.log_to_db(
+            "ERROR",
+            f"BoW Fetch failed after {attempts} attempts for QIDs: {qids}"
+        )
         return {}
 
     def tokenize_text(self, text):
@@ -723,7 +839,6 @@ class Crocodile:
                     # Fetch BoW vectors for the candidates
                     candidate_qids = [candidate['id'] for candidate in candidates]
                     candidate_bows = self.get_bow_from_api(row_text, candidate_qids)
-
                     # Map NER type from input to numeric (extended names)
                     ner_type_numeric = self.map_nertype_to_numeric(ner_type)
                     

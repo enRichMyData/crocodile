@@ -16,8 +16,6 @@ import absl.logging
 import tensorflow as tf
 import pandas as pd
 from tqdm import tqdm
-from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
 
 # Suppress specific Keras warnings
 warnings.filterwarnings("ignore", category=UserWarning, message="Do not pass an `input_shape`/`input_dim` argument to a layer.*")
@@ -123,7 +121,6 @@ class Crocodile:
 
         # ML Model-related parameters
         self.model_path = model_path
-        self.session = self._initialize_session()
         self.current_dataset = None
         self.current_table = None
     
@@ -288,20 +285,6 @@ class Crocodile:
             collection.delete_many,
             query
         )
-
-    def _initialize_session(self):
-        """Initialize a session with retries for robust HTTP handling."""
-        session = requests.Session()
-        retries = Retry(
-            total=5,  # Total number of retries
-            backoff_factor=1,  # Backoff factor for retries (e.g., 1, 2, 4 seconds)
-            status_forcelist=[429, 500, 502, 503, 504],  # Retry on these HTTP status codes
-            allowed_methods=["GET", "POST"],  # Retry for safe methods
-        )
-        adapter = HTTPAdapter(max_retries=retries)
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        return session
     
     def get_db(self):
         """
@@ -525,7 +508,7 @@ class Crocodile:
 
     def fetch_candidates(self, entity_name, row_text, fuzzy=False, qid=None):
         """
-        Fetch candidates for a given entity with robust retry and backoff logic.
+        Fetch candidates for a given entity with retry and backoff logic.
 
         Parameters:
             entity_name (str): The name of the entity to fetch candidates for.
@@ -555,7 +538,7 @@ class Crocodile:
         while attempts < 5:  # Retry up to 5 times
             attempts += 1
             try:
-                response = self.session.get(url, headers={'accept': 'application/json'})
+                response = requests.get(url, headers={'accept': 'application/json'}, timeout=10)
                 response.raise_for_status()  # Ensure the request was successful
 
                 # Process candidates and add to compressed cache
@@ -730,7 +713,7 @@ class Crocodile:
 
     def get_bow_from_api(self, row_text, qids):
         """
-        Fetch BoW vectors directly from the API with robust retry and backoff logic.
+        Fetch BoW vectors directly from the API with retry and backoff logic.
 
         Parameters:
             row_text (str): The text for which to compute BoW vectors.
@@ -742,10 +725,10 @@ class Crocodile:
         if not self.entity_bow_endpoint:
             raise ValueError("BoW API endpoint must be provided.")
 
-        start_time = time.time()  # Start timing
-        url = f'{self.entity_bow_endpoint}?token={self.entity_retrieval_token}'
-        headers = {'accept': 'application/json', 'Content-Type': 'application/json'}
-        payload = {"json": {"text": row_text, "qids": qids}}
+        # Prepare payload
+        url = f"{self.entity_bow_endpoint}?token={self.entity_retrieval_token}"
+        headers = {"accept": "application/json", "Content-Type": "application/json"}
+        payload = {"json":{"text": row_text, "qids": qids}}
 
         attempts = 0  # Track the number of attempts
         backoff = 1  # Initial backoff in seconds
@@ -753,7 +736,7 @@ class Crocodile:
         while attempts < 5:  # Retry up to 5 times
             attempts += 1
             try:
-                response = self.session.post(url, headers=headers, json=payload)
+                response = requests.post(url, headers=headers, json=payload, timeout=10)
                 response.raise_for_status()  # Ensure the request was successful
 
                 # Log success timing
@@ -762,9 +745,9 @@ class Crocodile:
                     "BoW Fetch (from API)",
                     self.current_dataset,
                     self.current_table,
-                    start_time,
+                    time.time(),
                     end_time,
-                    details={"attempts": attempts, "text":row_text, "qids": qids}
+                    details={"attempts": attempts, "text": row_text, "qids": qids}
                 )
                 return response.json()
 

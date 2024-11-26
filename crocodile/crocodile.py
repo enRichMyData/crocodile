@@ -538,7 +538,8 @@ class Crocodile:
         while attempts < 5:  # Retry up to 5 times
             attempts += 1
             try:
-                response = requests.get(url, headers={'accept': 'application/json'}, timeout=10)
+                start_time = time.time()  # Start timing
+                response = requests.get(url, headers={'accept': 'application/json'}, timeout=4)
                 response.raise_for_status()  # Ensure the request was successful
 
                 # Process candidates and add to compressed cache

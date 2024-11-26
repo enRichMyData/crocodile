@@ -24,6 +24,8 @@ def ensure_indexes():
     table_trace_collection.create_index([("table_name", ASCENDING)])  # Ensure fast retrieval of items by table_name
     table_trace_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True)
     dataset_trace_collection.create_index([("dataset_name", ASCENDING)], unique=True)
+    training_data_collection.create_index([("dataset_name", ASCENDING)])  # Ensure fast retrieval of items by dataset
+    training_data_collection.create_index([("table_name", ASCENDING)])  # Ensure fast retrieval of items by table
     training_data_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)])  # Ensure fast retrieval of items by dataset and table
     training_data_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING), ("ml_ranked", ASCENDING)])  # Ensure fast retrieval of items by dataset, table, and ml_ranked
     timing_trace_collection.create_index([("duration_seconds", ASCENDING)])  # Ensure fast retrieval of items by duration_seconds

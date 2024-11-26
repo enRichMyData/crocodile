@@ -737,7 +737,8 @@ class Crocodile:
         while attempts < 5:  # Retry up to 5 times
             attempts += 1
             try:
-                response = requests.post(url, headers=headers, json=payload, timeout=10)
+                start_time = time.time()  # Start timing
+                response = requests.post(url, headers=headers, json=payload, timeout=4)
                 response.raise_for_status()  # Ensure the request was successful
 
                 # Log success timing
@@ -746,7 +747,7 @@ class Crocodile:
                     "BoW Fetch (from API)",
                     self.current_dataset,
                     self.current_table,
-                    time.time(),
+                    start_time,
                     end_time,
                     details={"attempts": attempts, "text": row_text, "qids": qids}
                 )

@@ -858,9 +858,9 @@ class Crocodile:
         training_collection = db[self.training_collection_name]
 
         training_document = {
-            "datasetName": dataset_name,
-            "tableName": table_name,
-            "idRow": row_index,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "row_id": row_index,
             "candidates": candidates_by_ne_column,
             "ml_ranked": False
         }
@@ -994,15 +994,15 @@ class Crocodile:
         batch_size = 1000
         processed_count = 0
         # total_count = training_collection.count_documents(
-        #     {"datasetName": dataset_name, "tableName": table_name, "ml_ranked": False}
+        #     {"dataset_name": dataset_name, "table_name": table_name, "ml_ranked": False}
         # )
-        total_count = self.count_documents(training_collection, {"datasetName": dataset_name, "tableName": table_name, "ml_ranked": False})
+        total_count = self.count_documents(training_collection, {"dataset_name": dataset_name, "table_name": table_name, "ml_ranked": False})
         print(f"Total unprocessed documents: {total_count}")
 
         while processed_count < total_count:
             # Retrieve 1000 unprocessed documents at a time from training_data
             batch_docs = list(training_collection.find(
-                {"datasetName": dataset_name, "tableName": table_name, "ml_ranked": False},
+                {"datasetName": dataset_name, "table_name": table_name, "ml_ranked": False},
                 limit=batch_size
             ))
 

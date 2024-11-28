@@ -69,7 +69,7 @@ class LRUCacheCompressed:
                 self.cache.popitem(last=False)
 
 # Define compressed LRU caches with descriptive names
-CACHE_MAX_SIZE = 100_000  # Set maximum size for each cache
+CACHE_MAX_SIZE = 100_000_000  # Set maximum size for each cache
 
 # Initialize compressed caches
 candidate_cache = LRUCacheCompressed(CACHE_MAX_SIZE)  # For candidate entities

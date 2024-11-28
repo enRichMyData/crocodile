@@ -73,6 +73,7 @@ CACHE_MAX_SIZE = 100_000  # Set maximum size for each cache
 
 # Initialize compressed caches
 candidate_cache = LRUCacheCompressed(CACHE_MAX_SIZE)  # For candidate entities
+bow_cache = LRUCacheCompressed(CACHE_MAX_SIZE)  # For Bag-of-Words vectors
  
 # Dictionary to store client instances per process
 _process_clients = {}
@@ -714,7 +715,7 @@ class Crocodile:
 
     def get_bow_from_api(self, row_text, qids):
         """
-        Fetch BoW vectors directly from the API with retry and backoff logic.
+        Fetch BoW vectors for specific QIDs and a text using caching.
 
         Parameters:
             row_text (str): The text for which to compute BoW vectors.
@@ -726,54 +727,90 @@ class Crocodile:
         if not self.entity_bow_endpoint:
             raise ValueError("BoW API endpoint must be provided.")
 
-        # Prepare payload
+        # Start timing for cache check
+        cache_start_time = time.time()
+
+        # Prepare cache keys for each QID based on text and QID
+        cache_hits = {}
+        qids_to_fetch = []
+        for qid in qids:
+            cache_key = f"{hash(row_text)}_{qid}"
+            cached_result = bow_cache.get(cache_key)
+            if cached_result is not None:
+                cache_hits[qid] = cached_result
+            else:
+                qids_to_fetch.append(qid)
+
+        # Measure time if all QIDs are cached
+        if not qids_to_fetch:
+            cache_end_time = time.time()
+            self.log_time(
+                "BoW Retrieval (from Cache)",
+                self.current_dataset,
+                self.current_table,
+                cache_start_time,
+                cache_end_time,
+                details={"qids": qids, "row_text": row_text[:50]}  # Truncate text for logging
+            )
+            return cache_hits
+
+        # Prepare payload for API request
         url = f"{self.entity_bow_endpoint}?token={self.entity_retrieval_token}"
         headers = {"accept": "application/json", "Content-Type": "application/json"}
-        payload = {"json":{"text": row_text, "qids": qids}}
+        payload = {"json":{"text": row_text, "qids": qids_to_fetch}}
 
-        attempts = 0  # Track the number of attempts
-        backoff = 1  # Initial backoff in seconds
-
+        # Fetch missing BoW vectors
+        attempts = 0
+        backoff = 1
         while attempts < 5:  # Retry up to 5 times
             attempts += 1
             try:
-                start_time = time.time()  # Start timing
+                # Start timing for API call
+                api_start_time = time.time()
+
                 response = requests.post(url, headers=headers, json=payload, timeout=4)
                 response.raise_for_status()  # Ensure the request was successful
 
+                # Parse response and update cache
+                result = response.json()
+                for qid, bow_vector in result.items():
+                    cache_key = f"{hash(row_text)}_{qid}"
+                    bow_cache.put(cache_key, bow_vector)
+                    cache_hits[qid] = bow_vector
+
                 # Log success timing
-                end_time = time.time()
+                api_end_time = time.time()
                 self.log_time(
                     "BoW Fetch (from API)",
                     self.current_dataset,
                     self.current_table,
-                    start_time,
-                    end_time,
-                    details={"attempts": attempts, "text": row_text, "qids": qids}
+                    api_start_time,
+                    api_end_time,
+                    details={"attempts": attempts, "qids_fetched": qids_to_fetch, "row_text": row_text[:50]}
                 )
-                return response.json()
+                return cache_hits
 
             except requests.exceptions.RequestException as e:
                 self.log_to_db(
                     "WARNING",
-                    f"BoW Fetch attempt {attempts} failed for QIDs {qids}: {str(e)}"
+                    f"BoW Fetch attempt {attempts} failed for QIDs {qids_to_fetch}: {str(e)}"
                 )
             except Exception as e:
                 self.log_to_db(
                     "ERROR",
-                    f"Unexpected error on BoW Fetch attempt {attempts} for QIDs {qids}: {traceback.format_exc()}"
+                    f"Unexpected error on BoW Fetch attempt {attempts} for QIDs {qids_to_fetch}: {traceback.format_exc()}"
                 )
 
             # Exponential backoff with a cap
             time.sleep(backoff)
-            backoff = min(backoff * 2, 16)  # Cap the backoff at 16 seconds
+            backoff = min(backoff * 2, 16)
 
         # Log final failure after retries
         self.log_to_db(
             "ERROR",
-            f"BoW Fetch failed after {attempts} attempts for QIDs: {qids}"
+            f"BoW Fetch failed after {attempts} attempts for QIDs: {qids_to_fetch}"
         )
-        return {}
+        return cache_hits
 
     def tokenize_text(self, text):
         """Tokenize and clean the text."""
@@ -1002,7 +1039,7 @@ class Crocodile:
         while processed_count < total_count:
             # Retrieve 1000 unprocessed documents at a time from training_data
             batch_docs = list(training_collection.find(
-                {"datasetName": dataset_name, "table_name": table_name, "ml_ranked": False},
+                {"dataset_name": dataset_name, "table_name": table_name, "ml_ranked": False},
                 limit=batch_size
             ))
 
@@ -1017,7 +1054,7 @@ class Crocodile:
             doc_info = []
 
             for doc in batch_docs:
-                row_index = doc["idRow"]
+                row_index = doc["row_id"]
                 candidates_by_column = doc["candidates"]
 
                 for col_index, candidates in candidates_by_column.items():
@@ -1042,7 +1079,7 @@ class Crocodile:
 
             # Update ranked candidates in training_data and input_data
             for doc_id, doc in doc_map.items():
-                row_index = doc["idRow"]
+                row_index = doc["row_id"]
                 updated_candidates_by_column = {}
 
                 for col_index, candidates in doc["candidates"].items():

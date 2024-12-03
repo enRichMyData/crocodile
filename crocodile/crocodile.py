@@ -540,7 +540,7 @@ class Crocodile:
             attempts += 1
             try:
                 start_time = time.time()  # Start timing
-                response = requests.get(url, headers={'accept': 'application/json'}, timeout=4)
+                response = requests.get(url, headers={'accept': 'application/json'}, timeout=1)
                 response.raise_for_status()  # Ensure the request was successful
 
                 # Process candidates and add to compressed cache
@@ -768,7 +768,7 @@ class Crocodile:
                 # Start timing for API call
                 api_start_time = time.time()
 
-                response = requests.post(url, headers=headers, json=payload, timeout=4)
+                response = requests.post(url, headers=headers, json=payload, timeout=1)
                 response.raise_for_status()  # Ensure the request was successful
 
                 # Parse response and update cache

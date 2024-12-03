@@ -46,27 +46,27 @@ class LRUCacheCompressed:
         self.cache_lock = Lock()  # Use an instance-specific lock
 
     def get(self, key):
-        with self.cache_lock:
-            if key in self.cache:
-                # Move accessed item to the end (most recently used)
-                self.cache.move_to_end(key)
-                # Decompress data before returning
-                compressed_data = self.cache[key]
-                decompressed_data = pickle.loads(gzip.decompress(base64.b64decode(compressed_data)))
-                return decompressed_data
-            return None
+        #with self.cache_lock:
+        if key in self.cache:
+            # Move accessed item to the end (most recently used)
+            self.cache.move_to_end(key)
+            # Decompress data before returning
+            compressed_data = self.cache[key]
+            decompressed_data = pickle.loads(gzip.decompress(base64.b64decode(compressed_data)))
+            return decompressed_data
+        return None
 
     def put(self, key, value):
-        with self.cache_lock:
-            # Compress the data before storing it
-            compressed_data = base64.b64encode(gzip.compress(pickle.dumps(value))).decode('utf-8')
-            if key in self.cache:
-                # Update existing item and mark as most recently used
-                self.cache.move_to_end(key)
-            self.cache[key] = compressed_data
-            # Evict the oldest item if the cache exceeds the max size
-            if len(self.cache) > self.max_size:
-                self.cache.popitem(last=False)
+        #with self.cache_lock:
+        # Compress the data before storing it
+        compressed_data = base64.b64encode(gzip.compress(pickle.dumps(value))).decode('utf-8')
+        if key in self.cache:
+            # Update existing item and mark as most recently used
+            self.cache.move_to_end(key)
+        self.cache[key] = compressed_data
+        # Evict the oldest item if the cache exceeds the max size
+        if len(self.cache) > self.max_size:
+            self.cache.popitem(last=False)
 
 # Define compressed LRU caches with descriptive names
 CACHE_MAX_SIZE = 100_000_000  # Set maximum size for each cache
@@ -962,6 +962,50 @@ class Crocodile:
             {"dataset_name": dataset_name, "table_name": table_name},
             {"$set": {"rows_per_second": rows_per_second}}
         )
+    
+    def worker(self):
+        model = self.load_ml_model()
+        collection = self.get_db()[self.collection_name]
+        while True:
+            todo_docs = list(self.find_documents(collection, {"status": "TODO"}, {"_id": 1, "dataset_name": 1, "table_name": 1}, limit=1))
+            if not todo_docs:
+                print("No more tasks to process.")
+                break
+
+            tasks_by_table = {}
+            for doc in todo_docs:
+                dataset_table_key = (doc["dataset_name"], doc["table_name"])
+                tasks_by_table.setdefault(dataset_table_key, []).append(doc["_id"])
+
+            for (dataset_name, table_name), doc_ids in tasks_by_table.items():
+                self.set_context(dataset_name, table_name)
+
+                start_time = datetime.now()
+                self.update_dataset_trace(dataset_name, start_time=start_time)
+                self.update_table_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
+
+                #tasks = [(doc_id, dataset_name, table_name) for doc_id in doc_ids]
+                #pool.starmap(self.process_row, tasks)
+                #pbar.update(len(doc_ids))
+                self.process_row(doc_ids[0], dataset_name, table_name)
+
+                processed_count = self.count_documents(collection, {
+                     "dataset_name": dataset_name,
+                     "table_name": table_name,
+                     "status": "DONE"
+                })
+                total_count = self.count_documents(collection, {
+                     "dataset_name": dataset_name,
+                     "table_name": table_name
+                })
+
+                if processed_count == total_count:
+                    end_time = datetime.now()
+                    self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
+                    self.apply_ml_ranking(dataset_name, table_name, model)
+
+                self.update_dataset_trace(dataset_name)
+                #print("row is done!")
 
     def run(self):
         db = self.get_db()
@@ -974,55 +1018,22 @@ class Crocodile:
 
         print(f"Found {total_rows} tasks to process.")
 
-        with tqdm(total=total_rows, desc="Processing tasks", unit="rows") as pbar:
-            with mp.Pool(processes=self.max_workers) as pool:
-                while True:
-                    todo_docs = list(self.find_documents(collection, {"status": "TODO"}, {"_id": 1, "dataset_name": 1, "table_name": 1}, limit=self.max_workers))
-                    if not todo_docs:
-                        print("No more tasks to process.")
-                        break
+        processes = []
+        for _ in range(self.max_workers):
+            p = mp.Process(target=self.worker)
+            p.start()
+            processes.append(p)
 
-                    tasks_by_table = {}
-                    for doc in todo_docs:
-                        dataset_table_key = (doc["dataset_name"], doc["table_name"])
-                        tasks_by_table.setdefault(dataset_table_key, []).append(doc["_id"])
-
-                    for (dataset_name, table_name), doc_ids in tasks_by_table.items():
-                        self.set_context(dataset_name, table_name)
-
-                        start_time = datetime.now()
-                        self.update_dataset_trace(dataset_name, start_time=start_time)
-                        self.update_table_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
-
-                        tasks = [(doc_id, dataset_name, table_name) for doc_id in doc_ids]
-                        pool.starmap(self.process_row, tasks)
-
-                        pbar.update(len(doc_ids))
-
-                        processed_count = self.count_documents(collection, {
-                            "dataset_name": dataset_name,
-                            "table_name": table_name,
-                            "status": "DONE"
-                        })
-                        total_count = self.count_documents(collection, {
-                            "dataset_name": dataset_name,
-                            "table_name": table_name
-                        })
-
-                        if processed_count == total_count:
-                            end_time = datetime.now()
-                            self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
-                            self.apply_ml_ranking(dataset_name, table_name)
-
-                        self.update_dataset_trace(dataset_name)
+        for p in processes:
+            p.join()    
+        #with tqdm(total=total_rows, desc="Processing tasks", unit="rows") as pbar:
+        #with mp.Pool(processes=self.max_workers) as pool:
 
         print("All tasks have been processed.")
 
 
-    def apply_ml_ranking(self, dataset_name, table_name):
+    def apply_ml_ranking(self, dataset_name, table_name, model):
         """Perform ML-based ranking on candidates and update their scores."""
-        # Load the ML model once for this task
-        model = self.load_ml_model()
         db = self.get_db()
         training_collection = db[self.training_collection_name]
         input_collection = db[self.collection_name]

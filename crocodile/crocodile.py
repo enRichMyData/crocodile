@@ -8,8 +8,6 @@ import base64
 import gzip
 from nltk.tokenize import word_tokenize
 import nltk
-from collections import OrderedDict
-from multiprocessing import Lock
 import numpy as np
 import warnings
 import absl.logging
@@ -36,45 +34,6 @@ from nltk.corpus import stopwords
 # Global stopwords to avoid reinitializing repeatedly
 stop_words = set(stopwords.words('english'))
 
-# Define a shared LRU cache for compressed data
-class LRUCacheCompressed:
-    """In-memory LRU cache with compression and eviction policy, shared across processes."""
-    
-    def __init__(self, max_size):
-        self.cache = OrderedDict()
-        self.max_size = max_size
-        self.cache_lock = Lock()  # Use an instance-specific lock
-
-    def get(self, key):
-        with self.cache_lock:
-            if key in self.cache:
-                # Move accessed item to the end (most recently used)
-                self.cache.move_to_end(key)
-                # Decompress data before returning
-                compressed_data = self.cache[key]
-                decompressed_data = pickle.loads(gzip.decompress(base64.b64decode(compressed_data)))
-                return decompressed_data
-            return None
-
-    def put(self, key, value):
-        with self.cache_lock:
-            # Compress the data before storing it
-            compressed_data = base64.b64encode(gzip.compress(pickle.dumps(value))).decode('utf-8')
-            if key in self.cache:
-                # Update existing item and mark as most recently used
-                self.cache.move_to_end(key)
-            self.cache[key] = compressed_data
-            # Evict the oldest item if the cache exceeds the max size
-            if len(self.cache) > self.max_size:
-                self.cache.popitem(last=False)
-
-# Define compressed LRU caches with descriptive names
-CACHE_MAX_SIZE = 100_000_000  # Set maximum size for each cache
-
-# Initialize compressed caches
-candidate_cache = LRUCacheCompressed(CACHE_MAX_SIZE)  # For candidate entities
-bow_cache = LRUCacheCompressed(CACHE_MAX_SIZE)  # For Bag-of-Words vectors
- 
 # Dictionary to store client instances per process
 _process_clients = {}
 
@@ -87,6 +46,55 @@ def get_mongo_client(uri="mongodb://localhost:27017/"):
         # Create a new client for the current process
         _process_clients[pid] = MongoClient(uri, maxPoolSize=10)  # Adjust pool size as needed
     return _process_clients[pid]
+
+# Define a MongoDB-backed cache with LRU eviction policy
+class MongoCache:
+    """MongoDB-backed cache with LRU eviction policy."""
+    
+    def __init__(self, mongo_uri, db_name, collection_name, max_size=1_000_000):
+        self.mongo_uri = mongo_uri
+        self.db_name = db_name
+        self.collection_name = collection_name
+        self.max_size = max_size
+        self.client = MongoClient(self.mongo_uri)
+        self.db = self.client[self.db_name]
+        self.collection = self.db[self.collection_name]
+        # Ensure indexes
+        self.collection.create_index("key", unique=True)
+        self.collection.create_index("last_accessed")
+    
+    def get(self, key):
+        # Try to find the document with the given key
+        doc = self.collection.find_one_and_update(
+            {'key': key},
+            {'$set': {'last_accessed': datetime.utcnow()}},
+            projection={'value': 1, '_id': 0}
+        )
+        if doc:
+            compressed_data = doc['value']
+            decompressed_data = pickle.loads(gzip.decompress(base64.b64decode(compressed_data)))
+            return decompressed_data
+        return None
+    
+    def put(self, key, value):
+        # Compress the value
+        compressed_data = base64.b64encode(gzip.compress(pickle.dumps(value))).decode('utf-8')
+        now = datetime.utcnow()
+        # Insert or update the value
+        self.collection.update_one(
+            {'key': key},
+            {'$set': {'value': compressed_data, 'last_accessed': now}},
+            upsert=True
+        )
+        # Check if the collection exceeds the max size
+        count = self.collection.count_documents({})
+        if count > self.max_size:
+            # Remove the least recently used items
+            num_to_remove = count - self.max_size
+            # Find the oldest accessed items
+            old_items = self.collection.find({}, sort=[('last_accessed', 1)], limit=num_to_remove)
+            old_keys = [item['key'] for item in old_items]
+            self.collection.delete_many({'key': {'$in': old_keys}})
 
 class Crocodile:
     def __init__(self, mongo_uri="mongodb://mongodb:27017/", db_name="crocodile_db", 
@@ -522,7 +530,7 @@ class Crocodile:
         """
         start_time = time.time()  # Start timing
         cache_key = f"{entity_name}_{fuzzy}"  # Cache key
-        cached_result = candidate_cache.get(cache_key)  # Check if result is cached
+        cached_result = self.candidate_cache.get(cache_key)  # Check if result is cached
         if cached_result is not None:
             end_time = time.time()  # End timing
             self.log_time("Fetch Candidates (from Cache)", self.current_dataset, self.current_table, start_time, end_time)
@@ -549,7 +557,7 @@ class Crocodile:
                 filtered_candidates = self._process_candidates(candidates, entity_name, row_tokens)
 
                 # Cache the processed candidates
-                candidate_cache.put(cache_key, filtered_candidates)
+                self.candidate_cache.put(cache_key, filtered_candidates)
 
                 # Log success timing
                 end_time = time.time()
@@ -735,7 +743,7 @@ class Crocodile:
         qids_to_fetch = []
         for qid in qids:
             cache_key = f"{hash(row_text)}_{qid}"
-            cached_result = bow_cache.get(cache_key)
+            cached_result = self.bow_cache.get(cache_key)
             if cached_result is not None:
                 cache_hits[qid] = cached_result
             else:
@@ -775,7 +783,7 @@ class Crocodile:
                 result = response.json()
                 for qid, bow_vector in result.items():
                     cache_key = f"{hash(row_text)}_{qid}"
-                    bow_cache.put(cache_key, bow_vector)
+                    self.bow_cache.put(cache_key, bow_vector)
                     cache_hits[qid] = bow_vector
 
                 # Log success timing
@@ -906,6 +914,19 @@ class Crocodile:
 
     def process_row(self, doc_id, dataset_name, table_name):
         """Process a single row from the input data."""
+        CACHE_MAX_SIZE = 1_000_000  # Max number of items
+        self.candidate_cache = MongoCache(
+            mongo_uri=self.mongo_uri,
+            db_name=self.db_name,
+            collection_name="candidate_cache",
+            max_size=CACHE_MAX_SIZE
+        )
+        self.bow_cache = MongoCache(
+            mongo_uri=self.mongo_uri,
+            db_name=self.db_name,
+            collection_name="bow_cache",
+            max_size=CACHE_MAX_SIZE
+        )
         row_start_time = datetime.now()
         try:
             db = self.get_db()
@@ -966,7 +987,7 @@ class Crocodile:
     def run(self):
         db = self.get_db()
         collection = db[self.collection_name]
-
+        
         total_rows = self.count_documents(collection, {"status": "TODO"})
         if total_rows == 0:
             print("No more tasks to process.")

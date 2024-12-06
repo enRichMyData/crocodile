@@ -103,6 +103,7 @@ class Crocodile:
         self.current_dataset = dataset_name
         self.current_table = table_name
 
+    # ... [Time and logging methods remain unchanged]
     def time_mongo_operation(self, operation_name, query_function, *args, **kwargs):
         start_time = time.time()
         db = self.get_db()
@@ -207,10 +208,7 @@ class Crocodile:
         }
         log_collection.insert_one(log_entry)
 
-    # update_table_trace, update_dataset_trace methods unchanged from previous solution
-
     def update_table_trace(self, dataset_name, table_name, increment=0, status=None, start_time=None, end_time=None, row_time=None, ml_ranking_status=None):
-        # (Same logic as before)
         db = self.get_db()
         table_trace_collection = db[self.table_trace_collection_name]
 
@@ -225,23 +223,26 @@ class Crocodile:
             set_fields["ml_ranking_status"] = ml_ranking_status
 
         trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
-        if not trace:
-            return
+        # If table has zero rows and not completed yet, mark it completed
+        if trace and trace.get("total_rows", 0) == 0 and status is None:
+            # If table has no rows, it should be completed immediately.
+            set_fields["status"] = "COMPLETED"
 
-        if "start_time" not in trace and start_time:
-            set_fields["start_time"] = start_time
-        elif "start_time" in trace:
-            start_time = trace["start_time"]
-        else:
-            start_time = datetime.now()
-            set_fields["start_time"] = start_time
+        if trace:
+            if "start_time" not in trace and start_time:
+                set_fields["start_time"] = start_time
+            elif "start_time" in trace:
+                start_time = trace["start_time"]
+            else:
+                start_time = datetime.now()
+                set_fields["start_time"] = start_time
 
-        if end_time:
-            set_fields["end_time"] = end_time
-            set_fields["duration"] = (end_time - start_time).total_seconds()
+            if end_time:
+                set_fields["end_time"] = end_time
+                set_fields["duration"] = (end_time - start_time).total_seconds()
 
-        if row_time:
-            set_fields["last_row_time"] = row_time
+            if row_time:
+                set_fields["last_row_time"] = row_time
 
         if set_fields:
             if "$set" in update_query:
@@ -255,52 +256,49 @@ class Crocodile:
             upsert=True
         )
 
+        # Re-fetch trace after update
         trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
-        total_rows = trace.get("total_rows", 0)
-        processed_rows = trace.get("processed_rows", 0)
-        if total_rows > 0:
-            processed_rows = min(processed_rows, total_rows)
-        else:
-            total_rows = processed_rows
+        if trace:
+            start_time = trace.get("start_time", start_time)
+            total_rows = trace.get("total_rows", 0)
+            processed_rows = trace.get("processed_rows", 0)
 
-        if processed_rows >= total_rows and total_rows > 0:
-            estimated_seconds = 0
-            estimated_hours = 0
-            estimated_days = 0
-            percentage_complete = 100.0
-        elif start_time and total_rows > 0 and processed_rows > 0:
-            elapsed_time = (datetime.now() - start_time).total_seconds()
-            avg_time_per_row = elapsed_time / processed_rows
-            remaining_rows = max(total_rows - processed_rows, 0)
-            estimated_time_left = remaining_rows * avg_time_per_row
-            estimated_seconds = estimated_time_left
-            estimated_hours = estimated_seconds / 3600
-            estimated_days = estimated_hours / 24
-            percentage_complete = (processed_rows / total_rows) * 100
-        else:
-            estimated_seconds = estimated_hours = estimated_days = 0
-            percentage_complete = 0
+            if processed_rows >= total_rows and total_rows > 0:
+                estimated_seconds = 0
+                estimated_hours = 0
+                estimated_days = 0
+                percentage_complete = 100.0
+            elif start_time and total_rows > 0 and processed_rows > 0:
+                elapsed_time = (datetime.now() - start_time).total_seconds()
+                avg_time_per_row = elapsed_time / processed_rows
+                remaining_rows = total_rows - processed_rows
+                estimated_time_left = remaining_rows * avg_time_per_row
+                estimated_seconds = estimated_time_left
+                estimated_hours = estimated_seconds / 3600
+                estimated_days = estimated_hours / 24
+                percentage_complete = (processed_rows / total_rows) * 100
+            else:
+                estimated_seconds = estimated_hours = estimated_days = 0
+                percentage_complete = 0
 
-        update_fields = {
-            "estimated_seconds": round(estimated_seconds, 2),
-            "estimated_hours": round(estimated_hours, 2),
-            "estimated_days": round(estimated_days, 2),
-            "percentage_complete": round(percentage_complete, 2)
-        }
+            update_fields = {
+                "estimated_seconds": round(estimated_seconds, 2),
+                "estimated_hours": round(estimated_hours, 2),
+                "estimated_days": round(estimated_days, 2),
+                "percentage_complete": round(percentage_complete, 2)
+            }
 
-        table_trace_collection.update_one(
-            {"dataset_name": dataset_name, "table_name": table_name},
-            {"$set": update_fields}
-        )
+            table_trace_collection.update_one(
+                {"dataset_name": dataset_name, "table_name": table_name},
+                {"$set": update_fields}
+            )
 
     def update_dataset_trace(self, dataset_name, start_time=None):
-        # (Same logic as before)
         db = self.get_db()
         table_trace_collection = db[self.table_trace_collection_name]
         dataset_trace_collection = db[self.dataset_trace_collection_name]
 
         dataset_trace = dataset_trace_collection.find_one({"dataset_name": dataset_name})
-
         if dataset_trace:
             if "start_time" in dataset_trace:
                 start_time = dataset_trace["start_time"]
@@ -320,6 +318,13 @@ class Crocodile:
             )
 
         tables = list(table_trace_collection.find({"dataset_name": dataset_name}))
+        # Mark zero-row tables as completed if not done
+        for t in tables:
+            if t.get("total_rows", 0) == 0 and t.get("status") != "COMPLETED":
+                self.update_table_trace(dataset_name, t["table_name"], status="COMPLETED")
+
+        tables = list(table_trace_collection.find({"dataset_name": dataset_name}))  # re-fetch after potential updates
+
         total_tables = len(tables)
         processed_tables = sum(1 for t in tables if t.get("status") == "COMPLETED")
         total_rows = sum(t.get("total_rows", 0) for t in tables)
@@ -739,10 +744,6 @@ class Crocodile:
             {"$set": {"rows_per_second": rows_per_second}}
         )
 
-    def load_ml_model(self):
-        from tensorflow.keras.models import load_model
-        return load_model(self.model_path)
-
     def worker(self):
         model = self.load_ml_model()
         db = self.get_db()
@@ -876,13 +877,16 @@ class Crocodile:
                 )
 
             processed_count += len(batch_docs)
+            # Clamp progress so it never exceeds 100%
             progress = (processed_count / total_count) * 100
-            self.update_table_trace(dataset_name, table_name, ml_ranking_status=f"{progress:.2f}%")
+            progress = min(progress, 100.0)
             print(f"ML ranking progress: {progress:.2f}% completed")
+
+            self.update_table_trace(dataset_name, table_name, ml_ranking_status=f"{progress:.2f}%")
 
         self.update_table_trace(dataset_name, table_name, ml_ranking_status="ML_RANKING_COMPLETED")
         print("ML ranking completed.")
-
+    
     def extract_features(self, candidate):
         numerical_features = [
             'ntoken_mention', 'length_mention', 'ntoken_entity', 'length_entity',
@@ -891,3 +895,10 @@ class Crocodile:
             'kind', 'NERtype', 'column_NERtype'
         ]
         return [candidate['features'].get(feature, 0.0) for feature in numerical_features]
+    
+    def load_ml_model(self):
+        from tensorflow.keras.models import load_model
+        return load_model(self.model_path)
+
+
+# You can run crocodile_instance.run() as before.

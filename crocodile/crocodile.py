@@ -14,11 +14,7 @@ import pandas as pd
 from tqdm import tqdm
 
 # Suppress certain Keras/TensorFlow warnings
-warnings.filterwarnings("ignore", category=UserWarning, message="Do not pass an `input_shape`.*")
-warnings.filterwarnings("ignore", category=UserWarning, message="Compiled the loaded model, but the compiled metrics.*")
-warnings.filterwarnings("ignore", category=UserWarning, message="Error in loading the saved optimizer state.*")
-
-# Set logging levels
+warnings.filterwarnings("ignore", category=UserWarning)
 tf.get_logger().setLevel('ERROR')
 absl.logging.set_verbosity(absl.logging.ERROR)
 
@@ -31,16 +27,13 @@ from nltk.tokenize import word_tokenize
 stop_words = set(stopwords.words('english'))
 
 class MongoCache:
-    """MongoDB-based cache for storing key-value pairs."""
     def __init__(self, db, collection_name):
         self.collection = db[collection_name]
         self.collection.create_index('key', unique=True)
 
     def get(self, key):
         result = self.collection.find_one({'key': key})
-        if result:
-            return result['value']
-        return None
+        return result['value'] if result else None
 
     def put(self, key, value):
         self.collection.update_one({'key': key}, {'$set': {'value': value}}, upsert=True)
@@ -75,6 +68,7 @@ class Crocodile:
         self.max_candidates = max_candidates
         self.max_training_candidates = max_training_candidates
         self.entity_retrieval_endpoint = entity_retrieval_endpoint
+        self.entity_bow_endpoint = entity_bow_endpoint
         self.entity_retrieval_token = entity_retrieval_token
         self.candidate_retrieval_limit = candidate_retrieval_limit
         self.selected_features = selected_features or [
@@ -85,25 +79,21 @@ class Crocodile:
         self.model_path = model_path
         self.current_dataset = None
         self.current_table = None
-        self.entity_bow_endpoint = entity_bow_endpoint
 
     def get_db(self):
         client = MongoClient(self.mongo_uri, maxPoolSize=10)
         return client[self.db_name]
 
     def get_candidate_cache(self):
-        db = self.get_db()
-        return MongoCache(db, self.cache_collection_name)
+        return MongoCache(self.get_db(), self.cache_collection_name)
 
     def get_bow_cache(self):
-        db = self.get_db()
-        return MongoCache(db, self.bow_cache_collection_name)
+        return MongoCache(self.get_db(), self.bow_cache_collection_name)
 
     def set_context(self, dataset_name, table_name):
         self.current_dataset = dataset_name
         self.current_table = table_name
 
-    # ... [Time and logging methods remain unchanged]
     def time_mongo_operation(self, operation_name, query_function, *args, **kwargs):
         start_time = time.time()
         db = self.get_db()
@@ -138,13 +128,34 @@ class Crocodile:
             })
             return result
 
-    def update_document(self, collection, query, update, upsert=False):
-        operation_name = f"update_document:{collection.name}"
-        return self.time_mongo_operation(operation_name, collection.update_one, query, update, upsert=upsert)
+    def log_time(self, operation_name, dataset_name, table_name, start_time, end_time, details=None):
+        db = self.get_db()
+        timing_collection = db[self.timing_collection_name]
+        duration = end_time - start_time
+        log_entry = {
+            "operation_name": operation_name,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "start_time": datetime.fromtimestamp(start_time),
+            "end_time": datetime.fromtimestamp(end_time),
+            "duration_seconds": duration,
+        }
+        if details:
+            log_entry["details"] = details
+        timing_collection.insert_one(log_entry)
 
-    def update_documents(self, collection, query, update, upsert=False):
-        operation_name = f"update_documents:{collection.name}"
-        return self.time_mongo_operation(operation_name, collection.update_many, query, update, upsert=upsert)
+    def log_to_db(self, level, message, trace=None):
+        db = self.get_db()
+        log_collection = db[self.error_log_collection_name]
+        log_entry = {
+            "dataset_name": self.current_dataset,
+            "table_name": self.current_table,
+            "timestamp": datetime.now(),
+            "level": level,
+            "message": message,
+            "traceback": trace
+        }
+        log_collection.insert_one(log_entry)
 
     def find_documents(self, collection, query, projection=None, limit=None):
         operation_name = f"find_documents:{collection.name}"
@@ -175,40 +186,21 @@ class Crocodile:
         operation_name = f"insert_many_documents:{collection.name}"
         return self.time_mongo_operation(operation_name, collection.insert_many, documents)
 
+    def update_document(self, collection, query, update, upsert=False):
+        operation_name = f"update_document:{collection.name}"
+        return self.time_mongo_operation(operation_name, collection.update_one, query, update, upsert=upsert)
+
+    def update_documents(self, collection, query, update, upsert=False):
+        operation_name = f"update_documents:{collection.name}"
+        return self.time_mongo_operation(operation_name, collection.update_many, query, update, upsert=upsert)
+
     def delete_documents(self, collection, query):
         operation_name = f"delete_documents:{collection.name}"
         return self.time_mongo_operation(operation_name, collection.delete_many, query)
 
-    def log_time(self, operation_name, dataset_name, table_name, start_time, end_time, details=None):
-        db = self.get_db()
-        timing_collection = db[self.timing_collection_name]
-        duration = end_time - start_time
-        log_entry = {
-            "operation_name": operation_name,
-            "dataset_name": dataset_name,
-            "table_name": table_name,
-            "start_time": datetime.fromtimestamp(start_time),
-            "end_time": datetime.fromtimestamp(end_time),
-            "duration_seconds": duration,
-        }
-        if details:
-            log_entry["details"] = details
-        timing_collection.insert_one(log_entry)
-
-    def log_to_db(self, level, message, trace=None):
-        db = self.get_db()
-        log_collection = db[self.error_log_collection_name]
-        log_entry = {
-            "dataset_name": self.current_dataset,
-            "table_name": self.current_table,
-            "timestamp": datetime.now(),
-            "level": level,
-            "message": message,
-            "traceback": trace
-        }
-        log_collection.insert_one(log_entry)
-
     def update_table_trace(self, dataset_name, table_name, increment=0, status=None, start_time=None, end_time=None, row_time=None, ml_ranking_status=None):
+        # Implementation from previous answer (clamping processed_rows)
+        # ...
         db = self.get_db()
         table_trace_collection = db[self.table_trace_collection_name]
 
@@ -223,9 +215,7 @@ class Crocodile:
             set_fields["ml_ranking_status"] = ml_ranking_status
 
         trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
-        # If table has zero rows and not completed yet, mark it completed
         if trace and trace.get("total_rows", 0) == 0 and status is None:
-            # If table has no rows, it should be completed immediately.
             set_fields["status"] = "COMPLETED"
 
         if trace:
@@ -240,7 +230,6 @@ class Crocodile:
             if end_time:
                 set_fields["end_time"] = end_time
                 set_fields["duration"] = (end_time - start_time).total_seconds()
-
             if row_time:
                 set_fields["last_row_time"] = row_time
 
@@ -250,18 +239,21 @@ class Crocodile:
             else:
                 update_query["$set"] = set_fields
 
-        table_trace_collection.update_one(
-            {"dataset_name": dataset_name, "table_name": table_name},
-            update_query,
-            upsert=True
-        )
+        self.time_mongo_operation(f"update_table_trace:{table_name}", table_trace_collection.update_one,
+                                  {"dataset_name": dataset_name, "table_name": table_name}, update_query, upsert=True)
 
-        # Re-fetch trace after update
         trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
         if trace:
             start_time = trace.get("start_time", start_time)
             total_rows = trace.get("total_rows", 0)
             processed_rows = trace.get("processed_rows", 0)
+
+            if total_rows > 0 and processed_rows > total_rows:
+                processed_rows = total_rows
+                table_trace_collection.update_one(
+                    {"dataset_name": dataset_name, "table_name": table_name},
+                    {"$set": {"processed_rows": processed_rows}}
+                )
 
             if processed_rows >= total_rows and total_rows > 0:
                 estimated_seconds = 0
@@ -294,6 +286,8 @@ class Crocodile:
             )
 
     def update_dataset_trace(self, dataset_name, start_time=None):
+        # Implementation from previous answer (clamping processed_rows)
+        # ...
         db = self.get_db()
         table_trace_collection = db[self.table_trace_collection_name]
         dataset_trace_collection = db[self.dataset_trace_collection_name]
@@ -318,22 +312,18 @@ class Crocodile:
             )
 
         tables = list(table_trace_collection.find({"dataset_name": dataset_name}))
-        # Mark zero-row tables as completed if not done
         for t in tables:
             if t.get("total_rows", 0) == 0 and t.get("status") != "COMPLETED":
                 self.update_table_trace(dataset_name, t["table_name"], status="COMPLETED")
 
-        tables = list(table_trace_collection.find({"dataset_name": dataset_name}))  # re-fetch after potential updates
-
+        tables = list(table_trace_collection.find({"dataset_name": dataset_name}))
         total_tables = len(tables)
         processed_tables = sum(1 for t in tables if t.get("status") == "COMPLETED")
         total_rows = sum(t.get("total_rows", 0) for t in tables)
         processed_rows = sum(t.get("processed_rows", 0) for t in tables)
 
-        if total_rows > 0:
-            processed_rows = min(processed_rows, total_rows)
-        else:
-            total_rows = processed_rows
+        if total_rows > 0 and processed_rows > total_rows:
+            processed_rows = total_rows
 
         status = "IN_PROGRESS"
         if processed_tables == total_tables and total_tables > 0:
@@ -353,7 +343,7 @@ class Crocodile:
             estimated_seconds = round(estimated_time_left, 2)
             estimated_hours = round(estimated_seconds / 3600, 2)
             estimated_days = round(estimated_hours / 24, 2)
-            percentage_complete = round((processed_rows / total_rows) * 100, 2)
+            percentage_complete = round((processed_rows / total_rows)*100, 2)
         else:
             estimated_seconds = estimated_hours = estimated_days = 0
             percentage_complete = 0
@@ -370,6 +360,7 @@ class Crocodile:
             "status": status,
             "duration_from_tables": round(duration_from_tables, 2)
         }
+
         if duration_from_start is not None:
             update_fields["duration_from_start"] = round(duration_from_start, 2)
 
@@ -380,15 +371,24 @@ class Crocodile:
         )
 
     async def _fetch_candidate(self, entity_name, row_text, fuzzy, qid, session):
+        # Implementation from previous answer including logging time
+        # ...
         url = f"{self.entity_retrieval_endpoint}?name={entity_name}&limit={self.candidate_retrieval_limit}&fuzzy={fuzzy}&token={self.entity_retrieval_token}"
         if qid:
             url += f"&ids={qid}"
+        attempts = 0
         backoff = 1
-        for attempts in range(5):
+
+        while attempts < 5:
+            attempts += 1
+            start_time = time.time()
             try:
                 async with session.get(url, timeout=10) as response:
                     response.raise_for_status()
                     candidates = await response.json()
+                    end_time = time.time()
+                    self.log_time("FetchCandidates", self.current_dataset, self.current_table, start_time, end_time, details={"url": url})
+
                     row_tokens = set(self.tokenize_text(row_text))
                     filtered_candidates = self._process_candidates(candidates, entity_name, row_tokens)
                     cache = self.get_candidate_cache()
@@ -397,14 +397,16 @@ class Crocodile:
                     return entity_name, filtered_candidates
             except Exception as e:
                 self.log_to_db(
-                    "WARNING" if attempts < 4 else "ERROR",
-                    f"Fetch Candidates attempt {attempts+1} failed for '{entity_name}': {str(e)}"
+                    "WARNING" if attempts < 5 else "ERROR",
+                    f"Fetch Candidates attempt {attempts} failed for '{entity_name}': {str(e)}"
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 16)
         return entity_name, []
 
     async def fetch_candidates_batch_async(self, entities, row_texts, fuzzies, qids):
+        # Implementation from previous answer
+        # ...
         results = {}
         cache = self.get_candidate_cache()
         to_fetch = []
@@ -433,12 +435,12 @@ class Crocodile:
         return asyncio.run(self.fetch_candidates_batch_async(entities, row_texts, fuzzies, qids))
 
     async def _fetch_bow_for_multiple_qids(self, row_hash, row_text, qids, session):
-        # row_hash = str(hash(row_text)) to ensure identical text lines get the same cache key prefix
+        # Implementation from previous answer including logging time
+        # ...
         bow_cache = self.get_bow_cache()
         to_fetch = []
         bow_results = {}
 
-        # Check cache for each qid using (row_hash, qid)
         for qid in qids:
             if qid:
                 cache_key = f"{row_hash}_{qid}"
@@ -449,19 +451,23 @@ class Crocodile:
                     to_fetch.append(qid)
 
         if not to_fetch:
-            # All qids cached
             return bow_results
 
-        # Fetch all uncached qids in one request
         url = f"{self.entity_bow_endpoint}?token={self.entity_retrieval_token}"
-        payload = {"json": {"text": row_text, "qids": to_fetch}}
+        attempts = 0
         backoff = 1
-        for attempts in range(5):
+        payload = {"json": {"text": row_text, "qids": to_fetch}}
+
+        while attempts < 5:
+            attempts += 1
+            start_time = time.time()
             try:
                 async with session.post(url, json=payload, timeout=10) as response:
                     response.raise_for_status()
                     bow_data = await response.json()
-                    # Store each qid result individually in cache
+                    end_time = time.time()
+                    self.log_time("FetchBoW", self.current_dataset, self.current_table, start_time, end_time, details={"url": url, "qids": to_fetch})
+
                     for qid in to_fetch:
                         qid_data = bow_data.get(qid, {"similarity_score": 0.0, "matched_words": []})
                         cache_key = f"{row_hash}_{qid}"
@@ -470,8 +476,8 @@ class Crocodile:
                     return bow_results
             except Exception as e:
                 self.log_to_db(
-                    "WARNING" if attempts < 4 else "ERROR",
-                    f"BoW Fetch attempt {attempts+1} failed for QIDs {to_fetch}: {str(e)}"
+                    "WARNING" if attempts < 5 else "ERROR",
+                    f"BoW Fetch attempt {attempts} failed for QIDs {to_fetch}: {str(e)}"
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 16)
@@ -487,19 +493,19 @@ class Crocodile:
 
     def process_rows_batch(self, docs, dataset_name, table_name):
         row_start_time = datetime.now()
+        db = self.get_db()
+        collection = db[self.collection_name]
+
+        entities_to_process = []
+        row_texts = []
+        fuzzies = []
+        qids = []
+        row_indices = []
+        col_indices = []
+        ner_types = []
+        row_data_list = []
+
         try:
-            db = self.get_db()
-            collection = db[self.collection_name]
-
-            entities_to_process = []
-            row_texts = []
-            fuzzies = []
-            qids = []
-            row_indices = []
-            col_indices = []
-            ner_types = []
-            row_data_list = []
-
             for doc in docs:
                 row = doc['data']
                 ne_columns = doc['classified_columns']['NE']
@@ -508,9 +514,7 @@ class Crocodile:
                 row_index = doc.get("row_id", None)
 
                 row_text = ' '.join([str(row[int(c)]) for c in context_columns if int(c) < len(row)])
-                # We'll hash the row_text for bow caching
-                # The idea is not to rely on row_id, but on hash(row_text) so identical texts share cache
-                row_hash = str(hash(row_text)) 
+                row_hash = str(hash(row_text))
 
                 row_data_list.append((doc['_id'], row, ne_columns, context_columns, correct_qids, row_index, row_text, row_hash))
 
@@ -560,7 +564,6 @@ class Crocodile:
                 for ne_value in entities_to_retry:
                     candidates_results[ne_value] = retry_results.get(ne_value, [])
 
-            # Extract QIDs for BoW
             all_candidate_qids = []
             for ne_value, candidates in candidates_results.items():
                 for c in candidates:
@@ -589,6 +592,7 @@ class Crocodile:
                     else:
                         c['features']['bow_similarity'] = 0.0
 
+            # Process each doc, set status=DONE, save training data
             for doc_id, row, ne_columns, context_columns, correct_qids, row_index, row_text, row_hash in row_data_list:
                 linked_entities = {}
                 training_candidates_by_ne_column = {}
@@ -607,7 +611,6 @@ class Crocodile:
                                 candidate['features']['column_NERtype'] = ner_type_numeric
 
                             ranked_candidates = self.rank_with_feature_scoring(candidates)
-
                             if correct_qid and correct_qid not in [can['id'] for can in ranked_candidates[:self.max_training_candidates]]:
                                 correct_candidate = next((x for x in ranked_candidates if x['id'] == correct_qid), None)
                                 if correct_candidate:
@@ -617,13 +620,14 @@ class Crocodile:
                             linked_entities[c] = el_results_candidates
                             training_candidates_by_ne_column[c] = ranked_candidates[:self.max_training_candidates]
 
+                # Save training data
                 self.save_candidates_for_training(training_candidates_by_ne_column, dataset_name, table_name, row_index)
                 db[self.collection_name].update_one({'_id': doc_id}, {'$set': {'el_results': linked_entities, 'status': 'DONE'}})
 
-            row_end_time = datetime.now()
-            row_duration = (row_end_time - row_start_time).total_seconds()
-            self.update_table_trace(dataset_name, table_name, increment=len(docs), row_time=row_duration)
+            # Increment processed_rows by number of docs processed
+            self.update_table_trace(dataset_name, table_name, increment=len(row_data_list))
             self.log_processing_speed(dataset_name, table_name)
+
         except Exception as e:
             self.log_to_db("ERROR", f"Error processing batch of rows", traceback.format_exc())
 
@@ -748,6 +752,8 @@ class Crocodile:
         model = self.load_ml_model()
         db = self.get_db()
         collection = db[self.collection_name]
+        table_trace_collection = db[self.table_trace_collection_name]
+
         while True:
             todo_docs = self.find_documents(collection, {"status": "TODO"}, {"_id": 1, "dataset_name":1, "table_name":1}, limit=10)
             if not todo_docs:
@@ -762,12 +768,21 @@ class Crocodile:
 
             for (dataset_name, table_name), doc_ids in tasks_by_table.items():
                 self.set_context(dataset_name, table_name)
+                total_count = self.count_documents(collection, {"dataset_name": dataset_name, "table_name": table_name})
+                t_trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
+                if t_trace is None or "total_rows" not in t_trace or t_trace["total_rows"] != total_count:
+                    table_trace_collection.update_one(
+                        {"dataset_name": dataset_name, "table_name": table_name},
+                        {"$set": {"total_rows": total_count}},
+                        upsert=True
+                    )
+
                 start_time = datetime.now()
                 self.update_dataset_trace(dataset_name, start_time=start_time)
                 self.update_table_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
 
-                docs = self.find_documents(collection, {"_id": {"$in": doc_ids}})
                 self.update_documents(collection, {"_id": {"$in": doc_ids}, "status":"TODO"}, {"$set":{"status":"DOING"}})
+                docs = self.find_documents(collection, {"_id": {"$in": doc_ids}, "status":"DOING"})
                 self.process_rows_batch(docs, dataset_name, table_name)
 
                 processed_count = self.count_documents(collection, {
@@ -779,6 +794,7 @@ class Crocodile:
                      "dataset_name": dataset_name,
                      "table_name": table_name
                 })
+
                 if processed_count == total_count:
                     end_time = datetime.now()
                     self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
@@ -877,7 +893,6 @@ class Crocodile:
                 )
 
             processed_count += len(batch_docs)
-            # Clamp progress so it never exceeds 100%
             progress = (processed_count / total_count) * 100
             progress = min(progress, 100.0)
             print(f"ML ranking progress: {progress:.2f}% completed")
@@ -886,13 +901,12 @@ class Crocodile:
 
         self.update_table_trace(dataset_name, table_name, ml_ranking_status="ML_RANKING_COMPLETED")
         print("ML ranking completed.")
-    
+
     def extract_features(self, candidate):
         numerical_features = [
             'ntoken_mention', 'length_mention', 'ntoken_entity', 'length_entity',
             'popularity', 'ed_score', 'desc', 'descNgram',
-            'bow_similarity',
-            'kind', 'NERtype', 'column_NERtype'
+            'bow_similarity', 'kind', 'NERtype', 'column_NERtype'
         ]
         return [candidate['features'].get(feature, 0.0) for feature in numerical_features]
     
@@ -900,5 +914,15 @@ class Crocodile:
         from tensorflow.keras.models import load_model
         return load_model(self.model_path)
 
-
-# You can run crocodile_instance.run() as before.
+# To run:
+# if __name__ == "__main__":
+#     mp.set_start_method("spawn", force=True)
+#     crocodile = Crocodile(
+#         mongo_uri="mongodb://localhost:27017/",
+#         db_name="crocodile_db",
+#         entity_retrieval_endpoint="http://example.com/api",
+#         entity_retrieval_token="your_token",
+#         entity_bow_endpoint="http://example.com/api_bow",
+#         model_path="path_to_your_model.h5"
+#     )
+#     crocodile.run()

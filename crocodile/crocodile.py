@@ -402,28 +402,55 @@ class Crocodile:
         )
 
     async def _fetch_candidate(self, entity_name, row_text, fuzzy, qid, session):
+        db = self.get_db()
+        timing_trace_collection = db[self.timing_collection_name]
         url = f"{self.entity_retrieval_endpoint}?name={entity_name}&limit={self.candidate_retrieval_limit}&fuzzy={fuzzy}&token={self.entity_retrieval_token}"
         if qid:
             url += f"&ids={qid}"
         backoff = 1
+
         for attempts in range(5):
+            start_time = time.time()
             try:
                 async with session.get(url, timeout=10) as response:
                     response.raise_for_status()
                     candidates = await response.json()
                     row_tokens = set(self.tokenize_text(row_text))
                     filtered_candidates = self._process_candidates(candidates, entity_name, row_tokens)
+
+                    # Cache the result
                     cache = self.get_candidate_cache()
                     cache_key = f"{entity_name}_{fuzzy}"
                     cache.put(cache_key, filtered_candidates)
+
+                    # Log success
+                    end_time = time.time()
+                    timing_trace_collection.insert_one({
+                        "operation_name": "_fetch_candidate",
+                        "url": url,
+                        "start_time": datetime.fromtimestamp(start_time),
+                        "end_time": datetime.fromtimestamp(end_time),
+                        "duration_seconds": end_time - start_time,
+                        "status": "SUCCESS",
+                        "attempt": attempts + 1,
+                    })
+
                     return entity_name, filtered_candidates
             except Exception as e:
-                self.log_to_db(
-                    "WARNING" if attempts < 4 else "ERROR",
-                    f"Fetch Candidates attempt {attempts+1} failed for '{entity_name}': {str(e)}"
-                )
+                end_time = time.time()
+                timing_trace_collection.insert_one({
+                    "operation_name": "_fetch_candidate",
+                    "url": url,
+                    "start_time": datetime.fromtimestamp(start_time),
+                    "end_time": datetime.fromtimestamp(end_time),
+                    "duration_seconds": end_time - start_time,
+                    "status": "FAILED",
+                    "error": str(e),
+                    "attempt": attempts + 1,
+                })
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 16)
+
         return entity_name, []
 
     async def fetch_candidates_batch_async(self, entities, row_texts, fuzzies, qids):
@@ -455,12 +482,13 @@ class Crocodile:
         return asyncio.run(self.fetch_candidates_batch_async(entities, row_texts, fuzzies, qids))
 
     async def _fetch_bow_for_multiple_qids(self, row_hash, row_text, qids, session):
-        # row_hash = str(hash(row_text)) to ensure identical text lines get the same cache key prefix
+        db = self.get_db()
+        timing_trace_collection = db[self.timing_collection_name]
         bow_cache = self.get_bow_cache()
         to_fetch = []
         bow_results = {}
 
-        # Check cache for each qid using (row_hash, qid)
+        # Check cache for each qid
         for qid in qids:
             if qid:
                 cache_key = f"{row_hash}_{qid}"
@@ -471,30 +499,51 @@ class Crocodile:
                     to_fetch.append(qid)
 
         if not to_fetch:
-            # All qids cached
-            return bow_results
+            return bow_results  # All qids cached
 
-        # Fetch all uncached qids in one request
         url = f"{self.entity_bow_endpoint}?token={self.entity_retrieval_token}"
-        payload = {"json": {"text": row_text, "qids": to_fetch}}
+        payload = {"json":{"text": row_text, "qids": to_fetch}}
         backoff = 1
+
         for attempts in range(5):
+            start_time = time.time()
             try:
                 async with session.post(url, json=payload, timeout=10) as response:
                     response.raise_for_status()
                     bow_data = await response.json()
-                    # Store each qid result individually in cache
+
+                    # Cache the results and populate bow_results
                     for qid in to_fetch:
                         qid_data = bow_data.get(qid, {"similarity_score": 0.0, "matched_words": []})
                         cache_key = f"{row_hash}_{qid}"
                         bow_cache.put(cache_key, qid_data)
                         bow_results[qid] = qid_data
+
+                    # Log success
+                    end_time = time.time()
+                    timing_trace_collection.insert_one({
+                        "operation_name": "_fetch_bow_for_multiple_qids",
+                        "url": url,
+                        "start_time": datetime.fromtimestamp(start_time),
+                        "end_time": datetime.fromtimestamp(end_time),
+                        "duration_seconds": end_time - start_time,
+                        "status": "SUCCESS",
+                        "attempt": attempts + 1,
+                    })
+
                     return bow_results
             except Exception as e:
-                self.log_to_db(
-                    "WARNING" if attempts < 4 else "ERROR",
-                    f"BoW Fetch attempt {attempts+1} failed for QIDs {to_fetch}: {str(e)}"
-                )
+                end_time = time.time()
+                timing_trace_collection.insert_one({
+                    "operation_name": "_fetch_bow_for_multiple_qids",
+                    "url": url,
+                    "start_time": datetime.fromtimestamp(start_time),
+                    "end_time": datetime.fromtimestamp(end_time),
+                    "duration_seconds": end_time - start_time,
+                    "status": "FAILED",
+                    "error": str(e),
+                    "attempt": attempts + 1,
+                })
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 16)
 

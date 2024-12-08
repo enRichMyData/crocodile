@@ -832,13 +832,8 @@ class Crocodile:
         model = self.load_ml_model()
         db = self.get_db()
         collection = db[self.collection_name]
-
-        # Track processed datasets to avoid re-passing start_time
-        processed_datasets = set()
-
         while True:
-            # Fetch documents marked as "TODO"
-            todo_docs = self.find_documents(collection, {"status": "TODO"}, {"_id": 1, "dataset_name": 1, "table_name": 1}, limit=10)
+            todo_docs = self.find_documents(collection, {"status": "TODO"}, {"_id": 1, "dataset_name":1, "table_name":1}, limit=10)
             if not todo_docs:
                 print("No more tasks to process.")
                 break
@@ -851,39 +846,28 @@ class Crocodile:
 
             for (dataset_name, table_name), doc_ids in tasks_by_table.items():
                 self.set_context(dataset_name, table_name)
-
-                # Pass start_time only the first time for a dataset
-                if dataset_name not in processed_datasets:
-                    start_time = datetime.now()
-                    self.update_dataset_trace(dataset_name, start_time=start_time)
-                    processed_datasets.add(dataset_name)
-                else:
-                    start_time = None  # No need to pass start_time again
-
-                # Update table trace for the specific table
+                start_time = datetime.now()
+                self.update_dataset_trace(dataset_name, start_time=start_time)
                 self.update_table_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
 
-                # Process the documents for the table
                 docs = self.find_documents(collection, {"_id": {"$in": doc_ids}})
-                self.update_documents(collection, {"_id": {"$in": doc_ids}, "status": "TODO"}, {"$set": {"status": "DOING"}})
+                self.update_documents(collection, {"_id": {"$in": doc_ids}, "status":"TODO"}, {"$set":{"status":"DOING"}})
                 self.process_rows_batch(docs, dataset_name, table_name)
 
-                # Check if all rows for the table are processed
                 processed_count = self.count_documents(collection, {
-                    "dataset_name": dataset_name,
-                    "table_name": table_name,
-                    "status": "DONE"
+                     "dataset_name": dataset_name,
+                     "table_name": table_name,
+                     "status": "DONE"
                 })
                 total_count = self.count_documents(collection, {
-                    "dataset_name": dataset_name,
-                    "table_name": table_name
+                     "dataset_name": dataset_name,
+                     "table_name": table_name
                 })
                 if processed_count == total_count:
                     end_time = datetime.now()
                     self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
                     self.apply_ml_ranking(dataset_name, table_name, model)
 
-                # Update dataset trace without passing start_time again
                 self.update_dataset_trace(dataset_name)
 
     def run(self):

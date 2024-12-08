@@ -425,7 +425,7 @@ class Crocodile:
         for attempts in range(5):
             start_time = time.time()
             try:
-                async with session.get(url, timeout=10) as response:
+                async with session.get(url, timeout=1) as response:
                     response.raise_for_status()
                     candidates = await response.json()
                     row_tokens = set(self.tokenize_text(row_text))
@@ -521,7 +521,7 @@ class Crocodile:
         for attempts in range(5):
             start_time = time.time()
             try:
-                async with session.post(url, json=payload, timeout=10) as response:
+                async with session.post(url, json=payload, timeout=1) as response:
                     response.raise_for_status()
                     bow_data = await response.json()
 

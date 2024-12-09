@@ -59,7 +59,9 @@ class Crocodile:
                  max_workers=None, max_candidates=5, max_training_candidates=10,
                  entity_retrieval_endpoint=None, entity_bow_endpoint=None, entity_retrieval_token=None,
                  selected_features=None, candidate_retrieval_limit=100,
-                 model_path=None):
+                 model_path=None,
+                 batch_size=1024,
+                 ml_ranking_workers=2):
 
         self.mongo_uri = mongo_uri
         self.db_name = db_name
@@ -86,6 +88,8 @@ class Crocodile:
         self.current_dataset = None
         self.current_table = None
         self.entity_bow_endpoint = entity_bow_endpoint
+        self.batch_size = batch_size
+        self.ml_ranking_workers = ml_ranking_workers
 
     def get_db(self):
         client = MongoClient(self.mongo_uri, maxPoolSize=10)
@@ -860,15 +864,29 @@ class Crocodile:
                      "status": "DONE"
                 })
                 total_count = self.count_documents(collection, {
-                     "dataset_name": dataset_name,
-                     "table_name": table_name
+                        "dataset_name": dataset_name,
+                        "table_name": table_name
                 })
                 if processed_count == total_count:
                     end_time = datetime.now()
                     self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
-                    self.apply_ml_ranking(dataset_name, table_name, model)
 
                 self.update_dataset_trace(dataset_name)
+
+    def ml_ranking_worker(self):
+        model = self.load_ml_model()
+        db = self.get_db()
+        collection = db[self.collection_name]
+        table_trace_collection = db[self.table_trace_collection_name]
+        while True:
+            todo_doc = self.find_one_document(collection, {"status": "TODO"})
+            if todo_doc is None: # no more tasks to process 
+                break
+            table_trace_obj = self.find_one_and_update(table_trace_collection,  {"$and": [{"status": "COMPLETED"}, {"ml_ranking_status": None}]}, {"$set": {"ml_ranking_status": "PENDING"}})
+            if table_trace_obj:
+                dataset_name = table_trace_obj.get("dataset_name")
+                table_name = table_trace_obj.get("table_name")
+                self.apply_ml_ranking(dataset_name, table_name, model)
 
     def run(self):
         mp.set_start_method("spawn", force=True)
@@ -888,6 +906,11 @@ class Crocodile:
             p = mp.Process(target=self.worker)
             p.start()
             processes.append(p)
+        
+        for _ in range(self.ml_ranking_workers):
+            p = mp.Process(target=self.ml_ranking_worker)
+            p.start()
+            processes.append(p)
 
         for p in processes:
             p.join()
@@ -899,7 +922,6 @@ class Crocodile:
         training_collection = db[self.training_collection_name]
         input_collection = db[self.collection_name]
 
-        batch_size = 1000
         processed_count = 0
         total_count = self.count_documents(training_collection, {
             "dataset_name": dataset_name,
@@ -911,7 +933,7 @@ class Crocodile:
         while processed_count < total_count:
             batch_docs = list(training_collection.find(
                 {"dataset_name": dataset_name, "table_name": table_name, "ml_ranked": False},
-                limit=batch_size
+                limit=self.batch_size
             ))
 
             if not batch_docs:
@@ -968,7 +990,7 @@ class Crocodile:
 
             self.update_table_trace(dataset_name, table_name, ml_ranking_status=f"{progress:.2f}%")
 
-        self.update_table_trace(dataset_name, table_name, ml_ranking_status="ML_RANKING_COMPLETED")
+        self.update_table_trace(dataset_name, table_name, ml_ranking_status="COMPLETED")
         print("ML ranking completed.")
     
     def extract_features(self, candidate):

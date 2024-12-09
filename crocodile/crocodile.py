@@ -863,6 +863,7 @@ class Crocodile:
                 if processed_count == total_count:
                     end_time = datetime.now()
                     self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
+                    self.update_dataset_trace(dataset_name)
 
     def ml_ranking_worker(self):
         model = self.load_ml_model()

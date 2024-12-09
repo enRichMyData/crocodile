@@ -253,10 +253,10 @@ class Crocodile:
             set_fields["start_time"] = start_time
 
         # Handle end time and duration
-        if end_time:
+        if "end_time" not in trace and end_time:
             set_fields["end_time"] = end_time
             set_fields["duration"] = (end_time - start_time).total_seconds()
-
+            
         # Update row time
         if row_time is not None:
             set_fields["last_row_time"] = row_time
@@ -376,16 +376,10 @@ class Crocodile:
 
         # Estimation logic
         if processed_rows > 0 and total_rows > 0:
-            # If we have completed tables, we can rely on duration_from_tables
-            # Otherwise, fallback to using the duration_from_start if available
-            if duration_from_tables > 0:
-                avg_time_per_row = duration_from_tables / processed_rows
+            if duration_from_start is not None and duration_from_start > 0:
+                avg_time_per_row = duration_from_start / processed_rows
             else:
-                # No completed tables yet, use dataset start time to estimate
-                if duration_from_start is not None and duration_from_start > 0:
-                    avg_time_per_row = duration_from_start / processed_rows
-                else:
-                    avg_time_per_row = 0.0
+                avg_time_per_row = 0.0
 
             remaining_rows = max(total_rows - processed_rows, 0)
             estimated_time_left = remaining_rows * avg_time_per_row
@@ -833,7 +827,6 @@ class Crocodile:
         )
 
     def worker(self):
-        model = self.load_ml_model()
         db = self.get_db()
         collection = db[self.collection_name]
         while True:
@@ -870,8 +863,6 @@ class Crocodile:
                 if processed_count == total_count:
                     end_time = datetime.now()
                     self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
-
-                self.update_dataset_trace(dataset_name)
 
     def ml_ranking_worker(self):
         model = self.load_ml_model()

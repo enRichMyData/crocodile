@@ -1,4 +1,3 @@
-import requests
 import time
 import asyncio
 import aiohttp
@@ -11,7 +10,7 @@ import warnings
 import absl.logging
 import tensorflow as tf
 import pandas as pd
-from tqdm import tqdm
+import hashlib
 
 # Suppress certain Keras/TensorFlow warnings
 warnings.filterwarnings("ignore", category=UserWarning, message="Do not pass an `input_shape`.*")
@@ -198,7 +197,7 @@ class Crocodile:
             log_entry["details"] = details
         timing_collection.insert_one(log_entry)
 
-    def log_to_db(self, level, message, trace=None):
+    def log_to_db(self, level, message, trace=None, attempt=None):
         db = self.get_db()
         log_collection = db[self.error_log_collection_name]
         log_entry = {
@@ -209,6 +208,8 @@ class Crocodile:
             "message": message,
             "traceback": trace
         }
+        if attempt is not None:
+            log_entry["attempt"] = attempt
         log_collection.insert_one(log_entry)
 
     def update_table_trace(self, dataset_name, table_name, increment=0, status=None, start_time=None, end_time=None, row_time=None, ml_ranking_status=None):
@@ -449,16 +450,7 @@ class Crocodile:
                     return entity_name, filtered_candidates
             except Exception as e:
                 end_time = time.time()
-                timing_trace_collection.insert_one({
-                    "operation_name": "_fetch_candidate",
-                    "url": url,
-                    "start_time": datetime.fromtimestamp(start_time),
-                    "end_time": datetime.fromtimestamp(end_time),
-                    "duration_seconds": end_time - start_time,
-                    "status": "FAILED",
-                    "error": str(e),
-                    "attempt": attempts + 1,
-                })
+                self.log_to_db("FETCH_CANDIDATES_ERROR", f"Error fetching candidates for {entity_name}", traceback.format_exc(), attempt=attempts + 1)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 16)
 
@@ -501,15 +493,14 @@ class Crocodile:
 
         # Check cache for each qid
         for qid in qids:
-            if qid:
-                cache_key = f"{row_hash}_{qid}"
-                cached_result = bow_cache.get(cache_key)
-                if cached_result is not None:
-                    bow_results[qid] = cached_result
-                else:
-                    to_fetch.append(qid)
+            cache_key = f"{row_hash}_{qid}"
+            cached_result = bow_cache.get(cache_key)
+            if cached_result is not None:
+                bow_results[qid] = cached_result
+            else:
+                to_fetch.append(qid)
 
-        if not to_fetch:
+        if len(to_fetch) == 0:
             return bow_results  # All qids cached
 
         url = f"{self.entity_bow_endpoint}?token={self.entity_retrieval_token}"
@@ -545,16 +536,7 @@ class Crocodile:
                     return bow_results
             except Exception as e:
                 end_time = time.time()
-                timing_trace_collection.insert_one({
-                    "operation_name": "_fetch_bow_for_multiple_qids",
-                    "url": url,
-                    "start_time": datetime.fromtimestamp(start_time),
-                    "end_time": datetime.fromtimestamp(end_time),
-                    "duration_seconds": end_time - start_time,
-                    "status": "FAILED",
-                    "error": str(e),
-                    "attempt": attempts + 1,
-                })
+                self.log_to_db("FETCH_BOW_ERROR", f"Error fetching BoW for {row_hash}", traceback.format_exc(), attempt=attempts + 1)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 16)
 
@@ -592,7 +574,7 @@ class Crocodile:
                 row_text = ' '.join([str(row[int(c)]) for c in context_columns if int(c) < len(row)])
                 # We'll hash the row_text for bow caching
                 # The idea is not to rely on row_id, but on hash(row_text) so identical texts share cache
-                row_hash = str(hash(row_text)) 
+                row_hash = hashlib.sha256(row_text.encode()).hexdigest()
 
                 row_data_list.append((doc['_id'], row, ne_columns, context_columns, correct_qids, row_index, row_text, row_hash))
 

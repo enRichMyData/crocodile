@@ -102,9 +102,9 @@ class TraceThread(Thread):
             percentage_complete = 0
             if total_rows_processed > 0:
                 avg_time_per_row = time_passed / total_rows_processed
-                estimated_time_left_in_seconds = avg_time_per_row * total_rows_todo
-                estimated_time_left_in_hours = estimated_time_left_in_seconds / 3600
-                estimated_time_left_in_days = estimated_time_left_in_hours / 24
+                estimated_time_left_in_seconds = round(avg_time_per_row * (total_rows_todo), 2)
+                estimated_time_left_in_hours = round(estimated_time_left_in_seconds / 3600, 2)
+                estimated_time_left_in_days = round(estimated_time_left_in_hours / 24, 2)
                 percentage_complete = round((total_rows_processed / (total_rows_todo + total_rows_doing + total_rows_processed)) * 100, 2)
             
             # Update dataset trace

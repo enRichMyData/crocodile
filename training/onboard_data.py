@@ -115,10 +115,12 @@ def process_tables(datasets, max_tables_at_once=5, debug_n_tables=None, debug_ta
         batch_tables_data = []
         batch_table_names = []
 
+        total_rows = 0
         for table in tqdm(tables, desc=f"Processing tables for dataset {dataset}..."):
             if table.endswith(".csv"):
                 df = pd.read_csv(f"./Datasets/{dataset}/tables/{table}")
                 table_name = table.split(".csv")[0]
+                total_rows += len(df)
 
                 df_sampled = df.sample(n=min(100, len(df)), random_state=42)
 
@@ -143,7 +145,7 @@ def process_tables(datasets, max_tables_at_once=5, debug_n_tables=None, debug_ta
             {"$setOnInsert": {
                 "total_tables": len(tables),
                 "processed_tables": 0,
-                "total_rows": 0,
+                "total_rows": total_rows,
                 "processed_rows": 0,
                 "status": "PENDING"
             }},

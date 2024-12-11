@@ -99,13 +99,13 @@ class TraceThread(Thread):
             estimated_time_left_in_seconds = None
             estimated_time_left_in_hours = None
             estimated_time_left_in_days = None
-            percent_complete = 0
+            percentage_complete = 0
             if total_rows_processed > 0:
                 avg_time_per_row = time_passed / total_rows_processed
                 estimated_time_left_in_seconds = avg_time_per_row * total_rows_todo
                 estimated_time_left_in_hours = estimated_time_left_in_seconds / 3600
                 estimated_time_left_in_days = estimated_time_left_in_hours / 24
-                percent_complete = (total_rows_processed / (total_rows_todo + total_rows_doing + total_rows_processed)) * 100
+                percentage_complete = round((total_rows_processed / (total_rows_todo + total_rows_doing + total_rows_processed)) * 100, 2)
             
             # Update dataset trace
             self.dataset_trace_collection.update_one(
@@ -118,8 +118,9 @@ class TraceThread(Thread):
                     "total_rows_todo": total_rows_todo,
                     "total_rows_processed": total_rows_processed,
                     "time_passed_seconds": time_passed,
-                    "percent_complete": percent_complete
-                }}
+                    "percentage_complete": percentage_complete
+                }},
+                upsert=True
             )
             
             # Break if all rows are processed
@@ -149,7 +150,7 @@ class Crocodile:
                  selected_features=None, candidate_retrieval_limit=100,
                  model_path=None,
                  batch_size=1024,
-                 ml_ranking_workers=2):
+                 ml_ranking_workers=1):
 
         self.mongo_uri = mongo_uri
         self.db_name = db_name

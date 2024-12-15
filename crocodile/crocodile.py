@@ -47,17 +47,28 @@ class MongoCache:
 
 
 class TraceThread(Thread):
-    def __init__(self, input_collection, dataset_trace_collection):
+    def __init__(self, input_collection, dataset_trace_collection, table_trace_collection):
         super().__init__()
         self.input_collection = input_collection
         self.dataset_trace_collection = dataset_trace_collection
+        self.table_trace_collection = table_trace_collection
         
-        # Initialize dataset trace
-        doc_todo = self.input_collection.find_one({"status": "TODO"})
+        # Find a dataset with a TODO or DOING row and mark it as IN_PROGRESS
+        self.dataset_name = self.get_next_dataset()
+        if not self.dataset_name:
+            raise ValueError("No datasets with status 'TODO' or 'DOING' found.")
+
+    def get_next_dataset(self):
+        """Fetches the next dataset that has at least one 'TODO' or 'DOING' row and marks it as IN_PROGRESS."""
+        doc_todo = self.input_collection.find_one({"status": {"$in": ["TODO", "DOING"]}})
         if not doc_todo:
-            raise ValueError("No datasets with status 'TODO' found.")
+            return None
         
-        dataset_name = doc_todo.get("dataset_name")
+        dataset_name = doc_todo.get("dataset_name", None)
+        if not dataset_name:
+            return None
+        
+        # Set the dataset trace to IN_PROGRESS if currently missing or PENDING
         self.dataset_trace_collection.find_one_and_update(
             {"dataset_name": dataset_name}, 
             {"$set": {
@@ -66,50 +77,73 @@ class TraceThread(Thread):
             }},
             upsert=True
         )
-    
+        
+        return dataset_name
+
     def run(self):
         while True:
-            # Aggregate counts in a single query for efficiency
-            counts = self.input_collection.aggregate([
+            if not self.dataset_name:
+                # No more datasets to process
+                break
+            
+            # Process the current dataset until it's done
+            self.process_current_dataset()
+            
+            # Once the current dataset is DONE, try to fetch the next one
+            next_dataset = self.get_next_dataset()
+            if next_dataset:
+                self.dataset_name = next_dataset
+            else:
+                # No further datasets
+                break
+
+    def process_current_dataset(self):
+        """Monitors the current dataset progress until DONE."""
+        while True:
+            # Aggregate counts across all rows of this dataset
+            counts_pipeline = [
+                {"$match": {"dataset_name": self.dataset_name}},
                 {"$group": {
                     "_id": "$status",
                     "count": {"$sum": 1}
                 }}
-            ])
+            ]
+            counts = self.input_collection.aggregate(counts_pipeline)
             counts_dict = {doc["_id"]: doc["count"] for doc in counts}
-            
+
             total_rows_todo = counts_dict.get("TODO", 0)
             total_rows_doing = counts_dict.get("DOING", 0)
             total_rows_processed = counts_dict.get("DONE", 0)
 
-            # Retrieve dataset trace
-            dataset_trace = self.dataset_trace_collection.find_one({"status": "IN_PROGRESS"})
+            # Retrieve the dataset trace
+            dataset_trace = self.dataset_trace_collection.find_one({"dataset_name": self.dataset_name})
             if not dataset_trace:
-                raise ValueError("No dataset with status 'IN_PROGRESS' found.")
-            
-            dataset_name = dataset_trace.get("dataset_name")
-            start_time = dataset_trace.get("start_time")
-            if not start_time:
-                raise ValueError("Start time not found for dataset trace.")
-            
+                # If dataset trace is missing, just break out to avoid infinite loop
+                break
+
+            start_time = dataset_trace.get("start_time", datetime.now())
             time_passed = (datetime.now() - start_time).total_seconds()
 
-            # Calculate average time per row and estimated time left
+            # Calculate progress metrics
             avg_time_per_row = None
             estimated_time_left_in_seconds = None
             estimated_time_left_in_hours = None
             estimated_time_left_in_days = None
             percentage_complete = 0
-            if total_rows_processed > 0:
-                avg_time_per_row = time_passed / total_rows_processed
-                estimated_time_left_in_seconds = round(avg_time_per_row * (total_rows_todo), 2)
-                estimated_time_left_in_hours = round(estimated_time_left_in_seconds / 3600, 2)
-                estimated_time_left_in_days = round(estimated_time_left_in_hours / 24, 2)
-                percentage_complete = round((total_rows_processed / (total_rows_todo + total_rows_doing + total_rows_processed)) * 100, 2)
-            
-            # Update dataset trace
+
+            total_processed = float(total_rows_processed)
+            total_all = float(total_rows_todo + total_rows_doing + total_rows_processed)
+            if total_processed > 0 and total_all > 0:
+                avg_time_per_row = time_passed / total_processed
+                if total_rows_todo > 0:
+                    estimated_time_left_in_seconds = round(avg_time_per_row * total_rows_todo, 2)
+                    estimated_time_left_in_hours = round(estimated_time_left_in_seconds / 3600, 2)
+                    estimated_time_left_in_days = round(estimated_time_left_in_hours / 24, 2)
+                percentage_complete = round((total_processed / total_all) * 100, 2)
+
+            # Update dataset trace with current progress
             self.dataset_trace_collection.update_one(
-                {"dataset_name": dataset_name},
+                {"dataset_name": self.dataset_name},
                 {"$set": {
                     "estimated_time_left_in_seconds": estimated_time_left_in_seconds,
                     "estimated_time_left_in_hours": estimated_time_left_in_hours,
@@ -122,17 +156,66 @@ class TraceThread(Thread):
                 }},
                 upsert=True
             )
-            
-            # Break if all rows are processed
+
+            # Check the status of each table in this dataset
+            tables = self.table_trace_collection.find({"dataset_name": self.dataset_name})
+            for table_doc in tables:
+                table_name = table_doc.get("table_name", None)
+                if not table_name:
+                    continue
+
+                # Check how many rows are TODO/DOING for this table
+                table_todo_doing_count = self.input_collection.count_documents({
+                    "dataset_name": self.dataset_name,
+                    "table_name": table_name,
+                    "status": {"$in": ["TODO", "DOING"]}
+                })
+
+                table_done_count = self.input_collection.count_documents({
+                    "dataset_name": self.dataset_name,
+                    "table_name": table_name,
+                    "status": "DONE"
+                })
+                table_total_count = self.input_collection.count_documents({
+                    "dataset_name": self.dataset_name,
+                    "table_name": table_name
+                })
+
+                current_table_status = table_doc.get("status", "PENDING")
+
+                # If the table is PENDING and has any TODO/DOING rows, move it to IN_PROGRESS
+                if current_table_status == "PENDING" and table_todo_doing_count > 0:
+                    self.table_trace_collection.update_one(
+                        {"dataset_name": self.dataset_name, "table_name": table_name},
+                        {"$set": {"status": "IN_PROGRESS"}}
+                    )
+
+                # If the table is fully processed (all DONE)
+                if table_total_count > 0 and table_done_count == table_total_count:
+                    # If not already COMPLETED, set it now
+                    # it will trigger ML predictions 
+                    if current_table_status != "COMPLETED":
+                        self.table_trace_collection.update_one(
+                            {"dataset_name": self.dataset_name, "table_name": table_name},
+                            {"$set": {
+                                "status": "COMPLETED",
+                                "completed_time": datetime.now()
+                            }}
+                        )
+
+            # If no TODO or DOING rows remain in the dataset, it's fully processed
             if total_rows_todo + total_rows_doing == 0:
+                # Set dataset to DONE
                 self.dataset_trace_collection.update_one(
-                    {"dataset_name": dataset_name},
+                    {"dataset_name": self.dataset_name},
                     {"$set": {"status": "DONE", "end_time": datetime.now()}}
                 )
+                # Dataset is completed, break out to select next dataset if available
                 break
 
-            # Avoid excessive resource usage
-            time.sleep(5)
+            # Sleep to avoid excessive resource usage
+            time.sleep(1)
+
     
 class Crocodile:
     def __init__(self, mongo_uri="mongodb://localhost:27017/",
@@ -924,24 +1007,24 @@ class Crocodile:
                 self.update_documents(input_collection, {"_id": {"$in": doc_ids}, "status":"TODO"}, {"$set":{"status":"DOING"}})
                 self.process_rows_batch(docs, dataset_name, table_name)
 
-                processed_count = self.count_documents(input_collection, {
-                     "dataset_name": dataset_name,
-                     "table_name": table_name,
-                     "status": "DONE"
-                })
-                total_count = self.count_documents(input_collection, {
-                        "dataset_name": dataset_name,
-                        "table_name": table_name
-                })
-                if processed_count == total_count:
-                    table_trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
-                    if table_trace and table_trace.get("status") != "COMPLETED":
-                        table_trace_collection.update_one(
-                            {"dataset_name": dataset_name, "table_name": table_name},
-                            {"$set": {"status": "COMPLETED"}}
-                        )
-                    #self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
-                    #self.update_dataset_trace(dataset_name)
+                # processed_count = self.count_documents(input_collection, {
+                #      "dataset_name": dataset_name,
+                #      "table_name": table_name,
+                #      "status": "DONE"
+                # })
+                # total_count = self.count_documents(input_collection, {
+                #         "dataset_name": dataset_name,
+                #         "table_name": table_name
+                # })
+                # if processed_count == total_count:
+                #     table_trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
+                #     if table_trace and table_trace.get("status") != "COMPLETED":
+                #         table_trace_collection.update_one(
+                #             {"dataset_name": dataset_name, "table_name": table_name},
+                #             {"$set": {"status": "COMPLETED"}}
+                #         )
+                #     #self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
+                #     #self.update_dataset_trace(dataset_name)
 
     def ml_ranking_worker(self):
         model = self.load_ml_model()
@@ -964,6 +1047,7 @@ class Crocodile:
         db = self.get_db()
         input_collection = db[self.input_collection]
         dataset_trace_collection = db[self.dataset_trace_collection_name]
+        table_trace_collection = db[self.table_trace_collection_name]
 
         total_rows = self.count_documents(input_collection, {"status": "TODO"})
         if total_rows == 0:
@@ -983,7 +1067,7 @@ class Crocodile:
             p.start()
             processes.append(p)
         
-        trace_thread = TraceThread(input_collection, dataset_trace_collection)
+        trace_thread = TraceThread(input_collection, dataset_trace_collection, table_trace_collection)
         trace_thread.start()
         processes.append(trace_thread)
 

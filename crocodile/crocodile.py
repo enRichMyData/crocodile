@@ -151,14 +151,18 @@ class TraceThread(Thread):
                     "avg_time_per_row": avg_time_per_row,
                     "total_rows_todo": total_rows_todo,
                     "total_rows_processed": total_rows_processed,
-                    "time_passed_seconds": time_passed,
+                    "time_passed_seconds": round(time_passed, 2),
                     "percentage_complete": percentage_complete
                 }},
                 upsert=True
             )
 
             # Check the status of each table in this dataset
-            tables = self.table_trace_collection.find({"dataset_name": self.dataset_name})
+            # Instead of retrieving all tables, we only get those that are not COMPLETED
+            tables = self.table_trace_collection.find({
+                "dataset_name": self.dataset_name,
+                "status": {"$ne": "COMPLETED"}
+            })
             for table_doc in tables:
                 table_name = table_doc.get("table_name", None)
                 if not table_name:
@@ -586,14 +590,16 @@ class Crocodile:
             upsert=True
         )
 
-    async def _fetch_candidate(self, entity_name, row_text, fuzzy, qid, session):
+    async def _fetch_candidates(self, entity_name, row_text, fuzzy, qid, session):
         db = self.get_db()
         timing_trace_collection = db[self.timing_collection_name]
         url = f"{self.entity_retrieval_endpoint}?name={entity_name}&limit={self.candidate_retrieval_limit}&fuzzy={fuzzy}&token={self.entity_retrieval_token}"
+        
         if qid:
             url += f"&ids={qid}"
         backoff = 1
 
+        # We'll attempt up to 5 times
         for attempts in range(5):
             start_time = time.time()
             try:
@@ -601,12 +607,25 @@ class Crocodile:
                     response.raise_for_status()
                     candidates = await response.json()
                     row_tokens = set(self.tokenize_text(row_text))
-                    filtered_candidates = self._process_candidates(candidates, entity_name, row_tokens)
+                    fetched_candidates = self._process_candidates(candidates, entity_name, row_tokens)
 
-                    # Cache the result
+                    # Merge with existing cache if present
                     cache = self.get_candidate_cache()
                     cache_key = f"{entity_name}_{fuzzy}"
-                    cache.put(cache_key, filtered_candidates)
+                    cached_result = cache.get(cache_key)
+
+                    if cached_result:
+                        # Use a dict keyed by QID to ensure uniqueness
+                        all_candidates = {c['id']: c for c in cached_result if 'id' in c}
+                        for c in fetched_candidates:
+                            if c.get('id'):
+                                all_candidates[c['id']] = c
+                        merged_candidates = list(all_candidates.values())
+                    else:
+                        merged_candidates = fetched_candidates
+
+                    # Update cache with merged results
+                    cache.put(cache_key, merged_candidates)
 
                     # Log success
                     end_time = time.time()
@@ -620,40 +639,59 @@ class Crocodile:
                         "attempt": attempts + 1,
                     })
 
-                    return entity_name, filtered_candidates
+                    return entity_name, merged_candidates
             except Exception as e:
                 end_time = time.time()
                 self.log_to_db("FETCH_CANDIDATES_ERROR", f"Error fetching candidates for {entity_name}", traceback.format_exc(), attempt=attempts + 1)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 16)
 
+        # If all attempts fail, return empty
         return entity_name, []
 
     async def fetch_candidates_batch_async(self, entities, row_texts, fuzzies, qids):
         results = {}
         cache = self.get_candidate_cache()
         to_fetch = []
-        for entity_name, fuzzy in zip(entities, fuzzies):
+
+        # Decide which entities need to be fetched
+        for entity_name, fuzzy, row_text, qid_str in zip(entities, fuzzies, row_texts, qids):
             cache_key = f"{entity_name}_{fuzzy}"
             cached_result = cache.get(cache_key)
-            if cached_result is not None:
-                results[entity_name] = cached_result
-            else:
-                to_fetch.append((entity_name, fuzzy))
+            forced_qids = qid_str.split() if qid_str else []
 
+            if cached_result is not None:
+                if forced_qids:
+                    # Check if all forced QIDs are already present
+                    cached_qids = {c['id'] for c in cached_result if 'id' in c}
+                    if all(q in cached_qids for q in forced_qids):
+                        # All required QIDs are present, no fetch needed
+                        results[entity_name] = cached_result
+                    else:
+                        # Forced QIDs not all present, must fetch
+                        to_fetch.append((entity_name, fuzzy, row_text, qid_str))
+                else:
+                    # No forced QIDs, just use cached
+                    results[entity_name] = cached_result
+            else:
+                # No cache entry, must fetch
+                to_fetch.append((entity_name, fuzzy, row_text, qid_str))
+
+        # If nothing to fetch, return what we have
         if not to_fetch:
             return results
 
+        # Fetch missing data
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
             tasks = []
-            for ((entity_name, fuzzy), row_text, qid) in zip(to_fetch, row_texts, qids):
-                tasks.append(self._fetch_candidate(entity_name, row_text, fuzzy, qid, session))
+            for (entity_name, fuzzy, row_text, qid_str) in to_fetch:
+                tasks.append(self._fetch_candidate(entity_name, row_text, fuzzy, qid_str, session))
             done = await asyncio.gather(*tasks, return_exceptions=False)
             for entity_name, candidates in done:
                 results[entity_name] = candidates
 
         return results
-
+    
     def fetch_candidates_batch(self, entities, row_texts, fuzzies, qids):
         return asyncio.run(self.fetch_candidates_batch_async(entities, row_texts, fuzzies, qids))
 
@@ -723,11 +761,9 @@ class Crocodile:
         return asyncio.run(runner())
 
     def process_rows_batch(self, docs, dataset_name, table_name):
+        db = self.get_db()
         row_start_time = datetime.now()
         try:
-            db = self.get_db()
-            input_collection = db[self.input_collection]
-
             entities_to_process = []
             row_texts = []
             fuzzies = []
@@ -857,9 +893,9 @@ class Crocodile:
                 self.save_candidates_for_training(training_candidates_by_ne_column, dataset_name, table_name, row_index)
                 db[self.input_collection].update_one({'_id': doc_id}, {'$set': {'el_results': linked_entities, 'status': 'DONE'}})
 
-            row_end_time = datetime.now()
-            row_duration = (row_end_time - row_start_time).total_seconds()
-            self.update_table_trace(dataset_name, table_name, increment=len(docs), row_time=row_duration)
+            #row_end_time = datetime.now()
+            #row_duration = (row_end_time - row_start_time).total_seconds()
+            #self.update_table_trace(dataset_name, table_name, increment=len(docs), row_time=row_duration)
             self.log_processing_speed(dataset_name, table_name)
         except Exception as e:
             self.log_to_db("ERROR", f"Error processing batch of rows", traceback.format_exc())
@@ -984,7 +1020,7 @@ class Crocodile:
     def worker(self):
         db = self.get_db()
         input_collection = db[self.input_collection]
-        table_trace_collection = db[self.table_trace_collection_name]
+        #table_trace_collection = db[self.table_trace_collection_name]
         while True:
             todo_docs = self.find_documents(input_collection, {"status": "TODO"}, {"_id": 1, "dataset_name":1, "table_name":1}, limit=10)
             if not todo_docs:
@@ -999,7 +1035,7 @@ class Crocodile:
 
             for (dataset_name, table_name), doc_ids in tasks_by_table.items():
                 self.set_context(dataset_name, table_name)
-                start_time = datetime.now()
+                #start_time = datetime.now()
                 #self.update_dataset_trace(dataset_name, start_time=start_time)
                 #self.update_table_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
 
@@ -1030,10 +1066,11 @@ class Crocodile:
         model = self.load_ml_model()
         db = self.get_db()
         input_collection = db[self.input_collection]
+        dataset_trace_collection = db[self.dataset_trace_collection_name]
         table_trace_collection = db[self.table_trace_collection_name]
         while True:
-            todo_doc = self.find_one_document(input_collection, {"status": "TODO"})
-            if todo_doc is None: # no more tasks to process 
+            todo_table = self.find_one_document(table_trace_collection, {"ml_ranking_status": None})
+            if todo_table is None: # no more tasks to process 
                 break
             table_trace_obj = self.find_one_and_update(table_trace_collection,  {"$and": [{"status": "COMPLETED"}, {"ml_ranking_status": None}]}, {"$set": {"ml_ranking_status": "PENDING"}})
             if table_trace_obj:

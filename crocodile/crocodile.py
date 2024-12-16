@@ -60,11 +60,11 @@ class TraceThread(Thread):
 
     def get_next_dataset(self):
         """Fetches the next dataset that has at least one 'TODO' or 'DOING' row and marks it as IN_PROGRESS."""
-        doc_todo = self.input_collection.find_one({"status": {"$in": ["TODO", "DOING"]}})
-        if not doc_todo:
+        doc_dataset = self.dataset_trace_collection.find_one({"status": "PENDING"})
+        if not doc_dataset:
             return None
         
-        dataset_name = doc_todo.get("dataset_name", None)
+        dataset_name = doc_dataset.get("dataset_name", None)
         if not dataset_name:
             return None
         
@@ -121,44 +121,57 @@ class TraceThread(Thread):
                 # If dataset trace is missing, just break out to avoid infinite loop
                 break
 
+            # Get dataset-level info
+            total_dataset_rows = dataset_trace.get("total_rows", None)
+            if total_dataset_rows is None:
+                # If total_rows is not stored, compute it once.
+                # This could be expensive if done repeatedly, so ideally it's stored upfront.
+                total_dataset_rows = self.input_collection.count_documents({"dataset_name": self.dataset_name})
+                self.dataset_trace_collection.update_one(
+                    {"dataset_name": self.dataset_name},
+                    {"$set": {"total_rows": total_dataset_rows}}
+                )
+
             start_time = dataset_trace.get("start_time", datetime.now())
             time_passed = (datetime.now() - start_time).total_seconds()
 
-            # Calculate progress metrics
-            avg_time_per_row = None
-            estimated_time_left_in_seconds = None
-            estimated_time_left_in_hours = None
-            estimated_time_left_in_days = None
+            # Calculate progress metrics for the dataset
+            processed_rows = total_rows_processed
             percentage_complete = 0
+            rows_per_second = 0
+            estimated_seconds = 0
+            estimated_hours = 0
+            estimated_days = 0
 
-            total_processed = float(total_rows_processed)
-            total_all = float(total_rows_todo + total_rows_doing + total_rows_processed)
-            if total_processed > 0 and total_all > 0:
-                avg_time_per_row = time_passed / total_processed
-                if total_rows_todo > 0:
-                    estimated_time_left_in_seconds = round(avg_time_per_row * total_rows_todo, 2)
-                    estimated_time_left_in_hours = round(estimated_time_left_in_seconds / 3600, 2)
-                    estimated_time_left_in_days = round(estimated_time_left_in_hours / 24, 2)
-                percentage_complete = round((total_processed / total_all) * 100, 2)
+            if processed_rows > 0:
+                rows_per_second = round(processed_rows / time_passed, 2)
+                if total_dataset_rows > 0:
+                    percentage_complete = round((processed_rows / total_dataset_rows) * 100, 2)
+                
+                remaining_rows = total_dataset_rows - processed_rows
+                if remaining_rows > 0:
+                    avg_time_per_row = time_passed / processed_rows
+                    estimated_seconds = round(avg_time_per_row * remaining_rows, 2)
+                    estimated_hours = round(estimated_seconds / 3600, 2)
+                    estimated_days = round(estimated_hours / 24, 2)
 
             # Update dataset trace with current progress
             self.dataset_trace_collection.update_one(
                 {"dataset_name": self.dataset_name},
                 {"$set": {
-                    "estimated_time_left_in_seconds": estimated_time_left_in_seconds,
-                    "estimated_time_left_in_hours": estimated_time_left_in_hours,
-                    "estimated_time_left_in_days": estimated_time_left_in_days,
-                    "avg_time_per_row": avg_time_per_row,
-                    "total_rows_todo": total_rows_todo,
-                    "total_rows_processed": total_rows_processed,
-                    "time_passed_seconds": round(time_passed, 2),
-                    "percentage_complete": percentage_complete
+                    "processed_rows": processed_rows,
+                    "rows_per_second": rows_per_second,
+                    "estimated_seconds": estimated_seconds,
+                    "estimated_hours": estimated_hours,
+                    "estimated_days": estimated_days,
+                    "percentage_complete": percentage_complete,
+                    "time_passed_seconds": round(time_passed, 2)
                 }},
                 upsert=True
             )
 
             # Check the status of each table in this dataset
-            # Instead of retrieving all tables, we only get those that are not COMPLETED
+            # Only get those that are not COMPLETED
             tables = self.table_trace_collection.find({
                 "dataset_name": self.dataset_name,
                 "status": {"$ne": "COMPLETED"}
@@ -168,7 +181,7 @@ class TraceThread(Thread):
                 if not table_name:
                     continue
 
-                # Check how many rows are TODO/DOING for this table
+                # Get counts for the table
                 table_todo_doing_count = self.input_collection.count_documents({
                     "dataset_name": self.dataset_name,
                     "table_name": table_name,
@@ -186,18 +199,60 @@ class TraceThread(Thread):
                 })
 
                 current_table_status = table_doc.get("status", "PENDING")
+                table_start_time = table_doc.get("start_time", None)
 
                 # If the table is PENDING and has any TODO/DOING rows, move it to IN_PROGRESS
+                # and record the start_time if not already set.
                 if current_table_status == "PENDING" and table_todo_doing_count > 0:
+                    table_start_time = datetime.now()
                     self.table_trace_collection.update_one(
                         {"dataset_name": self.dataset_name, "table_name": table_name},
-                        {"$set": {"status": "IN_PROGRESS"}}
+                        {"$set": {
+                            "status": "IN_PROGRESS",
+                            "start_time": table_start_time
+                        }}
+                    )
+                    current_table_status = "IN_PROGRESS"
+
+                # Compute table-level progress metrics if we have a start_time and total_count
+                if table_total_count > 0 and table_start_time is not None:
+                    # Time passed for this table
+                    table_time_passed = (datetime.now() - table_start_time).total_seconds()
+
+                    processed_rows_table = table_done_count
+                    rows_per_second_table = 0
+                    estimated_seconds_table = 0
+                    estimated_hours_table = 0
+                    estimated_days_table = 0
+                    percentage_complete_table = 0
+
+                    if processed_rows_table > 0:
+                        rows_per_second_table = round(processed_rows_table / table_time_passed, 2)
+                        percentage_complete_table = round((processed_rows_table / table_total_count) * 100, 2)
+
+                        remaining_rows_table = table_total_count - processed_rows_table
+                        if remaining_rows_table > 0:
+                            avg_time_per_row_table = table_time_passed / processed_rows_table
+                            estimated_seconds_table = round(avg_time_per_row_table * remaining_rows_table, 2)
+                            estimated_hours_table = round(estimated_seconds_table / 3600, 2)
+                            estimated_days_table = round(estimated_hours_table / 24, 2)
+                    
+                    # Update the table trace with the computed metrics
+                    self.table_trace_collection.update_one(
+                        {"dataset_name": self.dataset_name, "table_name": table_name},
+                        {"$set": {
+                            "processed_rows": processed_rows_table,
+                            "rows_per_second": rows_per_second_table,
+                            "estimated_seconds": estimated_seconds_table,
+                            "estimated_hours": estimated_hours_table,
+                            "estimated_days": estimated_days_table,
+                            "percentage_complete": percentage_complete_table
+                        }}
                     )
 
                 # If the table is fully processed (all DONE)
                 if table_total_count > 0 and table_done_count == table_total_count:
                     # If not already COMPLETED, set it now
-                    # it will trigger ML predictions 
                     if current_table_status != "COMPLETED":
                         self.table_trace_collection.update_one(
                             {"dataset_name": self.dataset_name, "table_name": table_name},
@@ -219,8 +274,8 @@ class TraceThread(Thread):
 
             # Sleep to avoid excessive resource usage
             time.sleep(1)
-
     
+
 class Crocodile:
     def __init__(self, mongo_uri="mongodb://localhost:27017/",
                  db_name="crocodile_db",
@@ -685,7 +740,7 @@ class Crocodile:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
             tasks = []
             for (entity_name, fuzzy, row_text, qid_str) in to_fetch:
-                tasks.append(self._fetch_candidate(entity_name, row_text, fuzzy, qid_str, session))
+                tasks.append(self._fetch_candidates(entity_name, row_text, fuzzy, qid_str, session))
             done = await asyncio.gather(*tasks, return_exceptions=False)
             for entity_name, candidates in done:
                 results[entity_name] = candidates

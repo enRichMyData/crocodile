@@ -33,7 +33,7 @@ def ensure_indexes():
 
 ensure_indexes()
 
-datasets = ["Round4_2020"]
+datasets = ["Round4_2020", "Round1_T2D"]
 
 # Initialize the column classifier
 classifier = ColumnClassifier(model_type='fast')

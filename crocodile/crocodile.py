@@ -321,6 +321,8 @@ class Crocodile:
         self.entity_bow_endpoint = entity_bow_endpoint
         self.batch_size = batch_size
         self.ml_ranking_workers = ml_ranking_workers
+        self.semaphore = asyncio.Semaphore(5)
+
 
     def get_db(self):
         client = MongoClient(self.mongo_uri, maxPoolSize=10)
@@ -658,48 +660,50 @@ class Crocodile:
         for attempts in range(5):
             start_time = time.time()
             try:
-                async with session.get(url, timeout=1) as response:
-                    response.raise_for_status()
-                    candidates = await response.json()
-                    row_tokens = set(self.tokenize_text(row_text))
-                    fetched_candidates = self._process_candidates(candidates, entity_name, row_tokens)
+                # Acquire semaphore before making request
+                async with self.semaphore:
+                    async with session.get(url, timeout=1) as response:
+                        response.raise_for_status()
+                        candidates = await response.json()
+                        row_tokens = set(self.tokenize_text(row_text))
+                        fetched_candidates = self._process_candidates(candidates, entity_name, row_tokens)
 
-                    # Merge with existing cache if present
-                    cache = self.get_candidate_cache()
-                    cache_key = f"{entity_name}_{fuzzy}"
-                    cached_result = cache.get(cache_key)
+                        # Merge with existing cache if present
+                        cache = self.get_candidate_cache()
+                        cache_key = f"{entity_name}_{fuzzy}"
+                        cached_result = cache.get(cache_key)
 
-                    if cached_result:
-                        # Use a dict keyed by QID to ensure uniqueness
-                        all_candidates = {c['id']: c for c in cached_result if 'id' in c}
-                        for c in fetched_candidates:
-                            if c.get('id'):
-                                all_candidates[c['id']] = c
-                        merged_candidates = list(all_candidates.values())
-                    else:
-                        merged_candidates = fetched_candidates
+                        if cached_result:
+                            # Use a dict keyed by QID to ensure uniqueness
+                            all_candidates = {c['id']: c for c in cached_result if 'id' in c}
+                            for c in fetched_candidates:
+                                if c.get('id'):
+                                    all_candidates[c['id']] = c
+                            merged_candidates = list(all_candidates.values())
+                        else:
+                            merged_candidates = fetched_candidates
 
-                    # Update cache with merged results
-                    cache.put(cache_key, merged_candidates)
+                        # Update cache with merged results
+                        cache.put(cache_key, merged_candidates)
 
-                    # Log success
-                    end_time = time.time()
-                    timing_trace_collection.insert_one({
-                        "operation_name": "_fetch_candidate",
-                        "url": url,
-                        "start_time": datetime.fromtimestamp(start_time),
-                        "end_time": datetime.fromtimestamp(end_time),
-                        "duration_seconds": end_time - start_time,
-                        "status": "SUCCESS",
-                        "attempt": attempts + 1,
-                    })
+                        # Log success
+                        end_time = time.time()
+                        timing_trace_collection.insert_one({
+                            "operation_name": "_fetch_candidate",
+                            "url": url,
+                            "start_time": datetime.fromtimestamp(start_time),
+                            "end_time": datetime.fromtimestamp(end_time),
+                            "duration_seconds": end_time - start_time,
+                            "status": "SUCCESS",
+                            "attempt": attempts + 1,
+                        })
 
-                    return entity_name, merged_candidates
+                        return entity_name, merged_candidates
             except Exception as e:
-                end_time = time.time()
-                self.log_to_db("FETCH_CANDIDATES_ERROR", f"Error fetching candidates for {entity_name}", traceback.format_exc(), attempt=attempts + 1)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 16)
+                    end_time = time.time()
+                    self.log_to_db("FETCH_CANDIDATES_ERROR", f"Error fetching candidates for {entity_name}", traceback.format_exc(), attempt=attempts + 1)
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 16)
 
         # If all attempts fail, return empty
         return entity_name, []
@@ -776,35 +780,37 @@ class Crocodile:
         for attempts in range(5):
             start_time = time.time()
             try:
-                async with session.post(url, json=payload, timeout=1) as response:
-                    response.raise_for_status()
-                    bow_data = await response.json()
+                # Acquire semaphore before making request
+                async with self.semaphore:
+                    async with session.post(url, json=payload, timeout=1) as response:
+                        response.raise_for_status()
+                        bow_data = await response.json()
 
-                    # Cache the results and populate bow_results
-                    for qid in to_fetch:
-                        qid_data = bow_data.get(qid, {"similarity_score": 0.0, "matched_words": []})
-                        cache_key = f"{row_hash}_{qid}"
-                        bow_cache.put(cache_key, qid_data)
-                        bow_results[qid] = qid_data
+                        # Cache the results and populate bow_results
+                        for qid in to_fetch:
+                            qid_data = bow_data.get(qid, {"similarity_score": 0.0, "matched_words": []})
+                            cache_key = f"{row_hash}_{qid}"
+                            bow_cache.put(cache_key, qid_data)
+                            bow_results[qid] = qid_data
 
-                    # Log success
-                    end_time = time.time()
-                    timing_trace_collection.insert_one({
-                        "operation_name": "_fetch_bow_for_multiple_qids",
-                        "url": url,
-                        "start_time": datetime.fromtimestamp(start_time),
-                        "end_time": datetime.fromtimestamp(end_time),
-                        "duration_seconds": end_time - start_time,
-                        "status": "SUCCESS",
-                        "attempt": attempts + 1,
-                    })
+                        # Log success
+                        end_time = time.time()
+                        timing_trace_collection.insert_one({
+                            "operation_name": "_fetch_bow_for_multiple_qids",
+                            "url": url,
+                            "start_time": datetime.fromtimestamp(start_time),
+                            "end_time": datetime.fromtimestamp(end_time),
+                            "duration_seconds": end_time - start_time,
+                            "status": "SUCCESS",
+                            "attempt": attempts + 1,
+                        })
 
-                    return bow_results
+                        return bow_results
             except Exception as e:
-                end_time = time.time()
-                self.log_to_db("FETCH_BOW_ERROR", f"Error fetching BoW for {row_hash}", traceback.format_exc(), attempt=attempts + 1)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 16)
+                    end_time = time.time()
+                    self.log_to_db("FETCH_BOW_ERROR", f"Error fetching BoW for {row_hash}", traceback.format_exc(), attempt=attempts + 1)
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 16)
 
         return bow_results
 

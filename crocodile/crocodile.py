@@ -325,7 +325,7 @@ class Crocodile:
 
 
     def get_db(self):
-        client = MongoClient(self.mongo_uri, maxPoolSize=10)
+        client = MongoClient(self.mongo_uri, maxPoolSize=64)
         return client[self.db_name]
 
     def get_candidate_cache(self):
@@ -446,210 +446,10 @@ class Crocodile:
             log_entry["attempt"] = attempt
         log_collection.insert_one(log_entry)
 
-    def update_table_trace(self, dataset_name, table_name, increment=0, status=None, start_time=None, end_time=None, row_time=None, ml_ranking_status=None):
-        db = self.get_db()
-        table_trace_collection = db[self.table_trace_collection_name]
-
-        # Fetch the current trace
-        trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
-        if not trace:
-            # If no trace exists, initialize it with default values
-            trace = {
-                "processed_rows": 0,
-                "total_rows": 0,
-                "start_time": start_time or datetime.now(),
-                "status": "TODO",
-            }
-
-        # Calculate updated values
-        processed_rows = trace.get("processed_rows", 0)
-        total_rows = trace.get("total_rows", 0)
-
-        # Ensure increment does not exceed remaining rows
-        increment = max(0, min(increment, total_rows - processed_rows))
-
-        update_query = {}
-        if increment > 0:
-            update_query["$inc"] = {"processed_rows": increment}
-
-        set_fields = {}
-        if status:
-            set_fields["status"] = status
-        if ml_ranking_status:
-            set_fields["ml_ranking_status"] = ml_ranking_status
-
-        # Handle start time
-        if "start_time" not in trace and start_time:
-            set_fields["start_time"] = start_time
-        elif "start_time" in trace:
-            start_time = trace["start_time"]
-        else:
-            start_time = datetime.now()
-            set_fields["start_time"] = start_time
-
-        # Handle end time and duration
-        if "end_time" not in trace and end_time:
-            set_fields["end_time"] = end_time
-            set_fields["duration"] = (end_time - start_time).total_seconds()
-            
-        # Update row time
-        if row_time is not None:
-            set_fields["last_row_time"] = row_time
-
-        # Mark as completed if processed_rows + increment >= total_rows
-        if processed_rows + increment >= total_rows > 0:
-            set_fields["status"] = "COMPLETED"
-
-        # Add to update query
-        if set_fields:
-            if "$set" in update_query:
-                update_query["$set"].update(set_fields)
-            else:
-                update_query["$set"] = set_fields
-
-        # Update the document
-        table_trace_collection.update_one(
-            {"dataset_name": dataset_name, "table_name": table_name},
-            update_query,
-            upsert=True
-        )
-
-        # Re-fetch updated trace
-        trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
-        if trace:
-            start_time = trace.get("start_time", start_time)
-            total_rows = trace.get("total_rows", 0)
-            processed_rows = trace.get("processed_rows", 0)
-
-            # Recalculate estimations
-            if processed_rows >= total_rows and total_rows > 0:
-                estimated_seconds = 0
-                estimated_hours = 0
-                estimated_days = 0
-                percentage_complete = 100.0
-            elif start_time and total_rows > 0 and processed_rows > 0:
-                elapsed_time = (datetime.now() - start_time).total_seconds()
-                avg_time_per_row = elapsed_time / processed_rows
-                remaining_rows = total_rows - processed_rows
-                estimated_time_left = remaining_rows * avg_time_per_row
-                estimated_seconds = estimated_time_left
-                estimated_hours = estimated_seconds / 3600
-                estimated_days = estimated_hours / 24
-                percentage_complete = (processed_rows / total_rows) * 100
-            else:
-                estimated_seconds = estimated_hours = estimated_days = 0
-                percentage_complete = 0
-
-            # Update estimations
-            update_fields = {
-                "estimated_seconds": round(estimated_seconds, 2),
-                "estimated_hours": round(estimated_hours, 2),
-                "estimated_days": round(estimated_days, 2),
-                "percentage_complete": round(percentage_complete, 2),
-                "processed_rows": min(processed_rows, total_rows),  # Ensure no overflow
-            }
-
-            table_trace_collection.update_one(
-                {"dataset_name": dataset_name, "table_name": table_name},
-                {"$set": update_fields}
-            )
-
-    def update_dataset_trace(self, dataset_name, start_time=None):
-        db = self.get_db()
-        table_trace_collection = db[self.table_trace_collection_name]
-        dataset_trace_collection = db[self.dataset_trace_collection_name]
-
-        dataset_trace = dataset_trace_collection.find_one({"dataset_name": dataset_name})
-        if dataset_trace:
-            if "start_time" in dataset_trace:
-                start_time = dataset_trace["start_time"]
-            elif start_time is not None:
-                dataset_trace_collection.update_one(
-                    {"dataset_name": dataset_name},
-                    {"$set": {"start_time": start_time}},
-                    upsert=True
-                )
-        else:
-            if start_time is None:
-                start_time = datetime.now()
-            dataset_trace_collection.update_one(
-                {"dataset_name": dataset_name},
-                {"$set": {"start_time": start_time}},
-                upsert=True
-            )
-
-        tables = list(table_trace_collection.find({"dataset_name": dataset_name}))
-        # Mark zero-row tables as completed if not done
-        for t in tables:
-            if t.get("total_rows", 0) == 0 and t.get("status") != "COMPLETED":
-                self.update_table_trace(dataset_name, t["table_name"], status="COMPLETED")
-
-        # Re-fetch after potential updates
-        tables = list(table_trace_collection.find({"dataset_name": dataset_name}))
-
-        total_tables = len(tables)
-        processed_tables = sum(1 for t in tables if t.get("status") == "COMPLETED")
-        total_rows = sum(t.get("total_rows", 0) for t in tables)
-        processed_rows = sum(t.get("processed_rows", 0) for t in tables)
-
-        if total_rows > 0:
-            processed_rows = min(processed_rows, total_rows)
-        else:
-            # If no total_rows known, set them equal to processed_rows for consistency
-            total_rows = processed_rows
-
-        status = "IN_PROGRESS"
-        if processed_tables == total_tables and total_tables > 0:
-            status = "COMPLETED"
-
-        duration_from_tables = sum(t.get("duration", 0) for t in tables if t.get("duration", 0) > 0)
-
-        if start_time:
-            duration_from_start = (datetime.now() - start_time).total_seconds()
-        else:
-            duration_from_start = None
-
-        # Estimation logic
-        if processed_rows > 0 and total_rows > 0:
-            if duration_from_start is not None and duration_from_start > 0:
-                avg_time_per_row = duration_from_start / processed_rows
-            else:
-                avg_time_per_row = 0.0
-
-            remaining_rows = max(total_rows - processed_rows, 0)
-            estimated_time_left = remaining_rows * avg_time_per_row
-            estimated_seconds = round(estimated_time_left, 2)
-            estimated_hours = round(estimated_seconds / 3600, 2)
-            estimated_days = round(estimated_hours / 24, 2)
-            percentage_complete = round((processed_rows / total_rows) * 100, 2)
-        else:
-            estimated_seconds = estimated_hours = estimated_days = 0
-            percentage_complete = 0
-
-        update_fields = {
-            "total_tables": total_tables,
-            "processed_tables": processed_tables,
-            "total_rows": total_rows,
-            "processed_rows": processed_rows,
-            "estimated_seconds": estimated_seconds,
-            "estimated_hours": estimated_hours,
-            "estimated_days": estimated_days,
-            "percentage_complete": percentage_complete,
-            "status": status,
-            "duration_from_tables": round(duration_from_tables, 2)
-        }
-        if duration_from_start is not None:
-            update_fields["duration_from_start"] = round(duration_from_start, 2)
-
-        dataset_trace_collection.update_one(
-            {"dataset_name": dataset_name},
-            {"$set": update_fields},
-            upsert=True
-        )
-
     async def _fetch_candidates(self, entity_name, row_text, fuzzy, qid, session):
         db = self.get_db()
         timing_trace_collection = db[self.timing_collection_name]
+
         url = f"{self.entity_retrieval_endpoint}?name={entity_name}&limit={self.candidate_retrieval_limit}&fuzzy={fuzzy}&token={self.entity_retrieval_token}"
         
         if qid:
@@ -823,7 +623,6 @@ class Crocodile:
 
     def process_rows_batch(self, docs, dataset_name, table_name):
         db = self.get_db()
-        row_start_time = datetime.now()
         try:
             entities_to_process = []
             row_texts = []
@@ -854,6 +653,8 @@ class Crocodile:
                         ne_value = row[int(c)]
                         if ne_value and pd.notna(ne_value):
                             ne_value = str(ne_value)
+                            # Normalize ne_value: strip spaces and remove underscores
+                            ne_value = ne_value.strip().replace("_", " ").lower()
                             correct_qid = correct_qids.get(f"{row_index}-{c}", None)
                             entities_to_process.append(ne_value)
                             row_texts.append(row_text)
@@ -933,6 +734,9 @@ class Crocodile:
                         ne_value = row[int(c)]
                         if ne_value and pd.notna(ne_value):
                             ne_value = str(ne_value)
+                            # Normalize ne_value: strip spaces and remove underscores (we need that because of the cache key)
+                            ne_value = ne_value.strip().replace("_", " ").lower()
+
                             correct_qid = correct_qids.get(f"{row_index}-{c}", None)
                             candidates = candidates_results.get(ne_value, [])
 
@@ -1126,8 +930,6 @@ class Crocodile:
     def ml_ranking_worker(self):
         model = self.load_ml_model()
         db = self.get_db()
-        input_collection = db[self.input_collection]
-        dataset_trace_collection = db[self.dataset_trace_collection_name]
         table_trace_collection = db[self.table_trace_collection_name]
         while True:
             todo_table = self.find_one_document(table_trace_collection, {"ml_ranking_status": None})
@@ -1138,6 +940,7 @@ class Crocodile:
                 dataset_name = table_trace_obj.get("dataset_name")
                 table_name = table_trace_obj.get("table_name")
                 self.apply_ml_ranking(dataset_name, table_name, model)
+            time.sleep(1) 
 
     def run(self):
         mp.set_start_method("spawn", force=True)
@@ -1178,6 +981,7 @@ class Crocodile:
         db = self.get_db()
         training_collection = db[self.training_collection_name]
         input_collection = db[self.input_collection]
+        table_trace_collection = db[self.table_trace_collection_name]
 
         processed_count = 0
         total_count = self.count_documents(training_collection, {
@@ -1245,9 +1049,16 @@ class Crocodile:
             progress = min(progress, 100.0)
             print(f"ML ranking progress: {progress:.2f}% completed")
 
-            self.update_table_trace(dataset_name, table_name, ml_ranking_status=f"{progress:.2f}%")
+            table_trace_collection.update_one(
+                {"dataset_name": dataset_name, "table_name": table_name},
+                {"$set": {"ml_ranking_progress": progress}},
+                upsert=True
+            )
 
-        self.update_table_trace(dataset_name, table_name, ml_ranking_status="COMPLETED")
+        table_trace_collection.update_one(
+            {"dataset_name": dataset_name, "table_name": table_name},
+            {"$set": {"ml_ranking_status": "COMPLETED"}}
+        )
         print("ML ranking completed.")
     
     def extract_features(self, candidate):

@@ -882,12 +882,28 @@ class Crocodile:
             {"$set": {"rows_per_second": rows_per_second}}
         )
 
+    def claim_todo_batch(self, input_collection, batch_size=10):
+        claimed_docs = []
+        for _ in range(batch_size):
+            doc = input_collection.find_one_and_update(
+                {"status": "TODO"}, 
+                {"$set": {"status": "DOING"}},
+                projection={"_id": 1, "dataset_name": 1, "table_name": 1},
+                sort=[("_id", 1)]  # or another suitable ordering
+            )
+            if doc is None:
+                # No more TODO docs
+                break
+            claimed_docs.append(doc)
+        return claimed_docs
+
     def worker(self):
         db = self.get_db()
         input_collection = db[self.input_collection]
         #table_trace_collection = db[self.table_trace_collection_name]
         while True:
-            todo_docs = self.find_documents(input_collection, {"status": "TODO"}, {"_id": 1, "dataset_name":1, "table_name":1}, limit=10)
+            # Atomically claim a batch of documents
+            todo_docs = self.claim_todo_batch(input_collection)
             if not todo_docs:
                 print("No more tasks to process.")
                 break
@@ -905,7 +921,6 @@ class Crocodile:
                 #self.update_table_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
 
                 docs = self.find_documents(input_collection, {"_id": {"$in": doc_ids}})
-                self.update_documents(input_collection, {"_id": {"$in": doc_ids}, "status":"TODO"}, {"$set":{"status":"DOING"}})
                 self.process_rows_batch(docs, dataset_name, table_name)
 
                 # processed_count = self.count_documents(input_collection, {
@@ -940,7 +955,7 @@ class Crocodile:
                 dataset_name = table_trace_obj.get("dataset_name")
                 table_name = table_trace_obj.get("table_name")
                 self.apply_ml_ranking(dataset_name, table_name, model)
-            time.sleep(1) 
+            time.sleep(0.5) 
 
     def run(self):
         mp.set_start_method("spawn", force=True)

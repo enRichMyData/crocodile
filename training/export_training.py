@@ -24,8 +24,8 @@ for dataset in datasets:
     if os.path.exists(output_file):
         os.remove(output_file)
 
-    documents = collection.find({"datasetName": dataset})
-    total_docs = collection.count_documents({"datasetName": dataset})
+    documents = collection.find({"dataset_name": dataset})
+    total_docs = collection.count_documents({"dataset_name": dataset})
     cea_gt = pd.read_csv(f"./Datasets/{dataset}/gt/cea.csv", header=None)
     
     # Create a dictionary to map (tableName, idRow, idCol) to QID
@@ -39,8 +39,8 @@ for dataset in datasets:
     # Process documents and fill the buffer
     group = 0
     for doc in tqdm(documents, total=total_docs):
-        table_name = doc["tableName"]
-        id_row = doc["idRow"]
+        table_name = doc["table_name"]
+        id_row = doc["row_id"]
         candidates = doc["candidates"]
         
         for id_col in candidates:
@@ -52,7 +52,7 @@ for dataset in datasets:
                 target = 1 if candidate["id"] == qid else 0
                 key = f"{table_name} {id_row} {id_col}"
                 temp = {"tableName": table_name, "key": key, "id": candidate["id"], "group": group}
-                candidate["features"]["NE_match"] = 1 if candidate["features"]["NERtype"] == candidate["features"]["column_NERtype"] else 0
+                #candidate["features"]["NE_match"] = 1 if candidate["features"]["NERtype"] == candidate["features"]["column_NERtype"] else 0
                 sample = {**temp, **candidate["features"], **{"target": target}}
                 buffer.append(sample)
             group += 1

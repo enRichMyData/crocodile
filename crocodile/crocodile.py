@@ -12,7 +12,11 @@ import absl.logging
 import tensorflow as tf
 import pandas as pd
 import hashlib
+from collections import defaultdict, Counter
+import numpy as np
 
+# Let's define a max chunk size for QIDs:
+MAX_BOW_BATCH_SIZE = 50
 MY_TIMEOUT = aiohttp.ClientTimeout(
     total=30,        # Total time for the request
     connect=5,       # Time to connect to the server
@@ -299,7 +303,8 @@ class Crocodile:
                  selected_features=None, candidate_retrieval_limit=100,
                  model_path=None,
                  batch_size=1024,
-                 ml_ranking_workers=1):
+                 ml_ranking_workers=1,
+                 top_n_for_type_freq=3):
 
         self.mongo_uri = mongo_uri
         self.db_name = db_name
@@ -328,6 +333,7 @@ class Crocodile:
         self.entity_bow_endpoint = entity_bow_endpoint
         self.batch_size = batch_size
         self.ml_ranking_workers = ml_ranking_workers
+        self.top_n_for_type_freq = top_n_for_type_freq
 
     def get_db(self):
         client = MongoClient(self.mongo_uri, maxPoolSize=32)
@@ -558,13 +564,22 @@ class Crocodile:
         return asyncio.run(self.fetch_candidates_batch_async(entities, row_texts, fuzzies, qids))
 
     async def _fetch_bow_for_multiple_qids(self, row_hash, row_text, qids, session):
+        """
+        Entry point for fetching BoW data for multiple QIDs in one row.
+        This function:
+          1) Splits QIDs into smaller batches;
+          2) Fetches each batch sequentially (or you could parallelize);
+          3) Merges results into a single dict;
+          4) Returns bow_results (qid -> bow_info).
+        """
         db = self.get_db()
         timing_trace_collection = db[self.timing_collection_name]
         bow_cache = self.get_bow_cache()
+
+        # 1) Check which QIDs we actually need to fetch
         to_fetch = []
         bow_results = {}
 
-        # Check cache for each qid
         for qid in qids:
             cache_key = f"{row_hash}_{qid}"
             cached_result = bow_cache.get(cache_key)
@@ -573,13 +588,52 @@ class Crocodile:
             else:
                 to_fetch.append(qid)
 
+        # If everything is cached, no need to query
         if len(to_fetch) == 0:
-            return bow_results  # All qids cached
+            return bow_results
+
+        # 2) Break the `to_fetch` QIDs into small batches
+        #    We define chunk size = MAX_BOW_BATCH_SIZE (e.g. 50).
+        chunked_qids = [to_fetch[i:i + self.MAX_BOW_BATCH_SIZE] 
+                        for i in range(0, len(to_fetch), self.MAX_BOW_BATCH_SIZE)]
+
+        # 3) Fetch each chunk (serially here, but could use asyncio.gather for concurrency)
+        for chunk in chunked_qids:
+            # We define a helper method that tries to fetch BoW data for a single chunk
+            chunk_results = await self._fetch_bow_for_chunk(row_hash, row_text, chunk, session)
+            # Merge the chunk results into bow_results
+            for qid, data in chunk_results.items():
+                bow_results[qid] = data
+
+        return bow_results
+
+    async def _fetch_bow_for_chunk(self, row_hash, row_text, chunk_qids, session):
+        """
+        Fetch BoW data for a *subset* (chunk) of QIDs.
+        Includes the same backoff/retry logic as before, but only
+        for these chunk_qids.
+        """
+        db = self.get_db()
+        timing_trace_collection = db[self.timing_collection_name]
+        bow_cache = self.get_bow_cache()
+        
+        # Prepare the results dictionary
+        chunk_bow_results = {}
+        
+        # If empty chunk somehow, just return
+        if not chunk_qids:
+            return chunk_bow_results
 
         url = f"{self.entity_bow_endpoint}?token={self.entity_retrieval_token}"
-        payload = {"json":{"text": row_text, "qids": to_fetch}}
-        backoff = 1
+        # The payload includes only the chunk of QIDs
+        payload = {
+            "json": {
+                "text": row_text,
+                "qids": chunk_qids
+            }
+        }
 
+        backoff = 1
         for attempts in range(5):
             start_time = time.time()
             try:
@@ -587,35 +641,45 @@ class Crocodile:
                     response.raise_for_status()
                     bow_data = await response.json()
 
-                    # Cache the results and populate bow_results
-                    for qid in to_fetch:
+                    # Cache the results and populate
+                    for qid in chunk_qids:
                         qid_data = bow_data.get(qid, {"similarity_score": 0.0, "matched_words": []})
                         cache_key = f"{row_hash}_{qid}"
                         bow_cache.put(cache_key, qid_data)
-                        bow_results[qid] = qid_data
+                        chunk_bow_results[qid] = qid_data
 
                     # Log success
                     end_time = time.time()
                     timing_trace_collection.insert_one({
-                        "operation_name": "_fetch_bow_for_multiple_qids",
+                        "operation_name": "_fetch_bow_for_multiple_qids:CHUNK",
                         "url": url,
-                        "start_time": datetime.fromtimestamp(start_time),
-                        "end_time": datetime.fromtimestamp(end_time),
+                        "start_time": start_time,
+                        "end_time": end_time,
                         "duration_seconds": end_time - start_time,
                         "status": "SUCCESS",
                         "attempt": attempts + 1,
                     })
 
-                    return bow_results
-            except Exception as e:
-                    end_time = time.time()
-                    self.log_to_db("FETCH_BOW_ERROR", f"Error fetching BoW for {row_hash}", traceback.format_exc(), attempt=attempts + 1)
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, 16)
+                    return chunk_bow_results
 
-        return bow_results
+            except Exception as e:
+                end_time = time.time()
+                self.log_to_db("FETCH_BOW_ERROR", 
+                               f"Error fetching BoW for row_hash={row_hash}, chunk_qids={chunk_qids}",
+                               traceback.format_exc(),
+                               attempt=attempts + 1)
+                # Exponential backoff
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 16)
+
+        # If all attempts fail, return partial or empty
+        return chunk_bow_results
 
     def fetch_bow_vectors_batch(self, row_hash, row_text, qids):
+        """
+        Public method that logs the request, calls the async method,
+        and returns the final BoW results.
+        """
         db = self.get_db()
         web_requests_collection = db["web_requests"]
         web_requests_collection.insert_one({
@@ -624,8 +688,12 @@ class Crocodile:
             "row_text": row_text,
             "qids": qids
         })
+
         async def runner():
-            async with aiohttp.ClientSession(timeout=MY_TIMEOUT, connector=aiohttp.TCPConnector(ssl=False, limit=10)) as session:
+            async with aiohttp.ClientSession(
+                timeout=MY_TIMEOUT,
+                connector=aiohttp.TCPConnector(ssl=False, limit=10)
+            ) as session:
                 return await self._fetch_bow_for_multiple_qids(row_hash, row_text, qids, session)
 
         return asyncio.run(runner())
@@ -1013,31 +1081,8 @@ class Crocodile:
 
             for (dataset_name, table_name), doc_ids in tasks_by_table.items():
                 self.set_context(dataset_name, table_name)
-                #start_time = datetime.now()
-                #self.update_dataset_trace(dataset_name, start_time=start_time)
-                #self.update_table_trace(dataset_name, table_name, status="IN_PROGRESS", start_time=start_time)
-
                 docs = self.find_documents(input_collection, {"_id": {"$in": doc_ids}})
                 self.process_rows_batch(docs, dataset_name, table_name)
-
-                # processed_count = self.count_documents(input_collection, {
-                #      "dataset_name": dataset_name,
-                #      "table_name": table_name,
-                #      "status": "DONE"
-                # })
-                # total_count = self.count_documents(input_collection, {
-                #         "dataset_name": dataset_name,
-                #         "table_name": table_name
-                # })
-                # if processed_count == total_count:
-                #     table_trace = table_trace_collection.find_one({"dataset_name": dataset_name, "table_name": table_name})
-                #     if table_trace and table_trace.get("status") != "COMPLETED":
-                #         table_trace_collection.update_one(
-                #             {"dataset_name": dataset_name, "table_name": table_name},
-                #             {"$set": {"status": "COMPLETED"}}
-                #         )
-                #     #self.update_table_trace(dataset_name, table_name, status="COMPLETED", end_time=end_time, start_time=start_time)
-                #     #self.update_dataset_trace(dataset_name)
 
     def ml_ranking_worker(self):
         model = self.load_ml_model()
@@ -1052,7 +1097,7 @@ class Crocodile:
                 dataset_name = table_trace_obj.get("dataset_name")
                 table_name = table_trace_obj.get("table_name")
                 self.apply_ml_ranking(dataset_name, table_name, model)
-            time.sleep(0.5) 
+            #time.sleep(0.5) 
 
     def run(self):
         mp.set_start_method("spawn", force=True)
@@ -1103,70 +1148,171 @@ class Crocodile:
         })
         print(f"Total unprocessed documents: {total_count}")
 
+        # We'll restrict type-freq counting to the top N candidates in each row/col
+        top_n_for_type_freq = self.top_n_for_type_freq  # e.g. 3
+
         while processed_count < total_count:
             batch_docs = list(training_collection.find(
                 {"dataset_name": dataset_name, "table_name": table_name, "ml_ranked": False},
                 limit=self.batch_size
             ))
-
             if not batch_docs:
                 break
 
+            # Map documents by _id so we can update them later
             doc_map = {doc["_id"]: doc for doc in batch_docs}
 
+            # For each column, we'll store a Counter of type_id -> how many rows had that type
+            type_freq_by_column = defaultdict(Counter)
+
+            # We also track how many rows in the batch actually had that column
+            # so we can normalize frequencies to 0..1
+            rows_count_by_column = Counter()
+
+            #--------------------------------------------------------------------------
+            # 1) Collect "top N" type IDs per column, ignoring duplicates in same row
+            #--------------------------------------------------------------------------
+            # For each doc, for each column, pick top N, gather their type IDs into a set,
+            # then increment that set in the column's counter exactly once per row.
+            for doc in batch_docs:
+                candidates_by_column = doc["candidates"]
+                for col_index, candidates in candidates_by_column.items():
+                    # Sort by some existing metric (score or popularity) so we know the "top"
+                    pre_sorted = sorted(candidates, key=lambda x: x.get("score", 0.0), reverse=True)
+                    top_candidates_for_freq = pre_sorted[:top_n_for_type_freq]
+
+                    # Collect distinct type IDs from those top candidates
+                    row_qids = set()
+                    for cand in top_candidates_for_freq:
+                        for t_dict in cand.get("types", []):
+                            qid = t_dict.get("id")
+                            if qid:
+                                row_qids.add(qid)
+
+                    # Increase counts for each distinct type in this row
+                    for qid in row_qids:
+                        type_freq_by_column[col_index][qid] += 1
+
+                    # Mark that this row *had* that column (so we can normalize)
+                    rows_count_by_column[col_index] += 1
+
+            #--------------------------------------------------------------------------
+            # 2) Convert raw counts to frequencies in [0..1], pick top 5 per column
+            #--------------------------------------------------------------------------
+            # We'll overwrite the counters so that each qid maps to a float frequency
+            top_5_types_by_column = {}
+
+            for col_index, freq_counter in type_freq_by_column.items():
+                row_count = rows_count_by_column[col_index]
+                if row_count == 0:
+                    continue
+
+                # Convert each type's raw count => ratio in [0..1]
+                for qid in freq_counter:
+                    freq_counter[qid] = freq_counter[qid] / row_count
+
+                # Now pick the top 5 by ratio
+                top_5 = freq_counter.most_common(5)  # returns list of (qid, freq)
+                top_5_types = [tup[0] for tup in top_5]
+                top_5_types_by_column[col_index] = top_5_types
+
+            #--------------------------------------------------------------------------
+            # 3) Assign new features (typeFreq1..typeFreq5) for each candidate
+            #    based on that column's top 5 + freq_counter
+            #--------------------------------------------------------------------------
+            for doc in batch_docs:
+                candidates_by_column = doc["candidates"]
+                for col_index, candidates in candidates_by_column.items():
+                    # If we never built a freq for this column, skip
+                    if col_index not in type_freq_by_column:
+                        continue
+
+                    freq_counter = type_freq_by_column[col_index]
+                    top_5_types = top_5_types_by_column.get(col_index, [])
+
+                    for cand in candidates:
+                        # Ensure we have a features dict
+                        if "features" not in cand:
+                            cand["features"] = {}
+
+                        # Gather candidate's type IDs
+                        cand_qids = {t_obj.get("id") for t_obj in cand.get("types", []) if t_obj.get("id")}
+
+                        # For each of the column's top 5 type IDs, see if candidate has it
+                        # If yes, set feature to that freq; else 0
+                        for i, top_type in enumerate(top_5_types):
+                            feature_name = f"typeFreq{i+1}"  # typeFreq1.. typeFreq5
+                            if top_type in cand_qids:
+                                cand["features"][feature_name] = freq_counter[top_type]
+                            else:
+                                cand["features"][feature_name] = 0.0
+
+            #--------------------------------------------------------------------------
+            # 4) Build final feature matrix & do ML predictions
+            #--------------------------------------------------------------------------
             all_candidates = []
             doc_info = []
             for doc in batch_docs:
                 row_index = doc["row_id"]
                 candidates_by_column = doc["candidates"]
                 for col_index, candidates in candidates_by_column.items():
-                    features = [self.extract_features(candidate) for candidate in candidates]
-                    all_candidates.extend(features)
-                    doc_info.extend([(doc["_id"], row_index, col_index, idx) for idx in range(len(candidates))])
+                    features_list = [self.extract_features(c) for c in candidates]
+                    all_candidates.extend(features_list)
+
+                    # doc_info: track the location of each candidate
+                    doc_info.extend([
+                        (doc["_id"], row_index, col_index, idx)
+                        for idx in range(len(candidates))
+                    ])
 
             if len(all_candidates) == 0:
-                print(f"No candidates to predict for dataset {dataset_name}, table {table_name}. Skipping...")
+                print(f"No candidates to predict for dataset={dataset_name}, table={table_name}. Skipping...")
                 return
 
-            import numpy as np
             candidate_features = np.array(all_candidates)
             print(f"Predicting scores for {len(candidate_features)} candidates...")
             ml_scores = model.predict(candidate_features, batch_size=128)[:, 1]
             print("Scores predicted.")
 
-            for i, (doc_id, row_index, col_index, candidate_idx) in enumerate(doc_info):
-                candidate = doc_map[doc_id]["candidates"][col_index][candidate_idx]
+            # Assign new ML scores back to candidates
+            for i, (doc_id, row_index, col_index, cand_idx) in enumerate(doc_info):
+                candidate = doc_map[doc_id]["candidates"][col_index][cand_idx]
                 candidate["score"] = float(ml_scores[i])
 
+            #--------------------------------------------------------------------------
+            # 5) Sort by final 'score' and trim to max_candidates; update DB
+            #--------------------------------------------------------------------------
             for doc_id, doc in doc_map.items():
                 row_index = doc["row_id"]
                 updated_candidates_by_column = {}
                 for col_index, candidates in doc["candidates"].items():
                     ranked_candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)
-                    updated_candidates_by_column[col_index] = ranked_candidates[:self.max_candidates]
+                    updated_candidates_by_column[col_index] = ranked_candidates[: self.max_candidates]
 
+                # Mark doc as ML-ranked
                 training_collection.update_one(
                     {"_id": doc_id},
                     {"$set": {"candidates": doc["candidates"], "ml_ranked": True}}
                 )
 
+                # Update final results in input_collection
                 input_collection.update_one(
                     {"dataset_name": dataset_name, "table_name": table_name, "row_id": row_index},
                     {"$set": {"el_results": updated_candidates_by_column}}
                 )
 
             processed_count += len(batch_docs)
-            # Clamp progress so it never exceeds 100%
-            progress = (processed_count / total_count) * 100
-            progress = min(progress, 100.0)
+            progress = min((processed_count / total_count) * 100, 100.0)
             print(f"ML ranking progress: {progress:.2f}% completed")
 
+            # Update progress in table_trace
             table_trace_collection.update_one(
                 {"dataset_name": dataset_name, "table_name": table_name},
                 {"$set": {"ml_ranking_progress": progress}},
                 upsert=True
             )
 
+        # Mark the table as COMPLETED
         table_trace_collection.update_one(
             {"dataset_name": dataset_name, "table_name": table_name},
             {"$set": {"ml_ranking_status": "COMPLETED"}}

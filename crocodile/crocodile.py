@@ -15,8 +15,6 @@ import hashlib
 from collections import defaultdict, Counter
 import numpy as np
 
-# Let's define a max chunk size for QIDs:
-MAX_BOW_BATCH_SIZE = 50
 MY_TIMEOUT = aiohttp.ClientTimeout(
     total=30,        # Total time for the request
     connect=5,       # Time to connect to the server
@@ -304,7 +302,8 @@ class Crocodile:
                  model_path=None,
                  batch_size=1024,
                  ml_ranking_workers=1,
-                 top_n_for_type_freq=3):
+                 top_n_for_type_freq=3,
+                 max_bow_batch_size=50):
 
         self.mongo_uri = mongo_uri
         self.db_name = db_name
@@ -334,6 +333,7 @@ class Crocodile:
         self.batch_size = batch_size
         self.ml_ranking_workers = ml_ranking_workers
         self.top_n_for_type_freq = top_n_for_type_freq
+        self.MAX_BOW_BATCH_SIZE = max_bow_batch_size
 
     def get_db(self):
         client = MongoClient(self.mongo_uri, maxPoolSize=32)

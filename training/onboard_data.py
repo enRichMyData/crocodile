@@ -116,11 +116,13 @@ def process_tables(datasets, max_tables_at_once=5, debug_n_tables=None, debug_ta
         batch_table_names = []
 
         total_rows = 0
+        total_tables = 0
         for table in tqdm(tables, desc=f"Processing tables for dataset {dataset}..."):
             if table.endswith(".csv"):
                 df = pd.read_csv(f"./Datasets/{dataset}/tables/{table}")
                 table_name = table.split(".csv")[0]
                 total_rows += len(df)
+                total_tables += 1
 
                 df_sampled = df.sample(n=min(100, len(df)), random_state=42)
 
@@ -143,7 +145,7 @@ def process_tables(datasets, max_tables_at_once=5, debug_n_tables=None, debug_ta
         dataset_trace_collection.update_one(
             {"dataset_name": dataset},
             {"$setOnInsert": {
-                "total_tables": len(tables),
+                "total_tables": total_tables,
                 "processed_tables": 0,
                 "total_rows": total_rows,
                 "processed_rows": 0,
@@ -184,4 +186,4 @@ def process_table_batch(batch_tables_data, batch_table_names):
             onboard_data_batch(dataset, table_name, df, ne_cols_classified, lit_cols_classified, correct_qids)
 
 # Example of running the function with batching and debug mode
-process_tables(datasets, max_tables_at_once=10)  # Use debug_n_tables to onboard 2 tables per dataset
+process_tables(datasets, max_tables_at_once=10, debug_n_tables=10000)  # Use debug_n_tables to onboard n tables per dataset

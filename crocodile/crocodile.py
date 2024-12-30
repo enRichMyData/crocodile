@@ -263,6 +263,11 @@ class TraceThread(Thread):
                 if table_total_count > 0 and table_done_count == table_total_count:
                     # If not already COMPLETED, set it now
                     if current_table_status != "COMPLETED":
+                        self.dataset_trace_collection.update_one(
+                            {"dataset_name": self.dataset_name},
+                            {"$inc": {"processed_tables": 1}}
+                        )
+
                         self.table_trace_collection.update_one(
                             {"dataset_name": self.dataset_name, "table_name": table_name},
                             {"$set": {
@@ -301,9 +306,9 @@ class Crocodile:
                  selected_features=None, candidate_retrieval_limit=100,
                  model_path=None,
                  batch_size=1024,
-                 ml_ranking_workers=1,
+                 ml_ranking_workers=2,
                  top_n_for_type_freq=3,
-                 max_bow_batch_size=50):
+                 max_bow_batch_size=100):
 
         self.mongo_uri = mongo_uri
         self.db_name = db_name
@@ -324,7 +329,8 @@ class Crocodile:
         self.selected_features = selected_features or [
             "ntoken_mention", "ntoken_entity", "length_mention", "length_entity",
             "popularity", "ed_score", "jaccard_score", "jaccardNgram_score", "desc", "descNgram",
-            "bow_similarity", "kind", "NERtype", "column_NERtype"
+            "bow_similarity", "kind", "NERtype", "column_NERtype",
+            "typeFreq1", "typeFreq2", "typeFreq3", "typeFreq4", "typeFreq5"
         ]
         self.model_path = model_path
         self.current_dataset = None
@@ -510,7 +516,11 @@ class Crocodile:
                     return entity_name, merged_candidates
             except Exception as e:
                     end_time = time.time()
-                    self.log_to_db("FETCH_CANDIDATES_ERROR", f"Error fetching candidates for {entity_name}", traceback.format_exc(), attempt=attempts + 1)
+                    if attempts == 4:
+                        # Log the error if all attempts failed
+                        self.log_to_db("FETCH_CANDIDATES_ERROR", 
+                                       f"Error fetching candidates for {entity_name}", 
+                                       traceback.format_exc(), attempt=attempts + 1)
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 16)
 
@@ -664,10 +674,12 @@ class Crocodile:
 
             except Exception as e:
                 end_time = time.time()
-                self.log_to_db("FETCH_BOW_ERROR", 
-                               f"Error fetching BoW for row_hash={row_hash}, chunk_qids={chunk_qids}",
-                               traceback.format_exc(),
-                               attempt=attempts + 1)
+                if attempts == 4:
+                    # Log the error if all attempts failed
+                    self.log_to_db("FETCH_BOW_ERROR", 
+                                f"Error fetching BoW for row_hash={row_hash}, chunk_qids={chunk_qids}",
+                                traceback.format_exc(),
+                                attempt=attempts + 1)
                 # Exponential backoff
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 16)

@@ -655,6 +655,9 @@ class Crocodile:
                     for qid in chunk_qids:
                         qid_data = bow_data.get(qid, {"similarity_score": 0.0, "matched_words": []})
                         cache_key = f"{row_hash}_{qid}"
+                        print(f"Caching BoW data for {cache_key}",
+                              f"Row text: {row_text}",
+                              f"QID: {qid}")
                         bow_cache.put(cache_key, qid_data)
                         chunk_bow_results[qid] = qid_data
 

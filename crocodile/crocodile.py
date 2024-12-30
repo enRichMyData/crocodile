@@ -863,7 +863,8 @@ class Crocodile:
                                 if cand['id']:
                                     row_qids.append(cand['id'])
                 row_qids = list(set(q for q in row_qids if q))
-
+                
+                print(raw_context_text, row_hash, row_qids, len(row_qids))
                 # -------------------------------------------------------------
                 # 2. Fetch BoW vectors for this row’s QIDs
                 # -------------------------------------------------------------

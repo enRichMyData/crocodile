@@ -342,7 +342,7 @@ class Crocodile:
         self.MAX_BOW_BATCH_SIZE = max_bow_batch_size
 
     def get_db(self):
-        client = MongoClient(self.mongo_uri, maxPoolSize=32)
+        client = MongoClient(self.mongo_uri, maxPoolSize=5)
         return client[self.db_name]
 
     def get_candidate_cache(self):

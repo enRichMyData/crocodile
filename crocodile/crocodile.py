@@ -740,7 +740,7 @@ class Crocodile:
 
                 # Build row_text from the context columns
                 raw_context_text = ' '.join(
-                    str(row[int(c)]) for c in context_columns if int(c) < len(row)
+                    str(row[int(c)]) for c in sorted(context_columns, key=lambda col: str(row[int(col)]))
                 )
                 # Normalize row text: lowercase and remove extra spaces
                 normalized_row_text = raw_context_text.lower()
@@ -864,7 +864,6 @@ class Crocodile:
                                     row_qids.append(cand['id'])
                 row_qids = list(set(q for q in row_qids if q))
                 
-                print(raw_context_text, row_hash, row_qids, len(row_qids))
                 # -------------------------------------------------------------
                 # 2. Fetch BoW vectors for this row’s QIDs
                 # -------------------------------------------------------------

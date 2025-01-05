@@ -342,7 +342,7 @@ class Crocodile:
         self.MAX_BOW_BATCH_SIZE = max_bow_batch_size
 
     def get_db(self):
-        client = MongoClient(self.mongo_uri, maxPoolSize=5)
+        client = MongoClient(self.mongo_uri, maxPoolSize=4)
         return client[self.db_name]
 
     def get_candidate_cache(self):
@@ -1109,7 +1109,7 @@ class Crocodile:
                 dataset_name = table_trace_obj.get("dataset_name")
                 table_name = table_trace_obj.get("table_name")
                 self.apply_ml_ranking(dataset_name, table_name, model)
-            time.sleep(1) 
+            time.sleep(2) 
 
     def run(self):
         mp.set_start_method("spawn", force=True)

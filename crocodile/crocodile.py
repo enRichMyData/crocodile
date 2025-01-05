@@ -1059,7 +1059,7 @@ class Crocodile:
             {"$set": {"rows_per_second": rows_per_second}}
         )
 
-    def claim_todo_batch(self, input_collection, batch_size=10):
+    def claim_todo_batch(self, input_collection, batch_size=25):
         claimed_docs = []
         for _ in range(batch_size):
             doc = input_collection.find_one_and_update(
@@ -1132,10 +1132,10 @@ class Crocodile:
             p.start()
             processes.append(p)
         
-        for _ in range(self.ml_ranking_workers):
-            p = mp.Process(target=self.ml_ranking_worker)
-            p.start()
-            processes.append(p)
+        # for _ in range(self.ml_ranking_workers):
+        #     p = mp.Process(target=self.ml_ranking_worker)
+        #     p.start()
+        #     processes.append(p)
         
         trace_thread = TraceThread(input_collection, dataset_trace_collection, table_trace_collection)
         trace_thread.start()

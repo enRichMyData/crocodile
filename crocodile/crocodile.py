@@ -287,7 +287,7 @@ class TraceThread(Thread):
                 break
 
             # Sleep to avoid excessive resource usage
-            time.sleep(1)
+            time.sleep(5)
     
 
 class Crocodile:

@@ -342,7 +342,11 @@ class Crocodile:
         self.MAX_BOW_BATCH_SIZE = max_bow_batch_size
 
     def get_db(self):
-        client = MongoClient(self.mongo_uri, maxPoolSize=4)
+        client = MongoClient(self.mongo_uri, 
+                             maxPoolSize=4, 
+                             socketTimeoutMS=30000,   # tune timeouts if desired
+                             connectTimeoutMS=30000,
+                             serverSelectionTimeoutMS=30000)
         return client[self.db_name]
 
     def get_candidate_cache(self):

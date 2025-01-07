@@ -6,6 +6,7 @@ import multiprocessing as mp
 from threading import Thread
 import traceback
 from datetime import datetime
+from urllib.parse import quote
 import nltk
 import warnings
 import absl.logging
@@ -470,8 +471,10 @@ class Crocodile:
     async def _fetch_candidates(self, entity_name, row_text, fuzzy, qid, session):
         db = self.get_db()
         timing_trace_collection = db[self.timing_collection_name]
-
-        url = f"{self.entity_retrieval_endpoint}?name={entity_name}&limit={self.candidate_retrieval_limit}&fuzzy={fuzzy}&token={self.entity_retrieval_token}"
+        
+        # Encode the entity_name to handle special characters
+        encoded_entity_name = quote(entity_name)
+        url = f"{self.entity_retrieval_endpoint}?name={encoded_entity_name}&limit={self.candidate_retrieval_limit}&fuzzy={fuzzy}&token={self.entity_retrieval_token}"
         
         if qid:
             url += f"&ids={qid}"

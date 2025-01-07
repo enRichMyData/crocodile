@@ -23,7 +23,7 @@ crocodile_instance = Crocodile(
     entity_retrieval_endpoint=os.environ["ENTITY_RETRIEVAL_ENDPOINT"],  # Access the entity retrieval endpoint directly from environment variables
     entity_bow_endpoint=os.environ["ENTITY_BOW_ENDPOINT"],  # Access the entity BoW endpoint directly from environment variables
     entity_retrieval_token=os.environ["ENTITY_RETRIEVAL_TOKEN"],  # Access the entity retrieval token directly from environment variables
-    max_workers=7,
+    max_workers=6,
     candidate_retrieval_limit=10,
     model_path=model_path
 )

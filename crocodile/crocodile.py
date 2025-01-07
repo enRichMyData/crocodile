@@ -1066,7 +1066,7 @@ class Crocodile:
             {"$set": {"rows_per_second": rows_per_second}}
         )
 
-    def claim_todo_batch(self, input_collection, batch_size=25):
+    def claim_todo_batch(self, input_collection, batch_size=10):
         claimed_docs = []
         for _ in range(batch_size):
             doc = input_collection.find_one_and_update(

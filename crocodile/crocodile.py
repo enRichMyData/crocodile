@@ -287,7 +287,7 @@ class TraceThread(Thread):
                 break
 
             # Sleep to avoid excessive resource usage
-            time.sleep(5)
+            time.sleep(1)
     
 
 class Crocodile:
@@ -558,6 +558,9 @@ class Crocodile:
             else:
                 # No cache entry, must fetch
                 to_fetch.append((entity_name, fuzzy, row_text, qid_str))
+        
+
+        print(f"Fetching {len(to_fetch)} entities...")
 
         # If nothing to fetch, return what we have
         if not to_fetch:

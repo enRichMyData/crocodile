@@ -34,6 +34,7 @@ def ensure_indexes():
 ensure_indexes()
 
 datasets = ["Round4_2020", "2T_2020", "Round3_2019", "HardTablesR2", "HardTablesR3", "Round1_T2D"]
+datasets = ["HardTablesR2"]  # For debugging
 
 # Initialize the column classifier
 classifier = ColumnClassifier(model_type='fast')
@@ -91,15 +92,6 @@ def onboard_data_batch(dataset_name, table_name, df, ne_cols, lit_cols, correct_
         upsert=True
     )
 
-    process_queue.update_one(
-        {"dataset_name": dataset_name, "table_name": table_name},
-        {"$set": {
-            "status": "QUEUED",
-            "table_name": table_name,
-            "dataset_name": dataset_name
-        }},
-        upsert=True
-    )
 
 # Main processing loop for onboarding datasets with debug mode
 def process_tables(datasets, max_tables_at_once=5, debug_n_tables=None, debug_tables=None):

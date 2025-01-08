@@ -700,13 +700,6 @@ class Crocodile:
         and returns the final BoW results.
         """
         db = self.get_db()
-        web_requests_collection = db["web_requests"]
-        web_requests_collection.insert_one({
-            "operation": "fetch_bow_vectors_batch",
-            "row_hash": row_hash,
-            "row_text": row_text,
-            "qids": qids
-        })
 
         async def runner():
             async with aiohttp.ClientSession(

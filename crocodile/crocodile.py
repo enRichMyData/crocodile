@@ -932,12 +932,12 @@ class Crocodile:
                 # -------------------------------------------------------------
                 # 5. Save to DB: training candidates + final EL results
                 # -------------------------------------------------------------
-                self.save_candidates_for_training(
-                    training_candidates_by_ne_column,
-                    dataset_name,
-                    table_name,
-                    row_index
-                )
+                # self.save_candidates_for_training(
+                #     training_candidates_by_ne_column,
+                #     dataset_name,
+                #     table_name,
+                #     row_index
+                # )
                 db[self.input_collection].update_one(
                     {'_id': doc_id},
                     {'$set': {'el_results': linked_entities, 'status': 'DONE'}}

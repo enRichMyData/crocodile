@@ -1,5 +1,10 @@
 import pandas as pd
+import sys
+import os
 from pymongo import MongoClient, ASCENDING
+# Adding the level above to sys.path for crocodile module visibility
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from crocodile import Crocodile
 
 # Load the CSV file into a DataFrame
 file_path = '../tables/imdb_top_1000.csv'
@@ -108,3 +113,9 @@ dataset_trace_collection.update_one(
 )
 
 print(f"Data onboarded successfully for dataset '{dataset_name}' and table '{table_name}'.")
+
+input_data = db["input_data"]
+model_path = "./trained_models/neural_ranker.h5"
+
+
+

@@ -490,6 +490,20 @@ class Crocodile:
                     row_tokens = set(self.tokenize_text(row_text))
                     fetched_candidates = self._process_candidates(candidates, entity_name, row_tokens)
 
+                    # Ensure all QIDs are included by adding placeholders for missing ones
+                    required_qids = qid.split() if qid else []
+                    existing_qids = {c['id'] for c in fetched_candidates if c.get('id')}
+                    missing_qids = set(required_qids) - existing_qids
+
+                    for missing_qid in missing_qids:
+                        fetched_candidates.append({
+                            'id': missing_qid,  # Placeholder for missing QID
+                            'name': None,
+                            'description': None,
+                            'features': None  # Explicitly set features to None,
+                            'is_placeholder': True  # Explicitly mark as placeholder
+                        })
+
                     # Merge with existing cache if present
                     cache = self.get_candidate_cache()
                     cache_key = f"{entity_name}_{fuzzy}"
@@ -1028,7 +1042,11 @@ class Crocodile:
         return candidate
 
     def rank_with_feature_scoring(self, candidates):
-        scored_candidates = [self.score_candidate(c) for c in candidates]
+        scored_candidates = [
+            self.score_candidate(c)
+            for c in candidates
+            if not c.get('is_placeholder') and c['features'] is not None  # Skip placeholders
+        ]
         return sorted(scored_candidates, key=lambda x: x['score'], reverse=True)
 
     def save_candidates_for_training(self, candidates_by_ne_column, dataset_name, table_name, row_index):

@@ -500,7 +500,7 @@ class Crocodile:
                             'id': missing_qid,  # Placeholder for missing QID
                             'name': None,
                             'description': None,
-                            'features': None  # Explicitly set features to None,
+                            'features': None, # Explicitly set features to None
                             'is_placeholder': True  # Explicitly mark as placeholder
                         })
 
@@ -578,7 +578,7 @@ class Crocodile:
         
         # If nothing to fetch, return what we have
         if not to_fetch:
-            return results
+            return self._remove_placeholders(results)
 
         # Fetch missing data
         async with aiohttp.ClientSession(timeout=MY_TIMEOUT, connector=aiohttp.TCPConnector(ssl=False, limit=10)) as session:
@@ -589,6 +589,14 @@ class Crocodile:
             for entity_name, candidates in done:
                 results[entity_name] = candidates
 
+        return self._remove_placeholders(results)
+
+    def _remove_placeholders(self, results):
+        """Removes placeholder candidates from the results based on `is_placeholder` attribute."""
+        for entity_name, candidates in results.items():
+            results[entity_name] = [
+                c for c in candidates if not c.get('is_placeholder', False)
+            ]
         return results
     
     def fetch_candidates_batch(self, entities, row_texts, fuzzies, qids):
@@ -1042,11 +1050,7 @@ class Crocodile:
         return candidate
 
     def rank_with_feature_scoring(self, candidates):
-        scored_candidates = [
-            self.score_candidate(c)
-            for c in candidates
-            if not c.get('is_placeholder') and c['features'] is not None  # Skip placeholders
-        ]
+        scored_candidates = [self.score_candidate(c) for c in candidates]
         return sorted(scored_candidates, key=lambda x: x['score'], reverse=True)
 
     def save_candidates_for_training(self, candidates_by_ne_column, dataset_name, table_name, row_index):

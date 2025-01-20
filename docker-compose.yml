@@ -10,6 +10,22 @@ services:
     command: mongod --config /etc/mongod.conf
     restart: always  # Restart policy to always restart the container
 
+  fastapi:
+    build:
+      context: ./backend  # Path to the FastAPI backend
+      dockerfile: Dockerfile  # Use the Dockerfile in the backend folder
+    container_name: crocodile_fastapi
+    ports:
+      - "${FASTAPI_SERVER_PORT:-8000}:8000"  # Default to 8000 if not set
+    volumes:
+      - ./backend:/app  # Mount the FastAPI backend directory for hot reloading
+    command: uvicorn fastAPI:app --host 0.0.0.0 --port 8000 --reload  # Run FastAPI with hot reload
+    env_file:
+      - .env  # Load environment variables from .env file
+    depends_on:
+      - mongodb  # Ensure FastAPI starts after MongoDB
+    restart: always  # Restart policy to always restart the container
+
   jupyter:
     image: roby944/jupyter-minimal-extended:latest
     container_name: crocodile_jupyter

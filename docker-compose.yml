@@ -18,8 +18,9 @@ services:
     ports:
       - "${FASTAPI_SERVER_PORT:-8000}:8000"  # Default to 8000 if not set
     volumes:
-      - ./backend:/app  # Mount the FastAPI backend directory for hot reloading
-    command: uvicorn fastAPI:app --host 0.0.0.0 --port 8000 --reload  # Run FastAPI with hot reload
+    # Mount the app directory to the container
+      - ./backend/app:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     env_file:
       - .env  # Load environment variables from .env file
     depends_on:

@@ -15,6 +15,9 @@ import pandas as pd
 import hashlib
 from collections import defaultdict, Counter
 import numpy as np
+from typing import Dict
+from threading import Lock
+import os
 
 MY_TIMEOUT = aiohttp.ClientTimeout(
     total=30,        # Total time for the request
@@ -251,8 +254,48 @@ class TraceThread(Thread):
                 break
 
             # Sleep to avoid excessive resource usage
-            time.sleep(1)
+            #time.sleep(1)
+
+class MongoConnectionManager:
+    _instances: Dict[int, MongoClient] = {}
+    _lock = Lock()
     
+    @classmethod
+    def get_client(cls, mongo_uri):
+        pid = os.getpid()
+        
+        with cls._lock:
+            if pid not in cls._instances:
+                client = MongoClient(
+                    mongo_uri,
+                    maxPoolSize=100,
+                    minPoolSize=8,
+                    waitQueueTimeoutMS=30000,
+                    retryWrites=True,
+                    serverSelectionTimeoutMS=30000,
+                    connectTimeoutMS=30000,
+                    socketTimeoutMS=30000
+                )
+                cls._instances[pid] = client
+            
+            return cls._instances[pid]
+
+    @classmethod
+    def close_connection(cls, pid=None):
+        if pid is None:
+            pid = os.getpid()
+            
+        with cls._lock:
+            if pid in cls._instances:
+                cls._instances[pid].close()
+                del cls._instances[pid]
+    
+    @classmethod
+    def close_all_connections(cls):
+        with cls._lock:
+            for client in cls._instances.values():
+                client.close()
+            cls._instances.clear()
 
 class Crocodile:
     def __init__(self, mongo_uri="mongodb://localhost:27017/",
@@ -306,12 +349,16 @@ class Crocodile:
         self.MAX_BOW_BATCH_SIZE = max_bow_batch_size
 
     def get_db(self):
-        client = MongoClient(self.mongo_uri, 
-                             maxPoolSize=4, 
-                             socketTimeoutMS=30000,   # tune timeouts if desired
-                             connectTimeoutMS=30000,
-                             serverSelectionTimeoutMS=30000)
+        """Get MongoDB database connection for current process"""
+        client = MongoConnectionManager.get_client(self.mongo_uri)
         return client[self.db_name]
+
+    def __del__(self):
+        """Cleanup when instance is destroyed"""
+        try:
+            MongoConnectionManager.close_connection()
+        except:
+            pass
 
     def get_candidate_cache(self):
         db = self.get_db()
@@ -1129,6 +1176,8 @@ class Crocodile:
 
         for p in processes:
             p.join()
+
+        self.__del__()
 
         print("All tasks have been processed.")
 

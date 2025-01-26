@@ -61,9 +61,9 @@ class MongoCache:
 
 import time
 from datetime import datetime
-from threading import Thread
+#from threading import Thread
 
-class TraceThread(Thread):
+class TraceThread(mp.Process):
     def __init__(self, input_collection, dataset_trace_collection, table_trace_collection, timing_collection):
         """
         Thread responsible for tracking dataset/table progress:
@@ -1244,41 +1244,46 @@ class Crocodile:
             {"$set": {"rows_per_second": rows_per_second}}
         )
 
-    def claim_todo_batch(self, input_collection, batch_size=25):
-        claimed_docs = []
+    def claim_todo_batch(self, input_collection, batch_size=10):
+        """
+        Atomically claims a batch of TODO documents by setting them to DOING,
+        and returns the full documents so we don't have to fetch them again.
+        """
+        docs = []
         for _ in range(batch_size):
             doc = input_collection.find_one_and_update(
-                {"status": "TODO"}, 
+                {"status": "TODO"},
                 {"$set": {"status": "DOING"}},
-                projection={"_id": 1, "dataset_name": 1, "table_name": 1},
                 sort=[("_id", 1)]  # or another suitable ordering
             )
             if doc is None:
                 # No more TODO docs
                 break
-            claimed_docs.append(doc)
-        return claimed_docs
+            docs.append(doc)
+        return docs
 
     def worker(self):
         db = self.get_db()
         input_collection = db[self.input_collection]
-        #table_trace_collection = db[self.table_trace_collection_name]
+
         while True:
-            # Atomically claim a batch of documents
+            # Atomically claim a batch of documents (full docs, not partial)
             todo_docs = self.claim_todo_batch(input_collection)
             if not todo_docs:
                 print("No more tasks to process.")
                 break
 
+            # Group the claimed documents by (dataset_name, table_name)
             tasks_by_table = {}
             for doc in todo_docs:
                 dataset_name = doc["dataset_name"]
                 table_name = doc["table_name"]
-                tasks_by_table.setdefault((dataset_name, table_name), []).append(doc["_id"])
+                # Accumulate full docs in a list
+                tasks_by_table.setdefault((dataset_name, table_name), []).append(doc)
 
-            for (dataset_name, table_name), doc_ids in tasks_by_table.items():
+            # Process each group as a batch
+            for (dataset_name, table_name), docs in tasks_by_table.items():
                 self.set_context(dataset_name, table_name)
-                docs = self.find_documents(input_collection, {"_id": {"$in": doc_ids}})
                 self.process_rows_batch(docs, dataset_name, table_name)
 
     def ml_ranking_worker(self):

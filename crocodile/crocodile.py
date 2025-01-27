@@ -3,14 +3,12 @@ import asyncio
 import aiohttp
 from pymongo import MongoClient
 import multiprocessing as mp
-from threading import Thread
 import traceback
 from datetime import datetime
 from urllib.parse import quote
 import nltk
 import warnings
 import absl.logging
-import tensorflow as tf
 import pandas as pd
 import hashlib
 from collections import defaultdict, Counter
@@ -32,7 +30,7 @@ warnings.filterwarnings("ignore", category=UserWarning, message="Compiled the lo
 warnings.filterwarnings("ignore", category=UserWarning, message="Error in loading the saved optimizer state.*")
 
 # Set logging levels
-tf.get_logger().setLevel('ERROR')
+#tf.get_logger().setLevel('ERROR')
 absl.logging.set_verbosity(absl.logging.ERROR)
 
 # NLTK setup
@@ -61,10 +59,10 @@ class MongoCache:
 
 import time
 from datetime import datetime
-#from threading import Thread
+
 
 class TraceThread(mp.Process):
-    def __init__(self, input_collection, dataset_trace_collection, table_trace_collection, timing_collection):
+    def __init__(self, mongo_uri, db_name, input_collection_name, dataset_trace_collection_name, table_trace_collection_name, timing_collection_name):
         """
         Thread responsible for tracking dataset/table progress:
           1) Marks the first PENDING dataset as IN_PROGRESS.
@@ -79,15 +77,22 @@ class TraceThread(mp.Process):
         :param timing_collection: MongoDB collection for logging operation timings
         """
         super().__init__()
-        self.input_collection = input_collection
-        self.dataset_trace_collection = dataset_trace_collection
-        self.table_trace_collection = table_trace_collection
-        self.timing_collection = timing_collection
+        self.mongo_uri = mongo_uri
+        self.db_name = db_name
+        self.input_collection_name = input_collection_name
+        self.dataset_trace_collection_name = dataset_trace_collection_name
+        self.table_trace_collection_name = table_trace_collection_name
+        self.timing_collection_name = timing_collection_name
 
         # Fetch the first dataset to process (status=PENDING)
         self.dataset_name = self.get_next_dataset()
         if not self.dataset_name:
             raise ValueError("No datasets with status 'PENDING' found.")
+
+    def get_db(self):
+        """Get MongoDB database connection for current process"""
+        client = MongoConnectionManager.get_client(self.mongo_uri)
+        return client[self.db_name]
 
     def time_mongo_operation(self, operation_name, query_function, *args, **kwargs):
         """
@@ -95,11 +100,14 @@ class TraceThread(mp.Process):
         Logs the start/end times and duration to timing_collection.
         """
         start_time = time.time()
+        db = self.get_db()
+        timing_collection = db[self.timing_collection_name]
+
         try:
             result = query_function(*args, **kwargs)
         except Exception as e:
             end_time = time.time()
-            self.timing_collection.insert_one({
+            timing_collection.insert_one({
                 "operation_name": operation_name,
                 "start_time": datetime.fromtimestamp(start_time),
                 "end_time": datetime.fromtimestamp(end_time),
@@ -110,27 +118,29 @@ class TraceThread(mp.Process):
                 "status": "FAILED",
             })
             raise
-        else:
-            end_time = time.time()
-            self.timing_collection.insert_one({
-                "operation_name": operation_name,
-                "start_time": datetime.fromtimestamp(start_time),
-                "end_time": datetime.fromtimestamp(end_time),
-                "duration_seconds": round(end_time - start_time, 4),
-                "args": str(args),
-                "kwargs": str(kwargs),
-                "status": "SUCCESS",
-            })
-            return result
+     
+        end_time = time.time()
+        timing_collection.insert_one({
+            "operation_name": operation_name,
+            "start_time": datetime.fromtimestamp(start_time),
+            "end_time": datetime.fromtimestamp(end_time),
+            "duration_seconds": round(end_time - start_time, 4),
+            "args": str(args),
+            "kwargs": str(kwargs),
+            "status": "SUCCESS",
+        })
+        return result
 
     def get_next_dataset(self):
         """
         Fetches the next dataset with status=PENDING and marks it as IN_PROGRESS.
         Returns the dataset_name or None if no dataset is found.
         """
+        db = self.get_db()
+        dataset_trace_collection = db[self.dataset_trace_collection_name]
         doc_dataset = self.time_mongo_operation(
             "find_next_dataset",
-            self.dataset_trace_collection.find_one,
+            dataset_trace_collection.find_one,
             {"status": "PENDING"}
         )
         if not doc_dataset:
@@ -143,7 +153,7 @@ class TraceThread(mp.Process):
         # Mark the dataset as IN_PROGRESS and set start_time
         self.time_mongo_operation(
             "update_dataset_status_to_in_progress",
-            self.dataset_trace_collection.update_one,
+            dataset_trace_collection.update_one,
             {"dataset_name": dataset_name},
             {
                 "$set": {
@@ -175,6 +185,10 @@ class TraceThread(mp.Process):
         Monitors and updates BOTH dataset-level and table-level progress until all rows are DONE.
         Once no more TODO/DOING rows remain, marks the dataset as DONE.
         """
+        db = self.get_db()
+        input_collection = db[self.input_collection_name]
+        dataset_trace_collection = db[self.dataset_trace_collection_name]
+        table_trace_collection = db[self.table_trace_collection_name]
         while True:
             # -----------------------------------------------------------
             # 1) DATASET-LEVEL AGGREGATION
@@ -183,9 +197,10 @@ class TraceThread(mp.Process):
                 {"$match": {"dataset_name": self.dataset_name}},
                 {"$group": {"_id": "$status", "count": {"$sum": 1}}}
             ]
+            
             dataset_counts = self.time_mongo_operation(
                 "aggregate_dataset_counts",
-                self.input_collection.aggregate,
+                input_collection.aggregate,
                 dataset_counts_pipeline
             )
             dataset_counts_dict = {doc["_id"]: doc["count"] for doc in dataset_counts}
@@ -196,24 +211,25 @@ class TraceThread(mp.Process):
             # Fetch dataset trace
             dataset_trace = self.time_mongo_operation(
                 "find_dataset_trace",
-                self.dataset_trace_collection.find_one,
+                dataset_trace_collection.find_one,
                 {"dataset_name": self.dataset_name}
             )
             if not dataset_trace:
                 # Dataset record no longer exists; break out
                 break
+            
 
             # If total_rows is not set, count them once and store
             total_rows_dataset = dataset_trace.get("total_rows", None)
             if total_rows_dataset is None:
                 total_rows_dataset = self.time_mongo_operation(
                     "count_total_rows_dataset",
-                    self.input_collection.count_documents,
+                    input_collection.count_documents,
                     {"dataset_name": self.dataset_name}
                 )
                 self.time_mongo_operation(
                     "update_total_rows_dataset",
-                    self.dataset_trace_collection.update_one,
+                    dataset_trace_collection.update_one,
                     {"dataset_name": self.dataset_name},
                     {"$set": {"total_rows": total_rows_dataset}}
                 )
@@ -232,7 +248,7 @@ class TraceThread(mp.Process):
             # Update dataset trace with current progress
             self.time_mongo_operation(
                 "update_dataset_trace_progress",
-                self.dataset_trace_collection.update_one,
+                dataset_trace_collection.update_one,
                 {"dataset_name": self.dataset_name},
                 {
                     "$set": {
@@ -255,7 +271,7 @@ class TraceThread(mp.Process):
             # First fetch all table_traces in the current dataset that are not "COMPLETED"
             non_completed_tables = self.time_mongo_operation(
                 "find_non_completed_tables",
-                self.table_trace_collection.find,
+                table_trace_collection.find,
                 {
                     "dataset_name": self.dataset_name,
                     "status": {"$ne": "COMPLETED"}
@@ -285,7 +301,7 @@ class TraceThread(mp.Process):
                 ]
                 result = self.time_mongo_operation(
                     "aggregate_table_counts",
-                    self.input_collection.aggregate,
+                    input_collection.aggregate,
                     table_counts_pipeline
                 )
 
@@ -307,7 +323,7 @@ class TraceThread(mp.Process):
                     # )
                     self.time_mongo_operation(
                         "update_table_total_rows",
-                        self.table_trace_collection.update_one,
+                        table_trace_collection.update_one,
                         {
                             "dataset_name": self.dataset_name,
                             "table_name": table_name
@@ -324,7 +340,7 @@ class TraceThread(mp.Process):
                     tbl_start_time = datetime.now()
                     self.time_mongo_operation(
                         "update_table_status_in_progress",
-                        self.table_trace_collection.update_one,
+                        table_trace_collection.update_one,
                         {
                             "dataset_name": self.dataset_name,
                             "table_name": table_name
@@ -353,7 +369,7 @@ class TraceThread(mp.Process):
                 # Update table trace
                 self.time_mongo_operation(
                     "update_table_trace_progress",
-                    self.table_trace_collection.update_one,
+                    table_trace_collection.update_one,
                     {
                         "dataset_name": self.dataset_name,
                         "table_name": table_name
@@ -377,7 +393,7 @@ class TraceThread(mp.Process):
                 if total_todo + total_doing == 0:
                     self.time_mongo_operation(
                         "update_table_status_completed",
-                        self.table_trace_collection.update_one,
+                        table_trace_collection.update_one,
                         {
                             "dataset_name": self.dataset_name,
                             "table_name": table_name
@@ -397,7 +413,7 @@ class TraceThread(mp.Process):
                 # Mark dataset as DONE
                 self.time_mongo_operation(
                     "update_dataset_status_done",
-                    self.dataset_trace_collection.update_one,
+                    dataset_trace_collection.update_one,
                     {"dataset_name": self.dataset_name},
                     {
                         "$set": {
@@ -493,8 +509,6 @@ class Crocodile:
             "typeFreq1", "typeFreq2", "typeFreq3", "typeFreq4", "typeFreq5"
         ]
         self.model_path = model_path
-        self.current_dataset = None
-        self.current_table = None
         self.entity_bow_endpoint = entity_bow_endpoint
         self.batch_size = batch_size
         self.ml_ranking_workers = ml_ranking_workers
@@ -520,10 +534,6 @@ class Crocodile:
     def get_bow_cache(self):
         db = self.get_db()
         return MongoCache(db, self.bow_cache_collection_name)
-
-    def set_context(self, dataset_name, table_name):
-        self.current_dataset = dataset_name
-        self.current_table = table_name
 
     def time_mongo_operation(self, operation_name, query_function, *args, **kwargs):
         start_time = time.time()
@@ -620,8 +630,6 @@ class Crocodile:
         db = self.get_db()
         log_collection = db[self.error_log_collection_name]
         log_entry = {
-            "dataset_name": self.current_dataset,
-            "table_name": self.current_table,
             "timestamp": datetime.now(),
             "level": level,
             "message": message,
@@ -1283,7 +1291,6 @@ class Crocodile:
 
             # Process each group as a batch
             for (dataset_name, table_name), docs in tasks_by_table.items():
-                self.set_context(dataset_name, table_name)
                 self.process_rows_batch(docs, dataset_name, table_name)
 
     def ml_ranking_worker(self):
@@ -1328,7 +1335,7 @@ class Crocodile:
         #     p.start()
         #     processes.append(p)
         
-        trace_thread = TraceThread(input_collection, dataset_trace_collection, table_trace_collection, timing_collection)
+        trace_thread = TraceThread(self.mongo_uri, self.db_name, self.input_collection, self.dataset_trace_collection_name, self.table_trace_collection_name, self.timing_collection_name)
         trace_thread.start()
         processes.append(trace_thread)
 

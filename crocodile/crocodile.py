@@ -1326,10 +1326,10 @@ class Crocodile:
             p.start()
             processes.append(p)
         
-        # for _ in range(self.ml_ranking_workers):
-        #     p = mp.Process(target=self.ml_ranking_worker)
-        #     p.start()
-        #     processes.append(p)
+        for _ in range(self.ml_ranking_workers):
+             p = mp.Process(target=self.ml_ranking_worker)
+             p.start()
+             processes.append(p)
         
         trace_thread = TraceThread(self.mongo_uri, self.db_name, self.input_collection, self.dataset_trace_collection_name, 
                                    self.table_trace_collection_name, self.timing_collection_name)
@@ -1381,14 +1381,10 @@ class Crocodile:
             #--------------------------------------------------------------------------
             # 1) Collect "top N" type IDs per column, ignoring duplicates in same row
             #--------------------------------------------------------------------------
-            # For each doc, for each column, pick top N, gather their type IDs into a set,
-            # then increment that set in the column's counter exactly once per row.
             for doc in batch_docs:
                 candidates_by_column = doc["candidates"]
                 for col_index, candidates in candidates_by_column.items():
-                    # Sort by some existing metric (score or popularity) so we know the "top"
-                    pre_sorted = sorted(candidates, key=lambda x: x.get("score", 0.0), reverse=True)
-                    top_candidates_for_freq = pre_sorted[:top_n_for_type_freq]
+                    top_candidates_for_freq = candidates[:top_n_for_type_freq]
 
                     # Collect distinct type IDs from those top candidates
                     row_qids = set()
@@ -1406,11 +1402,9 @@ class Crocodile:
                     rows_count_by_column[col_index] += 1
 
             #--------------------------------------------------------------------------
-            # 2) Convert raw counts to frequencies in [0..1], pick top 5 per column
+            # 2) Convert raw counts to frequencies in [0..1].
+            #    We'll keep frequencies for ALL types, not just the top 5.
             #--------------------------------------------------------------------------
-            # We'll overwrite the counters so that each qid maps to a float frequency
-            top_5_types_by_column = {}
-
             for col_index, freq_counter in type_freq_by_column.items():
                 row_count = rows_count_by_column[col_index]
                 if row_count == 0:
@@ -1420,14 +1414,10 @@ class Crocodile:
                 for qid in freq_counter:
                     freq_counter[qid] = freq_counter[qid] / row_count
 
-                # Now pick the top 5 by ratio
-                top_5 = freq_counter.most_common(5)  # returns list of (qid, freq)
-                top_5_types = [tup[0] for tup in top_5]
-                top_5_types_by_column[col_index] = top_5_types
-
             #--------------------------------------------------------------------------
             # 3) Assign new features (typeFreq1..typeFreq5) for each candidate
-            #    based on that column's top 5 + freq_counter
+            #    by looking up *all* its types' frequencies, sorting desc, and
+            #    storing the top 5.
             #--------------------------------------------------------------------------
             for doc in batch_docs:
                 candidates_by_column = doc["candidates"]
@@ -1437,7 +1427,6 @@ class Crocodile:
                         continue
 
                     freq_counter = type_freq_by_column[col_index]
-                    top_5_types = top_5_types_by_column.get(col_index, [])
 
                     for cand in candidates:
                         # Ensure we have a features dict
@@ -1445,16 +1434,21 @@ class Crocodile:
                             cand["features"] = {}
 
                         # Gather candidate's type IDs
-                        cand_qids = {t_obj.get("id") for t_obj in cand.get("types", []) if t_obj.get("id")}
+                        cand_qids = [t_obj.get("id") for t_obj in cand.get("types", []) if t_obj.get("id")]
 
-                        # For each of the column's top 5 type IDs, see if candidate has it
-                        # If yes, set feature to that freq; else 0
-                        for i, top_type in enumerate(top_5_types):
-                            feature_name = f"typeFreq{i+1}"  # typeFreq1.. typeFreq5
-                            if top_type in cand_qids:
-                                cand["features"][feature_name] = freq_counter[top_type]
-                            else:
-                                cand["features"][feature_name] = 0.0
+                        # Find the frequency for each type
+                        cand_type_freqs = []
+                        for qid in cand_qids:
+                            cand_type_freqs.append(freq_counter.get(qid, 0.0))
+
+                        # Sort descending
+                        cand_type_freqs.sort(reverse=True)
+
+                        # Assign typeFreq1..typeFreq5
+                        for i in range(1, 6):
+                            # If the candidate has fewer than i types, default to 0
+                            freq_val = cand_type_freqs[i-1] if (i-1) < len(cand_type_freqs) else 0.0
+                            cand["features"][f"typeFreq{i}"] = freq_val
 
             #--------------------------------------------------------------------------
             # 4) Build final feature matrix & do ML predictions

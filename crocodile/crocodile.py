@@ -1303,8 +1303,7 @@ class Crocodile:
                 dataset_name = table_trace_obj.get("dataset_name")
                 table_name = table_trace_obj.get("table_name")
                 self.apply_ml_ranking(dataset_name, table_name, model)
-            time.sleep(2) 
-
+            
     def run(self):
         #mp.set_start_method("spawn", force=True)
 

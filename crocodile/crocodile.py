@@ -479,7 +479,7 @@ class Crocodile:
                  entity_retrieval_endpoint=None, entity_bow_endpoint=None, entity_retrieval_token=None,
                  selected_features=None, candidate_retrieval_limit=100,
                  model_path=None,
-                 batch_size=1024,
+                 batch_size=10000,
                  ml_ranking_workers=2,
                  top_n_for_type_freq=3,
                  max_bow_batch_size=100):

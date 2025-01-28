@@ -86,9 +86,7 @@ class TraceThread(mp.Process):
 
         # Fetch the first dataset to process (status=PENDING)
         self.dataset_name = self.get_next_dataset()
-        if not self.dataset_name:
-            raise ValueError("No datasets with status 'PENDING' found.")
-
+       
     def get_db(self):
         """Get MongoDB database connection for current process"""
         client = MongoConnectionManager.get_client(self.mongo_uri)
@@ -179,7 +177,7 @@ class TraceThread(mp.Process):
             else:
                 # No more datasets found
                 break
-
+    
     def process_current_dataset(self):
         """
         Monitors and updates BOTH dataset-level and table-level progress until all rows are DONE.
@@ -1261,8 +1259,7 @@ class Crocodile:
         for _ in range(batch_size):
             doc = input_collection.find_one_and_update(
                 {"status": "TODO"},
-                {"$set": {"status": "DOING"}},
-                sort=[("_id", 1)]  # or another suitable ordering
+                {"$set": {"status": "DOING"}}
             )
             if doc is None:
                 # No more TODO docs
@@ -1309,7 +1306,7 @@ class Crocodile:
             time.sleep(2) 
 
     def run(self):
-        mp.set_start_method("spawn", force=True)
+        #mp.set_start_method("spawn", force=True)
 
         db = self.get_db()
         input_collection = db[self.input_collection]
@@ -1320,9 +1317,8 @@ class Crocodile:
         total_rows = self.count_documents(input_collection, {"status": "TODO"})
         if total_rows == 0:
             print("No more tasks to process.")
-            return
-
-        print(f"Found {total_rows} tasks to process.")
+        else:    
+            print(f"Found {total_rows} tasks to process.")
 
         processes = []
         for _ in range(self.max_workers):
@@ -1335,13 +1331,14 @@ class Crocodile:
         #     p.start()
         #     processes.append(p)
         
-        trace_thread = TraceThread(self.mongo_uri, self.db_name, self.input_collection, self.dataset_trace_collection_name, self.table_trace_collection_name, self.timing_collection_name)
+        trace_thread = TraceThread(self.mongo_uri, self.db_name, self.input_collection, self.dataset_trace_collection_name, 
+                                   self.table_trace_collection_name, self.timing_collection_name)
         trace_thread.start()
         processes.append(trace_thread)
 
         for p in processes:
             p.join()
-
+        
         self.__del__()
 
         print("All tasks have been processed.")
@@ -1543,7 +1540,3 @@ class Crocodile:
     def load_ml_model(self):
         from tensorflow.keras.models import load_model
         return load_model(self.model_path)
-
-
-# You can run crocodile_instance.run() as before.
-

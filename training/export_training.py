@@ -54,7 +54,7 @@ for dataset in datasets:
                 temp = {"tableName": table_name, "key": key, "id": candidate["id"], "group": group}
                 #candidate["features"]["NE_match"] = 1 if candidate["features"]["NERtype"] == candidate["features"]["column_NERtype"] else 0
                 for feature in candidate["features"]:
-                    candidate["features"][feature] = float(candidate["features"][feature])
+                    candidate["features"][feature] = round(float(candidate["features"][feature]), 3)
                 sample = {**temp, **candidate["features"], **{"target": target}}
                 buffer.append(sample)
             group += 1

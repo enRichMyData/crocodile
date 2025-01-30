@@ -62,3 +62,23 @@ db.input_data.find().pretty()
 ```bash
 exit
 ```
+
+--------------------------------------------
+## Evnironment Variables
+```bash
+ENTITY_RETRIEVAL_ENDPOINT=# Endpoint for entity retrieval
+ENTITY_BOW_ENDPOINT=# Endpoint for entity bag of words
+ENTITY_RETRIEVAL_TOKEN=# Token for entity retrieval
+
+MONGO_URI=# MongoDB URI
+MONGO_SERVER_PORT=# MongoDB Server Port
+MONGO_VERSION=# MongoDB Version
+
+FASTAPI_APP_NAME=# FastAPI App Name
+FASTAPI_SERVER_PORT=# FastAPI Server Port
+
+JUPYTER_SERVER_PORT=# Jupyter Server Port
+
+DB_NAME=# Database Name
+DEBUG=# Debug Mode
+```

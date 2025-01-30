@@ -1,11 +1,11 @@
 from fastapi import FastAPI
 from config import settings
-from endpoints import crocodile_api
+from endpoints.crocodile_api import router
 
 app = FastAPI(title=settings.FASTAPI_APP_NAME, debug=settings.DEBUG)
 
 # Include the crocodile router
-app.include_router(crocodile_api.router)
+app.include_router(router)
 
 @app.get("/")
 def read_root():

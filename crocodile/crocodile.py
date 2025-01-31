@@ -1210,12 +1210,31 @@ class Crocodile:
         return processed_candidates
 
     def score_candidate(self, candidate):
-        ed_score = candidate['features'].get('ed_score', 0.0)
-        desc_score = candidate['features'].get('desc', 0.0)
-        desc_ngram_score = candidate['features'].get('descNgram', 0.0)
-        feature_sum = ed_score + desc_score + desc_ngram_score
-        total_score = (feature_sum / 3) if feature_sum > 0 else 0.0
-        candidate['score'] = round(total_score, 2)
+        """
+        Equal-weight formula across key features [0..1].
+        Includes 'popularity' as well.
+        Result is simply the mean of all chosen features, each in [0..1].
+        """
+        feat_names = [
+            "ed_score",
+            "jaccard_score",
+            "jaccardNgram_score",
+            "desc",
+            "descNgram",
+            "bow_similarity",
+            "popularity"
+        ]
+        
+        # Collect them, defaulting to 0.0 if missing
+        feats = [candidate["features"].get(fname, 0.0) for fname in feat_names]
+        
+        # Just compute the average
+        if not feats:
+            total_score = 0.0
+        else:
+            total_score = sum(feats) / len(feats)
+        
+        candidate["score"] = round(total_score, 3)
         return candidate
 
     def rank_with_feature_scoring(self, candidates):
@@ -1447,7 +1466,7 @@ class Crocodile:
                         for i in range(1, 6):
                             # If the candidate has fewer than i types, default to 0
                             freq_val = cand_type_freqs[i-1] if (i-1) < len(cand_type_freqs) else 0.0
-                            cand["features"][f"typeFreq{i}"] = freq_val
+                            cand["features"][f"typeFreq{i}"] = round(freq_val, 3)
 
             #--------------------------------------------------------------------------
             # 4) Build final feature matrix & do ML predictions

@@ -1324,13 +1324,10 @@ class Crocodile:
                 self.apply_ml_ranking(dataset_name, table_name, model)
             
     def run(self):
-        #mp.set_start_method("spawn", force=True)
+        #mp.set_start_method("spawn", force=True) # it slows down everything
 
         db = self.get_db()
         input_collection = db[self.input_collection]
-        dataset_trace_collection = db[self.dataset_trace_collection_name]
-        table_trace_collection = db[self.table_trace_collection_name]
-        timing_collection = db[self.timing_collection_name]
 
         total_rows = self.count_documents(input_collection, {"status": "TODO"})
         if total_rows == 0:
@@ -1373,10 +1370,10 @@ class Crocodile:
             "table_name": table_name,
             "ml_ranked": False
         })
-        print(f"Total unprocessed documents: {total_count}")
+        print(f"Total unprocessed documents (for ML ranking): {total_count}")
 
         # We'll restrict type-freq counting to the top N candidates in each row/col
-        top_n_for_type_freq = self.top_n_for_type_freq  # e.g. 3
+        top_n_for_type_freq = self.top_n_for_type_freq  # e.g., 3
 
         while processed_count < total_count:
             batch_docs = list(training_collection.find(
@@ -1421,30 +1418,23 @@ class Crocodile:
 
             #--------------------------------------------------------------------------
             # 2) Convert raw counts to frequencies in [0..1].
-            #    We'll keep frequencies for ALL types, not just the top 5.
             #--------------------------------------------------------------------------
             for col_index, freq_counter in type_freq_by_column.items():
                 row_count = rows_count_by_column[col_index]
                 if row_count == 0:
                     continue
-
                 # Convert each type's raw count => ratio in [0..1]
                 for qid in freq_counter:
                     freq_counter[qid] = freq_counter[qid] / row_count
 
             #--------------------------------------------------------------------------
             # 3) Assign new features (typeFreq1..typeFreq5) for each candidate
-            #    by looking up *all* its types' frequencies, sorting desc, and
-            #    storing the top 5.
             #--------------------------------------------------------------------------
             for doc in batch_docs:
                 candidates_by_column = doc["candidates"]
                 for col_index, candidates in candidates_by_column.items():
-                    # If we never built a freq for this column, skip
-                    if col_index not in type_freq_by_column:
-                        continue
-
-                    freq_counter = type_freq_by_column[col_index]
+                    # If we never built a freq for this column, default to empty
+                    freq_counter = type_freq_by_column.get(col_index, {})
 
                     for cand in candidates:
                         # Ensure we have a features dict
@@ -1452,12 +1442,14 @@ class Crocodile:
                             cand["features"] = {}
 
                         # Gather candidate's type IDs
-                        cand_qids = [t_obj.get("id") for t_obj in cand.get("types", []) if t_obj.get("id")]
+                        cand_qids = [
+                            t_obj.get("id") for t_obj in cand.get("types", []) if t_obj.get("id")
+                        ]
 
                         # Find the frequency for each type
-                        cand_type_freqs = []
-                        for qid in cand_qids:
-                            cand_type_freqs.append(freq_counter.get(qid, 0.0))
+                        cand_type_freqs = [
+                            freq_counter.get(qid, 0.0) for qid in cand_qids
+                        ]
 
                         # Sort descending
                         cand_type_freqs.sort(reverse=True)
@@ -1465,7 +1457,9 @@ class Crocodile:
                         # Assign typeFreq1..typeFreq5
                         for i in range(1, 6):
                             # If the candidate has fewer than i types, default to 0
-                            freq_val = cand_type_freqs[i-1] if (i-1) < len(cand_type_freqs) else 0.0
+                            freq_val = (
+                                cand_type_freqs[i-1] if (i-1) < len(cand_type_freqs) else 0.0
+                            )
                             cand["features"][f"typeFreq{i}"] = round(freq_val, 3)
 
             #--------------------------------------------------------------------------
@@ -1524,7 +1518,7 @@ class Crocodile:
 
             processed_count += len(batch_docs)
             progress = min((processed_count / total_count) * 100, 100.0)
-            print(f"ML ranking progress: {progress:.2f}% completed")
+            print(f"ML ranking progress for {dataset_name}.{table_name}: {progress:.2f}% completed")
 
             # Update progress in table_trace
             table_trace_collection.update_one(

@@ -1,19 +1,5 @@
 # Setup Guide
 
-## Setup Environment
-- Make sure you have `docker` installed
-- Make a .env file in the root directory
-- Add the following variables to the .env file
-```
-ENTITY_RETRIEVAL_ENDPOINT=SOME_URL
-ENTITY_BOW_ENDPOINT=SOME_URL
-ENTITY_RETRIEVAL_TOKEN=SOME_TOKEN
-MONGO_URI=mongodb://mongodb:27017
-MONGO_SERVER_PORT=27017
-JUPYTER_SERVER_PORT=8888
-MONGO_VERSION=7.0
-```
-
 ## Start Docker Container
 - First start Docker Desktop App
 ```bash

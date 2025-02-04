@@ -1,3 +1,3 @@
 # crocodile/__init__.py
 
-from .crocodile import Crocodile
+from .crocodile import Crocodile as Crocodile

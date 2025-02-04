@@ -1,8 +1,9 @@
 # Import necessary modules
-from pymongo import MongoClient
-import pandas as pd
-from tqdm import tqdm
 import os
+
+import pandas as pd
+from pymongo import MongoClient
+from tqdm import tqdm
 
 # MongoDB connection
 client = MongoClient("mongodb://mongodb:27017/")
@@ -19,7 +20,7 @@ buffer_size = 1000  # Define the buffer size for writing data incrementally
 for dataset in datasets:
     # Set the output file path for the current dataset
     output_file = os.path.join(output_dir, f"{dataset}_training_samples.csv")
-    
+
     # Clear the output file if it already exists to start fresh
     if os.path.exists(output_file):
         os.remove(output_file)
@@ -27,13 +28,13 @@ for dataset in datasets:
     documents = collection.find({"dataset_name": dataset})
     total_docs = collection.count_documents({"dataset_name": dataset})
     cea_gt = pd.read_csv(f"./Datasets/{dataset}/gt/cea.csv", header=None)
-    
+
     # Create a dictionary to map (tableName, idRow, idCol) to QID
     qid_dict = {
-        (row[0], row[1], row[2]): row[3].split('/')[-1]  # Extract only the QID part from the URL
+        (row[0], row[1], row[2]): row[3].split("/")[-1]  # Extract only the QID part from the URL
         for _, row in cea_gt.iterrows()
     }
-    
+
     buffer = []  # Initialize buffer for storing training samples
 
     # Process documents and fill the buffer
@@ -42,7 +43,7 @@ for dataset in datasets:
         table_name = doc["table_name"]
         id_row = doc["row_id"]
         candidates = doc["candidates"]
-        
+
         for id_col in candidates:
             # Get the QID from the dictionary
             qid = qid_dict.get((table_name, id_row + 1, int(id_col)))
@@ -52,22 +53,23 @@ for dataset in datasets:
                 target = 1 if candidate["id"] == qid else 0
                 key = f"{table_name} {id_row} {id_col}"
                 temp = {"tableName": table_name, "key": key, "id": candidate["id"], "group": group}
-                #candidate["features"]["NE_match"] = 1 if candidate["features"]["NERtype"] == candidate["features"]["column_NERtype"] else 0
                 for feature in candidate["features"]:
-                    candidate["features"][feature] = round(float(candidate["features"][feature]), 3)
+                    candidate["features"][feature] = round(
+                        float(candidate["features"][feature]), 3
+                    )
                 sample = {**temp, **candidate["features"], **{"target": target}}
                 buffer.append(sample)
             group += 1
-        
+
         # Write the buffer to the CSV file if it reaches the defined size
         if len(buffer) >= buffer_size:
             df = pd.DataFrame(buffer)
-            df.to_csv(output_file, mode='a', header=not os.path.exists(output_file), index=False)
+            df.to_csv(output_file, mode="a", header=not os.path.exists(output_file), index=False)
             buffer.clear()  # Clear the buffer after writing
-    
+
     # Write any remaining data in the buffer to the file
     if buffer:
         df = pd.DataFrame(buffer)
-        df.to_csv(output_file, mode='a', header=not os.path.exists(output_file), index=False)
+        df.to_csv(output_file, mode="a", header=not os.path.exists(output_file), index=False)
 
     print(f"Training samples for {dataset} have been written to {output_file}")

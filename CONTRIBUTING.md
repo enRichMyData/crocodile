@@ -24,7 +24,7 @@ Enhancement suggestions are also welcome! To suggest an enhancement:
   - The problem it would solve.
   - Why you think it would be beneficial for others.
   - Any alternative solutions or features you've considered.
-  
+
 ### 3. Contributing Code
 
 We appreciate contributions to the codebase. Before you start coding:
@@ -32,7 +32,7 @@ We appreciate contributions to the codebase. Before you start coding:
 - **Check existing issues** to see if someone else is already working on your idea or problem.
 - If you plan to work on a big feature, consider opening an issue first to discuss it.
 - **Fork the repository** and create your branch:
-  
+
   ```bash
   git checkout -b feature-name
   ```
@@ -44,18 +44,18 @@ We appreciate contributions to the codebase. Before you start coding:
 - **Write tests** for your changes.
 - **Document your changes**. If your code includes new features or changes existing functionality, update the documentation accordingly.
 - **Run tests** to ensure your code works as expected:
-  
+
   ```bash
   pytest
   ```
 
 - **Submit a pull request**:
   - Push your branch to your forked repository:
-    
+
     ```bash
     git push origin feature-name
     ```
-  
+
   - Open a [pull request](https://github.com/your-repo/crocodile/pulls) and describe your changes.
   - Ensure that your pull request passes all CI checks.
 

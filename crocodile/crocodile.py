@@ -3,18 +3,19 @@ import asyncio
 import aiohttp
 from pymongo import MongoClient
 import multiprocessing as mp
-from threading import Thread
 import traceback
 from datetime import datetime
 from urllib.parse import quote
 import nltk
 import warnings
 import absl.logging
-import tensorflow as tf
 import pandas as pd
 import hashlib
 from collections import defaultdict, Counter
 import numpy as np
+from typing import Dict
+from threading import Lock
+import os
 
 MY_TIMEOUT = aiohttp.ClientTimeout(
     total=30,        # Total time for the request
@@ -29,7 +30,7 @@ warnings.filterwarnings("ignore", category=UserWarning, message="Compiled the lo
 warnings.filterwarnings("ignore", category=UserWarning, message="Error in loading the saved optimizer state.*")
 
 # Set logging levels
-tf.get_logger().setLevel('ERROR')
+#tf.get_logger().setLevel('ERROR')
 absl.logging.set_verbosity(absl.logging.ERROR)
 
 # NLTK setup
@@ -56,240 +57,412 @@ class MongoCache:
         self.collection.update_one({'key': key}, {'$set': {'value': value}}, upsert=True)
 
 
-class TraceThread(Thread):
-    def __init__(self, input_collection, dataset_trace_collection, table_trace_collection):
-        super().__init__()
-        self.input_collection = input_collection
-        self.dataset_trace_collection = dataset_trace_collection
-        self.table_trace_collection = table_trace_collection
+import time
+from datetime import datetime
+
+
+class TraceThread(mp.Process):
+    def __init__(self, mongo_uri, db_name, input_collection_name, dataset_trace_collection_name, table_trace_collection_name, timing_collection_name):
+        """
+        Thread responsible for tracking dataset/table progress:
+          1) Marks the first PENDING dataset as IN_PROGRESS.
+          2) Continuously checks row counts (TODO, DOING, DONE).
+          3) Updates both dataset_trace_collection and table_trace_collection with progress.
+          4) Marks dataset/table as DONE/COMPLETED when no more TODO or DOING rows remain.
         
-        # Find a dataset with a TODO or DOING row and mark it as IN_PROGRESS
+        :param input_collection: MongoDB collection that stores individual rows
+                                 with fields like: { "dataset_name", "table_name", "status" }
+        :param dataset_trace_collection: MongoDB collection storing dataset-level info
+        :param table_trace_collection: MongoDB collection storing table-level info
+        :param timing_collection: MongoDB collection for logging operation timings
+        """
+        super().__init__()
+        self.mongo_uri = mongo_uri
+        self.db_name = db_name
+        self.input_collection_name = input_collection_name
+        self.dataset_trace_collection_name = dataset_trace_collection_name
+        self.table_trace_collection_name = table_trace_collection_name
+        self.timing_collection_name = timing_collection_name
+
+        # Fetch the first dataset to process (status=PENDING)
         self.dataset_name = self.get_next_dataset()
-        if not self.dataset_name:
-            raise ValueError("No datasets with status 'TODO' or 'DOING' found.")
+       
+    def get_db(self):
+        """Get MongoDB database connection for current process"""
+        client = MongoConnectionManager.get_client(self.mongo_uri)
+        return client[self.db_name]
+
+    def time_mongo_operation(self, operation_name, query_function, *args, **kwargs):
+        """
+        Wraps a MongoDB operation with timing-logging functionality.
+        Logs the start/end times and duration to timing_collection.
+        """
+        start_time = time.time()
+        db = self.get_db()
+        timing_collection = db[self.timing_collection_name]
+
+        try:
+            result = query_function(*args, **kwargs)
+        except Exception as e:
+            end_time = time.time()
+            timing_collection.insert_one({
+                "operation_name": operation_name,
+                "start_time": datetime.fromtimestamp(start_time),
+                "end_time": datetime.fromtimestamp(end_time),
+                "duration_seconds": round(end_time - start_time, 4),
+                "args": str(args),
+                "kwargs": str(kwargs),
+                "error": str(e),
+                "status": "FAILED",
+            })
+            raise
+     
+        end_time = time.time()
+        timing_collection.insert_one({
+            "operation_name": operation_name,
+            "start_time": datetime.fromtimestamp(start_time),
+            "end_time": datetime.fromtimestamp(end_time),
+            "duration_seconds": round(end_time - start_time, 4),
+            "args": str(args),
+            "kwargs": str(kwargs),
+            "status": "SUCCESS",
+        })
+        return result
 
     def get_next_dataset(self):
-        """Fetches the next dataset that has at least one 'TODO' or 'DOING' row and marks it as IN_PROGRESS."""
-        doc_dataset = self.dataset_trace_collection.find_one({"status": "PENDING"})
+        """
+        Fetches the next dataset with status=PENDING and marks it as IN_PROGRESS.
+        Returns the dataset_name or None if no dataset is found.
+        """
+        db = self.get_db()
+        dataset_trace_collection = db[self.dataset_trace_collection_name]
+        doc_dataset = self.time_mongo_operation(
+            "find_next_dataset",
+            dataset_trace_collection.find_one,
+            {"status": "PENDING"}
+        )
         if not doc_dataset:
             return None
-        
-        dataset_name = doc_dataset.get("dataset_name", None)
+
+        dataset_name = doc_dataset.get("dataset_name")
         if not dataset_name:
             return None
-        
-        # Set the dataset trace to IN_PROGRESS if currently missing or PENDING
-        self.dataset_trace_collection.find_one_and_update(
-            {"dataset_name": dataset_name}, 
-            {"$set": {
-                "status": "IN_PROGRESS",
-                "start_time": datetime.now()
-            }},
-            upsert=True
+
+        # Mark the dataset as IN_PROGRESS and set start_time
+        self.time_mongo_operation(
+            "update_dataset_status_to_in_progress",
+            dataset_trace_collection.update_one,
+            {"dataset_name": dataset_name},
+            {
+                "$set": {
+                    "status": "IN_PROGRESS",
+                    "start_time": datetime.now()
+                }
+            }
         )
-        
         return dataset_name
 
     def run(self):
-        while True:
-            if not self.dataset_name:
-                # No more datasets to process
-                break
-            
-            # Process the current dataset until it's done
+        """
+        Main loop of the thread: processes the current dataset, then fetches the next one.
+        """
+        while self.dataset_name:
+            # Process the current dataset until it's DONE
             self.process_current_dataset()
-            
-            # Once the current dataset is DONE, try to fetch the next one
+
+            # Attempt to fetch the next dataset
             next_dataset = self.get_next_dataset()
             if next_dataset:
                 self.dataset_name = next_dataset
             else:
-                # No further datasets
+                # No more datasets found
                 break
-
+    
     def process_current_dataset(self):
-        """Monitors the current dataset progress until DONE."""
+        """
+        Monitors and updates BOTH dataset-level and table-level progress until all rows are DONE.
+        Once no more TODO/DOING rows remain, marks the dataset as DONE.
+        """
+        db = self.get_db()
+        input_collection = db[self.input_collection_name]
+        dataset_trace_collection = db[self.dataset_trace_collection_name]
+        table_trace_collection = db[self.table_trace_collection_name]
         while True:
-            # Aggregate counts across all rows of this dataset
-            counts_pipeline = [
+            # -----------------------------------------------------------
+            # 1) DATASET-LEVEL AGGREGATION
+            # -----------------------------------------------------------
+            dataset_counts_pipeline = [
                 {"$match": {"dataset_name": self.dataset_name}},
-                {"$group": {
-                    "_id": "$status",
-                    "count": {"$sum": 1}
-                }}
+                {"$group": {"_id": "$status", "count": {"$sum": 1}}}
             ]
-            counts = self.input_collection.aggregate(counts_pipeline)
-            counts_dict = {doc["_id"]: doc["count"] for doc in counts}
+            
+            dataset_counts = self.time_mongo_operation(
+                "aggregate_dataset_counts",
+                input_collection.aggregate,
+                dataset_counts_pipeline
+            )
+            dataset_counts_dict = {doc["_id"]: doc["count"] for doc in dataset_counts}
+            total_todo_dataset = dataset_counts_dict.get("TODO", 0)
+            total_doing_dataset = dataset_counts_dict.get("DOING", 0)
+            total_done_dataset = dataset_counts_dict.get("DONE", 0)
 
-            total_rows_todo = counts_dict.get("TODO", 0)
-            total_rows_doing = counts_dict.get("DOING", 0)
-            total_rows_processed = counts_dict.get("DONE", 0)
-
-            # Retrieve the dataset trace
-            dataset_trace = self.dataset_trace_collection.find_one({"dataset_name": self.dataset_name})
+            # Fetch dataset trace
+            dataset_trace = self.time_mongo_operation(
+                "find_dataset_trace",
+                dataset_trace_collection.find_one,
+                {"dataset_name": self.dataset_name}
+            )
             if not dataset_trace:
-                # If dataset trace is missing, just break out to avoid infinite loop
+                # Dataset record no longer exists; break out
                 break
+            
 
-            # Get dataset-level info
-            total_dataset_rows = dataset_trace.get("total_rows", None)
-            if total_dataset_rows is None:
-                # If total_rows is not stored, compute it once.
-                # This could be expensive if done repeatedly, so ideally it's stored upfront.
-                total_dataset_rows = self.input_collection.count_documents({"dataset_name": self.dataset_name})
-                self.dataset_trace_collection.update_one(
+            # If total_rows is not set, count them once and store
+            total_rows_dataset = dataset_trace.get("total_rows", None)
+            if total_rows_dataset is None:
+                total_rows_dataset = self.time_mongo_operation(
+                    "count_total_rows_dataset",
+                    input_collection.count_documents,
+                    {"dataset_name": self.dataset_name}
+                )
+                self.time_mongo_operation(
+                    "update_total_rows_dataset",
+                    dataset_trace_collection.update_one,
                     {"dataset_name": self.dataset_name},
-                    {"$set": {"total_rows": total_dataset_rows}}
+                    {"$set": {"total_rows": total_rows_dataset}}
                 )
 
-            start_time = dataset_trace.get("start_time", datetime.now())
-            time_passed = (datetime.now() - start_time).total_seconds()
-
-            # Calculate progress metrics for the dataset
-            processed_rows = total_rows_processed
-            percentage_complete = 0
-            rows_per_second = 0
-            estimated_seconds = 0
-            estimated_hours = 0
-            estimated_days = 0
-
-            if processed_rows > 0:
-                rows_per_second = round(processed_rows / time_passed, 2)
-                if total_dataset_rows > 0:
-                    percentage_complete = round((processed_rows / total_dataset_rows) * 100, 2)
-                
-                remaining_rows = total_dataset_rows - processed_rows
-                if remaining_rows > 0:
-                    avg_time_per_row = time_passed / processed_rows
-                    estimated_seconds = round(avg_time_per_row * remaining_rows, 2)
-                    estimated_hours = round(estimated_seconds / 3600, 2)
-                    estimated_days = round(estimated_hours / 24, 2)
-
-            # Update dataset trace with current progress
-            self.dataset_trace_collection.update_one(
-                {"dataset_name": self.dataset_name},
-                {"$set": {
-                    "processed_rows": processed_rows,
-                    "rows_per_second": rows_per_second,
-                    "estimated_seconds": estimated_seconds,
-                    "estimated_hours": estimated_hours,
-                    "estimated_days": estimated_days,
-                    "percentage_complete": percentage_complete,
-                    "time_passed_seconds": round(time_passed, 2)
-                }},
-                upsert=True
+            # Compute dataset-level progress stats
+            dataset_start_time = dataset_trace.get("start_time", datetime.now())
+            dataset_time_passed = (datetime.now() - dataset_start_time).total_seconds()
+            dataset_processed_rows = total_done_dataset
+            dataset_rows_per_second = (
+                dataset_processed_rows / dataset_time_passed if dataset_time_passed > 0 else 0.0
+            )
+            dataset_completion_percentage = (
+                (dataset_processed_rows / total_rows_dataset) * 100 if total_rows_dataset > 0 else 0.0
             )
 
-            # Check the status of each table in this dataset
-            # Only get those that are not COMPLETED
-            tables = self.table_trace_collection.find({
-                "dataset_name": self.dataset_name,
-                "status": {"$ne": "COMPLETED"}
-            })
-            for table_doc in tables:
-                table_name = table_doc.get("table_name", None)
-                if not table_name:
-                    continue
+            # Update dataset trace with current progress
+            self.time_mongo_operation(
+                "update_dataset_trace_progress",
+                dataset_trace_collection.update_one,
+                {"dataset_name": self.dataset_name},
+                {
+                    "$set": {
+                        "status_counts": {
+                            "TODO": total_todo_dataset,
+                            "DOING": total_doing_dataset,
+                            "DONE": total_done_dataset
+                        },
+                        "processed_rows": dataset_processed_rows,
+                        "time_passed_seconds": round(dataset_time_passed, 2),
+                        "rows_per_second": round(dataset_rows_per_second, 2),
+                        "completion_percentage": round(dataset_completion_percentage, 2)
+                    }
+                }
+            )
 
-                # Get counts for the table
-                table_todo_doing_count = self.input_collection.count_documents({
+            # -----------------------------------------------------------
+            # 2) TABLE-LEVEL: Only process tables not yet COMPLETED
+            # -----------------------------------------------------------
+            # First fetch all table_traces in the current dataset that are not "COMPLETED"
+            non_completed_tables = self.time_mongo_operation(
+                "find_non_completed_tables",
+                table_trace_collection.find,
+                {
                     "dataset_name": self.dataset_name,
-                    "table_name": table_name,
-                    "status": {"$in": ["TODO", "DOING"]}
-                })
+                    "status": {"$ne": "COMPLETED"}
+                }
+            )
 
-                table_done_count = self.input_collection.count_documents({
-                    "dataset_name": self.dataset_name,
-                    "table_name": table_name,
-                    "status": "DONE"
-                })
-                table_total_count = self.input_collection.count_documents({
-                    "dataset_name": self.dataset_name,
-                    "table_name": table_name
-                })
+            # For each table that's not COMPLETED, get row counts by status
+            for table_doc in non_completed_tables:
+                table_name = table_doc["table_name"]
+                tbl_status = table_doc.get("status", "PENDING")
+                tbl_start_time = table_doc.get("start_time")
 
-                current_table_status = table_doc.get("status", "PENDING")
-                table_start_time = table_doc.get("start_time", None)
-
-                # If the table is PENDING and has any TODO/DOING rows, move it to IN_PROGRESS
-                # and record the start_time if not already set.
-                if current_table_status == "PENDING" and table_todo_doing_count > 0:
-                    table_start_time = datetime.now()
-                    self.table_trace_collection.update_one(
-                        {"dataset_name": self.dataset_name, "table_name": table_name},
-                        {"$set": {
-                            "status": "IN_PROGRESS",
-                            "start_time": table_start_time
-                        }}
-                    )
-                    current_table_status = "IN_PROGRESS"
-
-                # Compute table-level progress metrics if we have a start_time and total_count
-                if table_total_count > 0 and table_start_time is not None:
-                    # Time passed for this table
-                    table_time_passed = (datetime.now() - table_start_time).total_seconds()
-
-                    processed_rows_table = table_done_count
-                    rows_per_second_table = 0
-                    estimated_seconds_table = 0
-                    estimated_hours_table = 0
-                    estimated_days_table = 0
-                    percentage_complete_table = 0
-
-                    if processed_rows_table > 0:
-                        rows_per_second_table = round(processed_rows_table / table_time_passed, 2)
-                        percentage_complete_table = round((processed_rows_table / table_total_count) * 100, 2)
-
-                        remaining_rows_table = table_total_count - processed_rows_table
-                        if remaining_rows_table > 0:
-                            avg_time_per_row_table = table_time_passed / processed_rows_table
-                            estimated_seconds_table = round(avg_time_per_row_table * remaining_rows_table, 2)
-                            estimated_hours_table = round(estimated_seconds_table / 3600, 2)
-                            estimated_days_table = round(estimated_hours_table / 24, 2)
-                    
-                    # Update the table trace with the computed metrics
-                    self.table_trace_collection.update_one(
-                        {"dataset_name": self.dataset_name, "table_name": table_name},
-                        {"$set": {
-                            "processed_rows": processed_rows_table,
-                            "rows_per_second": rows_per_second_table,
-                            "estimated_seconds": estimated_seconds_table,
-                            "estimated_hours": estimated_hours_table,
-                            "estimated_days": estimated_days_table,
-                            "percentage_complete": percentage_complete_table
-                        }}
-                    )
-
-                # If the table is fully processed (all DONE)
-                if table_total_count > 0 and table_done_count == table_total_count:
-                    # If not already COMPLETED, set it now
-                    if current_table_status != "COMPLETED":
-                        self.dataset_trace_collection.update_one(
-                            {"dataset_name": self.dataset_name},
-                            {"$inc": {"processed_tables": 1}}
-                        )
-
-                        self.table_trace_collection.update_one(
-                            {"dataset_name": self.dataset_name, "table_name": table_name},
-                            {"$set": {
-                                "status": "COMPLETED",
-                                "completed_time": datetime.now()
-                            }}
-                        )
-
-            # If no TODO or DOING rows remain in the dataset, it's fully processed
-            if total_rows_todo + total_rows_doing == 0:
-                # Set dataset to DONE
-                self.dataset_trace_collection.update_one(
-                    {"dataset_name": self.dataset_name},
-                    {"$set": {"status": "DONE", "end_time": datetime.now()}}
+                # Aggregate row counts just for this table
+                table_counts_pipeline = [
+                    {
+                        "$match": {
+                            "dataset_name": self.dataset_name,
+                            "table_name": table_name
+                        }
+                    },
+                    {
+                        "$group": {
+                            "_id": "$status",
+                            "count": {"$sum": 1}
+                        }
+                    }
+                ]
+                result = self.time_mongo_operation(
+                    "aggregate_table_counts",
+                    input_collection.aggregate,
+                    table_counts_pipeline
                 )
-                # Dataset is completed, break out to select next dataset if available
+
+                # Convert to dict
+                counts_dict = {doc["_id"]: doc["count"] for doc in result}
+                total_todo = counts_dict.get("TODO", 0)
+                total_doing = counts_dict.get("DOING", 0)
+                total_done = counts_dict.get("DONE", 0)
+
+                # If 'total_rows' not set in the table trace, fetch and store it
+                table_total_rows = table_doc.get("total_rows")
+                if table_total_rows is None:
+                    table_total_rows = total_todo + total_doing + total_done
+                    # Alternatively, you could do a count_documents if you want absolute accuracy
+                    # table_total_rows = self.time_mongo_operation(
+                    #     "count_rows_for_table",
+                    #     self.input_collection.count_documents,
+                    #     {"dataset_name": self.dataset_name, "table_name": table_name}
+                    # )
+                    self.time_mongo_operation(
+                        "update_table_total_rows",
+                        table_trace_collection.update_one,
+                        {
+                            "dataset_name": self.dataset_name,
+                            "table_name": table_name
+                        },
+                        {"$set": {"total_rows": table_total_rows}}
+                    )
+                else:
+                    # Use the doc's existing total_rows
+                    pass
+
+                # If table is PENDING but we have DOING or DONE, mark it IN_PROGRESS
+                if tbl_status == "PENDING" and (total_doing > 0 or total_done > 0):
+                    tbl_status = "IN_PROGRESS"
+                    tbl_start_time = datetime.now()
+                    self.time_mongo_operation(
+                        "update_table_status_in_progress",
+                        table_trace_collection.update_one,
+                        {
+                            "dataset_name": self.dataset_name,
+                            "table_name": table_name
+                        },
+                        {
+                            "$set": {
+                                "status": "IN_PROGRESS",
+                                "start_time": tbl_start_time
+                            }
+                        }
+                    )
+
+                # Calculate table-based stats
+                if tbl_start_time:
+                    table_time_passed = (datetime.now() - tbl_start_time).total_seconds()
+                else:
+                    table_time_passed = 0.0
+
+                processed_rows = total_done
+                rows_per_second = processed_rows / table_time_passed if table_time_passed > 0 else 0.0
+                completion_percentage = (
+                    (processed_rows / table_total_rows) * 100
+                    if table_total_rows and table_total_rows > 0 else 0.0
+                )
+
+                # Update table trace
+                self.time_mongo_operation(
+                    "update_table_trace_progress",
+                    table_trace_collection.update_one,
+                    {
+                        "dataset_name": self.dataset_name,
+                        "table_name": table_name
+                    },
+                    {
+                        "$set": {
+                            "status_counts": {
+                                "TODO": total_todo,
+                                "DOING": total_doing,
+                                "DONE": total_done
+                            },
+                            "processed_rows": processed_rows,
+                            "time_passed_seconds": round(table_time_passed, 2),
+                            "rows_per_second": round(rows_per_second, 2),
+                            "completion_percentage": round(completion_percentage, 2)
+                        }
+                    }
+                )
+
+                # If this table has no TODO/DOING, it's completed
+                if total_todo + total_doing == 0:
+                    self.time_mongo_operation(
+                        "update_table_status_completed",
+                        table_trace_collection.update_one,
+                        {
+                            "dataset_name": self.dataset_name,
+                            "table_name": table_name
+                        },
+                        {
+                            "$set": {
+                                "status": "COMPLETED",
+                                "end_time": datetime.now()
+                            }
+                        }
+                    )
+
+            # -----------------------------------------------------------
+            # 3) CHECK IF DATASET IS FULLY DONE
+            # -----------------------------------------------------------
+            if total_todo_dataset + total_doing_dataset == 0:
+                # Mark dataset as DONE
+                self.time_mongo_operation(
+                    "update_dataset_status_done",
+                    dataset_trace_collection.update_one,
+                    {"dataset_name": self.dataset_name},
+                    {
+                        "$set": {
+                            "status": "DONE",
+                            "end_time": datetime.now()
+                        }
+                    }
+                )
                 break
 
-            # Sleep to avoid excessive resource usage
-            time.sleep(1)
     
+class MongoConnectionManager:
+    _instances: Dict[int, MongoClient] = {}
+    _lock = Lock()
+    
+    @classmethod
+    def get_client(cls, mongo_uri):
+        pid = os.getpid()
+        
+        with cls._lock:
+            if pid not in cls._instances:
+                client = MongoClient(
+                    mongo_uri,
+                    maxPoolSize=100,
+                    minPoolSize=8,
+                    waitQueueTimeoutMS=30000,
+                    retryWrites=True,
+                    serverSelectionTimeoutMS=30000,
+                    connectTimeoutMS=30000,
+                    socketTimeoutMS=30000
+                )
+                cls._instances[pid] = client
+            
+            return cls._instances[pid]
+
+    @classmethod
+    def close_connection(cls, pid=None):
+        if pid is None:
+            pid = os.getpid()
+            
+        with cls._lock:
+            if pid in cls._instances:
+                cls._instances[pid].close()
+                del cls._instances[pid]
+    
+    @classmethod
+    def close_all_connections(cls):
+        with cls._lock:
+            for client in cls._instances.values():
+                client.close()
+            cls._instances.clear()
 
 class Crocodile:
     def __init__(self, mongo_uri="mongodb://localhost:27017/",
@@ -306,7 +479,7 @@ class Crocodile:
                  entity_retrieval_endpoint=None, entity_bow_endpoint=None, entity_retrieval_token=None,
                  selected_features=None, candidate_retrieval_limit=100,
                  model_path=None,
-                 batch_size=1024,
+                 batch_size=10000,
                  ml_ranking_workers=2,
                  top_n_for_type_freq=3,
                  max_bow_batch_size=100):
@@ -334,8 +507,6 @@ class Crocodile:
             "typeFreq1", "typeFreq2", "typeFreq3", "typeFreq4", "typeFreq5"
         ]
         self.model_path = model_path
-        self.current_dataset = None
-        self.current_table = None
         self.entity_bow_endpoint = entity_bow_endpoint
         self.batch_size = batch_size
         self.ml_ranking_workers = ml_ranking_workers
@@ -343,12 +514,16 @@ class Crocodile:
         self.MAX_BOW_BATCH_SIZE = max_bow_batch_size
 
     def get_db(self):
-        client = MongoClient(self.mongo_uri, 
-                             maxPoolSize=4, 
-                             socketTimeoutMS=30000,   # tune timeouts if desired
-                             connectTimeoutMS=30000,
-                             serverSelectionTimeoutMS=30000)
+        """Get MongoDB database connection for current process"""
+        client = MongoConnectionManager.get_client(self.mongo_uri)
         return client[self.db_name]
+
+    def __del__(self):
+        """Cleanup when instance is destroyed"""
+        try:
+            MongoConnectionManager.close_connection()
+        except:
+            pass
 
     def get_candidate_cache(self):
         db = self.get_db()
@@ -357,10 +532,6 @@ class Crocodile:
     def get_bow_cache(self):
         db = self.get_db()
         return MongoCache(db, self.bow_cache_collection_name)
-
-    def set_context(self, dataset_name, table_name):
-        self.current_dataset = dataset_name
-        self.current_table = table_name
 
     def time_mongo_operation(self, operation_name, query_function, *args, **kwargs):
         start_time = time.time()
@@ -457,8 +628,6 @@ class Crocodile:
         db = self.get_db()
         log_collection = db[self.error_log_collection_name]
         log_entry = {
-            "dataset_name": self.current_dataset,
-            "table_name": self.current_table,
             "timestamp": datetime.now(),
             "level": level,
             "message": message,
@@ -489,6 +658,20 @@ class Crocodile:
                     candidates = await response.json()
                     row_tokens = set(self.tokenize_text(row_text))
                     fetched_candidates = self._process_candidates(candidates, entity_name, row_tokens)
+
+                    # Ensure all QIDs are included by adding placeholders for missing ones
+                    required_qids = qid.split() if qid else []
+                    existing_qids = {c['id'] for c in fetched_candidates if c.get('id')}
+                    missing_qids = set(required_qids) - existing_qids
+
+                    for missing_qid in missing_qids:
+                        fetched_candidates.append({
+                            'id': missing_qid,  # Placeholder for missing QID
+                            'name': None,
+                            'description': None,
+                            'features': None, # Explicitly set features to None
+                            'is_placeholder': True  # Explicitly mark as placeholder
+                        })
 
                     # Merge with existing cache if present
                     cache = self.get_candidate_cache()
@@ -564,7 +747,7 @@ class Crocodile:
         
         # If nothing to fetch, return what we have
         if not to_fetch:
-            return results
+            return self._remove_placeholders(results)
 
         # Fetch missing data
         async with aiohttp.ClientSession(timeout=MY_TIMEOUT, connector=aiohttp.TCPConnector(ssl=False, limit=10)) as session:
@@ -575,6 +758,14 @@ class Crocodile:
             for entity_name, candidates in done:
                 results[entity_name] = candidates
 
+        return self._remove_placeholders(results)
+
+    def _remove_placeholders(self, results):
+        """Removes placeholder candidates from the results based on `is_placeholder` attribute."""
+        for entity_name, candidates in results.items():
+            results[entity_name] = [
+                c for c in candidates if not c.get('is_placeholder', False)
+            ]
         return results
     
     def fetch_candidates_batch(self, entities, row_texts, fuzzies, qids):
@@ -925,12 +1116,12 @@ class Crocodile:
                 # -------------------------------------------------------------
                 # 5. Save to DB: training candidates + final EL results
                 # -------------------------------------------------------------
-                # self.save_candidates_for_training(
-                #     training_candidates_by_ne_column,
-                #     dataset_name,
-                #     table_name,
-                #     row_index
-                # )
+                self.save_candidates_for_training(
+                    training_candidates_by_ne_column,
+                    dataset_name,
+                    table_name,
+                    row_index
+                )
                 db[self.input_collection].update_one(
                     {'_id': doc_id},
                     {'$set': {'el_results': linked_entities, 'status': 'DONE'}}
@@ -1019,12 +1210,31 @@ class Crocodile:
         return processed_candidates
 
     def score_candidate(self, candidate):
-        ed_score = candidate['features'].get('ed_score', 0.0)
-        desc_score = candidate['features'].get('desc', 0.0)
-        desc_ngram_score = candidate['features'].get('descNgram', 0.0)
-        feature_sum = ed_score + desc_score + desc_ngram_score
-        total_score = (feature_sum / 3) if feature_sum > 0 else 0.0
-        candidate['score'] = round(total_score, 2)
+        """
+        Equal-weight formula across key features [0..1].
+        Includes 'popularity' as well.
+        Result is simply the mean of all chosen features, each in [0..1].
+        """
+        feat_names = [
+            "ed_score",
+            "jaccard_score",
+            "jaccardNgram_score",
+            "desc",
+            "descNgram",
+            "bow_similarity",
+            "popularity"
+        ]
+        
+        # Collect them, defaulting to 0.0 if missing
+        feats = [candidate["features"].get(fname, 0.0) for fname in feat_names]
+        
+        # Just compute the average
+        if not feats:
+            total_score = 0.0
+        else:
+            total_score = sum(feats) / len(feats)
+        
+        candidate["score"] = round(total_score, 3)
         return candidate
 
     def rank_with_feature_scoring(self, candidates):
@@ -1060,40 +1270,43 @@ class Crocodile:
         )
 
     def claim_todo_batch(self, input_collection, batch_size=10):
-        claimed_docs = []
+        """
+        Atomically claims a batch of TODO documents by setting them to DOING,
+        and returns the full documents so we don't have to fetch them again.
+        """
+        docs = []
         for _ in range(batch_size):
             doc = input_collection.find_one_and_update(
-                {"status": "TODO"}, 
-                {"$set": {"status": "DOING"}},
-                projection={"_id": 1, "dataset_name": 1, "table_name": 1},
-                sort=[("_id", 1)]  # or another suitable ordering
+                {"status": "TODO"},
+                {"$set": {"status": "DOING"}}
             )
             if doc is None:
                 # No more TODO docs
                 break
-            claimed_docs.append(doc)
-        return claimed_docs
+            docs.append(doc)
+        return docs
 
     def worker(self):
         db = self.get_db()
         input_collection = db[self.input_collection]
-        #table_trace_collection = db[self.table_trace_collection_name]
+
         while True:
-            # Atomically claim a batch of documents
+            # Atomically claim a batch of documents (full docs, not partial)
             todo_docs = self.claim_todo_batch(input_collection)
             if not todo_docs:
                 print("No more tasks to process.")
                 break
 
+            # Group the claimed documents by (dataset_name, table_name)
             tasks_by_table = {}
             for doc in todo_docs:
                 dataset_name = doc["dataset_name"]
                 table_name = doc["table_name"]
-                tasks_by_table.setdefault((dataset_name, table_name), []).append(doc["_id"])
+                # Accumulate full docs in a list
+                tasks_by_table.setdefault((dataset_name, table_name), []).append(doc)
 
-            for (dataset_name, table_name), doc_ids in tasks_by_table.items():
-                self.set_context(dataset_name, table_name)
-                docs = self.find_documents(input_collection, {"_id": {"$in": doc_ids}})
+            # Process each group as a batch
+            for (dataset_name, table_name), docs in tasks_by_table.items():
                 self.process_rows_batch(docs, dataset_name, table_name)
 
     def ml_ranking_worker(self):
@@ -1109,22 +1322,18 @@ class Crocodile:
                 dataset_name = table_trace_obj.get("dataset_name")
                 table_name = table_trace_obj.get("table_name")
                 self.apply_ml_ranking(dataset_name, table_name, model)
-            time.sleep(2) 
-
+            
     def run(self):
-        mp.set_start_method("spawn", force=True)
+        #mp.set_start_method("spawn", force=True) # it slows down everything
 
         db = self.get_db()
         input_collection = db[self.input_collection]
-        dataset_trace_collection = db[self.dataset_trace_collection_name]
-        table_trace_collection = db[self.table_trace_collection_name]
 
         total_rows = self.count_documents(input_collection, {"status": "TODO"})
         if total_rows == 0:
             print("No more tasks to process.")
-            return
-
-        print(f"Found {total_rows} tasks to process.")
+        else:    
+            print(f"Found {total_rows} tasks to process.")
 
         processes = []
         for _ in range(self.max_workers):
@@ -1132,17 +1341,20 @@ class Crocodile:
             p.start()
             processes.append(p)
         
-        # for _ in range(self.ml_ranking_workers):
-        #     p = mp.Process(target=self.ml_ranking_worker)
-        #     p.start()
-        #     processes.append(p)
+        for _ in range(self.ml_ranking_workers):
+             p = mp.Process(target=self.ml_ranking_worker)
+             p.start()
+             processes.append(p)
         
-        trace_thread = TraceThread(input_collection, dataset_trace_collection, table_trace_collection)
+        trace_thread = TraceThread(self.mongo_uri, self.db_name, self.input_collection, self.dataset_trace_collection_name, 
+                                   self.table_trace_collection_name, self.timing_collection_name)
         trace_thread.start()
         processes.append(trace_thread)
 
         for p in processes:
             p.join()
+        
+        self.__del__()
 
         print("All tasks have been processed.")
 
@@ -1158,10 +1370,10 @@ class Crocodile:
             "table_name": table_name,
             "ml_ranked": False
         })
-        print(f"Total unprocessed documents: {total_count}")
+        print(f"Total unprocessed documents (for ML ranking): {total_count}")
 
         # We'll restrict type-freq counting to the top N candidates in each row/col
-        top_n_for_type_freq = self.top_n_for_type_freq  # e.g. 3
+        top_n_for_type_freq = self.top_n_for_type_freq  # e.g., 3
 
         while processed_count < total_count:
             batch_docs = list(training_collection.find(
@@ -1184,14 +1396,10 @@ class Crocodile:
             #--------------------------------------------------------------------------
             # 1) Collect "top N" type IDs per column, ignoring duplicates in same row
             #--------------------------------------------------------------------------
-            # For each doc, for each column, pick top N, gather their type IDs into a set,
-            # then increment that set in the column's counter exactly once per row.
             for doc in batch_docs:
                 candidates_by_column = doc["candidates"]
                 for col_index, candidates in candidates_by_column.items():
-                    # Sort by some existing metric (score or popularity) so we know the "top"
-                    pre_sorted = sorted(candidates, key=lambda x: x.get("score", 0.0), reverse=True)
-                    top_candidates_for_freq = pre_sorted[:top_n_for_type_freq]
+                    top_candidates_for_freq = candidates[:top_n_for_type_freq]
 
                     # Collect distinct type IDs from those top candidates
                     row_qids = set()
@@ -1209,38 +1417,24 @@ class Crocodile:
                     rows_count_by_column[col_index] += 1
 
             #--------------------------------------------------------------------------
-            # 2) Convert raw counts to frequencies in [0..1], pick top 5 per column
+            # 2) Convert raw counts to frequencies in [0..1].
             #--------------------------------------------------------------------------
-            # We'll overwrite the counters so that each qid maps to a float frequency
-            top_5_types_by_column = {}
-
             for col_index, freq_counter in type_freq_by_column.items():
                 row_count = rows_count_by_column[col_index]
                 if row_count == 0:
                     continue
-
                 # Convert each type's raw count => ratio in [0..1]
                 for qid in freq_counter:
                     freq_counter[qid] = freq_counter[qid] / row_count
 
-                # Now pick the top 5 by ratio
-                top_5 = freq_counter.most_common(5)  # returns list of (qid, freq)
-                top_5_types = [tup[0] for tup in top_5]
-                top_5_types_by_column[col_index] = top_5_types
-
             #--------------------------------------------------------------------------
             # 3) Assign new features (typeFreq1..typeFreq5) for each candidate
-            #    based on that column's top 5 + freq_counter
             #--------------------------------------------------------------------------
             for doc in batch_docs:
                 candidates_by_column = doc["candidates"]
                 for col_index, candidates in candidates_by_column.items():
-                    # If we never built a freq for this column, skip
-                    if col_index not in type_freq_by_column:
-                        continue
-
-                    freq_counter = type_freq_by_column[col_index]
-                    top_5_types = top_5_types_by_column.get(col_index, [])
+                    # If we never built a freq for this column, default to empty
+                    freq_counter = type_freq_by_column.get(col_index, {})
 
                     for cand in candidates:
                         # Ensure we have a features dict
@@ -1248,16 +1442,25 @@ class Crocodile:
                             cand["features"] = {}
 
                         # Gather candidate's type IDs
-                        cand_qids = {t_obj.get("id") for t_obj in cand.get("types", []) if t_obj.get("id")}
+                        cand_qids = [
+                            t_obj.get("id") for t_obj in cand.get("types", []) if t_obj.get("id")
+                        ]
 
-                        # For each of the column's top 5 type IDs, see if candidate has it
-                        # If yes, set feature to that freq; else 0
-                        for i, top_type in enumerate(top_5_types):
-                            feature_name = f"typeFreq{i+1}"  # typeFreq1.. typeFreq5
-                            if top_type in cand_qids:
-                                cand["features"][feature_name] = freq_counter[top_type]
-                            else:
-                                cand["features"][feature_name] = 0.0
+                        # Find the frequency for each type
+                        cand_type_freqs = [
+                            freq_counter.get(qid, 0.0) for qid in cand_qids
+                        ]
+
+                        # Sort descending
+                        cand_type_freqs.sort(reverse=True)
+
+                        # Assign typeFreq1..typeFreq5
+                        for i in range(1, 6):
+                            # If the candidate has fewer than i types, default to 0
+                            freq_val = (
+                                cand_type_freqs[i-1] if (i-1) < len(cand_type_freqs) else 0.0
+                            )
+                            cand["features"][f"typeFreq{i}"] = round(freq_val, 3)
 
             #--------------------------------------------------------------------------
             # 4) Build final feature matrix & do ML predictions
@@ -1315,7 +1518,7 @@ class Crocodile:
 
             processed_count += len(batch_docs)
             progress = min((processed_count / total_count) * 100, 100.0)
-            print(f"ML ranking progress: {progress:.2f}% completed")
+            print(f"ML ranking progress for {dataset_name}.{table_name}: {progress:.2f}% completed")
 
             # Update progress in table_trace
             table_trace_collection.update_one(
@@ -1343,7 +1546,3 @@ class Crocodile:
     def load_ml_model(self):
         from tensorflow.keras.models import load_model
         return load_model(self.model_path)
-
-
-# You can run crocodile_instance.run() as before.
-

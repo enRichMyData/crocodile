@@ -14,6 +14,17 @@ process_queue = db["process_queue"]
 training_data_collection = db["training_data"]
 timing_trace_collection = db["timing_trace"]
 
+# Drop all collections except 'bow_cache' and 'candidate_cache'
+collections_to_keep = ["bow_cache", "candidate_cache"]
+all_collections = db.list_collection_names()
+
+for collection in all_collections:
+    if collection not in collections_to_keep:
+        db[collection].drop()
+        print(f"Dropped collection: {collection}")
+
+print("All unwanted collections have been dropped.")
+
 # Ensure indexes for uniqueness and performance
 def ensure_indexes():
     input_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)])  # Ensure fast retrieval of items by dataset and table
@@ -34,7 +45,7 @@ def ensure_indexes():
 ensure_indexes()
 
 datasets = ["Round4_2020", "2T_2020", "Round3_2019", "HardTablesR2", "HardTablesR3", "Round1_T2D"]
-datasets = ["HardTablesR2"]  # For debugging
+#datasets = ["HardTablesR2"]  # For debugging
 
 # Initialize the column classifier
 classifier = ColumnClassifier(model_type='fast')

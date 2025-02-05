@@ -5,7 +5,7 @@ from datetime import datetime
 from crocodile.mongo import MongoConnectionManager
 
 
-class TraceThread(mp.Process):
+class TraceWorker(mp.Process):
     def __init__(
         self,
         mongo_uri,

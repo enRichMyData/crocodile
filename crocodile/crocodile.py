@@ -14,7 +14,7 @@ from nltk.tokenize import word_tokenize
 from crocodile import MY_TIMEOUT
 from crocodile.ml import MLWorker
 from crocodile.mongo import MongoCache, MongoConnectionManager, MongoWrapper
-from crocodile.trace import TraceThread
+from crocodile.trace import TraceWorker
 
 stop_words = set(stopwords.words("english"))
 
@@ -830,7 +830,7 @@ class Crocodile:
             p.start()
             processes.append(p)
 
-        trace_thread = TraceThread(
+        trace_thread = TraceWorker(
             self.mongo_uri,
             self.db_name,
             self.input_collection,

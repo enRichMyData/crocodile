@@ -486,7 +486,7 @@ class Crocodile:
             ):
                 candidates = candidates_results.get(ne_value, [])
                 # If there's exactly 1 candidate, let's attempt a fuzzy retry
-                if len(candidates) == 1:
+                if len(candidates) <= 1:
                     entities_to_retry.append(ne_value)
                     idx = all_entities_to_process.index(ne_value)
                     row_texts_retry.append(all_row_texts[idx])
@@ -796,8 +796,6 @@ class Crocodile:
                 self.process_rows_batch(docs, dataset_name, table_name)
 
     def run(self):
-        # mp.set_start_method("spawn", force=True) # it slows down everything
-
         db = self.get_db()
         input_collection = db[self.input_collection]
 

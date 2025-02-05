@@ -5,8 +5,6 @@ import absl.logging
 import aiohttp
 import nltk
 
-from .crocodile import Crocodile as Crocodile
-
 MY_TIMEOUT = aiohttp.ClientTimeout(
     total=30,  # Total time for the request
     connect=5,  # Time to connect to the server
@@ -30,3 +28,6 @@ absl.logging.set_verbosity(absl.logging.ERROR)
 # NLTK setup
 nltk.download("punkt", quiet=True)
 nltk.download("stopwords", quiet=True)
+
+# Import the main class
+from .crocodile import Crocodile as Crocodile

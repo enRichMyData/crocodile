@@ -3,18 +3,17 @@ import hashlib
 import multiprocessing as mp
 import time
 import traceback
-from collections import Counter, defaultdict
 from datetime import datetime
 from urllib.parse import quote
 
 import aiohttp
-import numpy as np
 import pandas as pd
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 
 from crocodile import MY_TIMEOUT
-from crocodile.mongo import MongoCache, MongoConnectionManager
+from crocodile.ml import MLWorker
+from crocodile.mongo import MongoCache, MongoConnectionManager, MongoWrapper
 from crocodile.trace import TraceThread
 
 stop_words = set(stopwords.words("english"))
@@ -90,6 +89,9 @@ class Crocodile:
         self.ml_ranking_workers = ml_ranking_workers
         self.top_n_for_type_freq = top_n_for_type_freq
         self.MAX_BOW_BATCH_SIZE = max_bow_batch_size
+        self.mongo_wrapper = MongoWrapper(
+            mongo_uri, db_name, timing_collection_name, error_log_collection_name
+        )
 
     def get_db(self):
         """Get MongoDB database connection for current process"""
@@ -110,130 +112,6 @@ class Crocodile:
     def get_bow_cache(self):
         db = self.get_db()
         return MongoCache(db, self.bow_cache_collection_name)
-
-    def time_mongo_operation(self, operation_name, query_function, *args, **kwargs):
-        start_time = time.time()
-        db = self.get_db()
-        timing_trace_collection = db[self.timing_collection_name]
-        try:
-            result = query_function(*args, **kwargs)
-        except Exception as e:
-            end_time = time.time()
-            duration = end_time - start_time
-            timing_trace_collection.insert_one(
-                {
-                    "operation_name": operation_name,
-                    "start_time": datetime.fromtimestamp(start_time),
-                    "end_time": datetime.fromtimestamp(end_time),
-                    "duration_seconds": duration,
-                    "args": str(args),
-                    "kwargs": str(kwargs),
-                    "error": str(e),
-                    "status": "FAILED",
-                }
-            )
-            raise
-        else:
-            end_time = time.time()
-            duration = end_time - start_time
-            timing_trace_collection.insert_one(
-                {
-                    "operation_name": operation_name,
-                    "start_time": datetime.fromtimestamp(start_time),
-                    "end_time": datetime.fromtimestamp(end_time),
-                    "duration_seconds": duration,
-                    "args": str(args),
-                    "kwargs": str(kwargs),
-                    "status": "SUCCESS",
-                }
-            )
-            return result
-
-    def update_document(self, collection, query, update, upsert=False):
-        operation_name = f"update_document:{collection.name}"
-        return self.time_mongo_operation(
-            operation_name, collection.update_one, query, update, upsert=upsert
-        )
-
-    def update_documents(self, collection, query, update, upsert=False):
-        operation_name = f"update_documents:{collection.name}"
-        return self.time_mongo_operation(
-            operation_name, collection.update_many, query, update, upsert=upsert
-        )
-
-    def find_documents(self, collection, query, projection=None, limit=None):
-        operation_name = f"find_documents:{collection.name}"
-
-        def query_function(query, projection=None):
-            cursor = collection.find(query, projection)
-            if limit is not None:
-                cursor = cursor.limit(limit)
-            return list(cursor)
-
-        return self.time_mongo_operation(operation_name, query_function, query, projection)
-
-    def count_documents(self, collection, query):
-        operation_name = f"count_documents:{collection.name}"
-        return self.time_mongo_operation(operation_name, collection.count_documents, query)
-
-    def find_one_document(self, collection, query, projection=None):
-        operation_name = f"find_one_document:{collection.name}"
-        return self.time_mongo_operation(
-            operation_name, collection.find_one, query, projection=projection
-        )
-
-    def find_one_and_update(self, collection, query, update, return_document=False):
-        operation_name = f"find_one_and_update:{collection.name}"
-        return self.time_mongo_operation(
-            operation_name,
-            collection.find_one_and_update,
-            query,
-            update,
-            return_document=return_document,
-        )
-
-    def insert_one_document(self, collection, document):
-        operation_name = f"insert_one_document:{collection.name}"
-        return self.time_mongo_operation(operation_name, collection.insert_one, document)
-
-    def insert_many_documents(self, collection, documents):
-        operation_name = f"insert_many_documents:{collection.name}"
-        return self.time_mongo_operation(operation_name, collection.insert_many, documents)
-
-    def delete_documents(self, collection, query):
-        operation_name = f"delete_documents:{collection.name}"
-        return self.time_mongo_operation(operation_name, collection.delete_many, query)
-
-    def log_time(
-        self, operation_name, dataset_name, table_name, start_time, end_time, details=None
-    ):
-        db = self.get_db()
-        timing_collection = db[self.timing_collection_name]
-        duration = end_time - start_time
-        log_entry = {
-            "operation_name": operation_name,
-            "dataset_name": dataset_name,
-            "table_name": table_name,
-            "start_time": datetime.fromtimestamp(start_time),
-            "end_time": datetime.fromtimestamp(end_time),
-            "duration_seconds": duration,
-        }
-        if details:
-            log_entry["details"] = details
-        timing_collection.insert_one(log_entry)
-
-    def log_to_db(self, level, message, trace=None, attempt=None):
-        db = self.get_db()
-        log_collection = db[self.error_log_collection_name]
-        log_entry = {
-            "timestamp": datetime.now(),
-            "level": level,
-            "message": message,
-            "traceback": trace,
-        }
-        if attempt is not None:
-            log_entry["attempt"] = attempt
-        log_collection.insert_one(log_entry)
 
     async def _fetch_candidates(self, entity_name, row_text, fuzzy, qid, session):
         db = self.get_db()
@@ -315,7 +193,7 @@ class Crocodile:
                 end_time = time.time()
                 if attempts == 4:
                     # Log the error if all attempts failed
-                    self.log_to_db(
+                    self.mongo_wrapper.log_to_db(
                         "FETCH_CANDIDATES_ERROR",
                         f"Error fetching candidates for {entity_name}",
                         traceback.format_exc(),
@@ -487,7 +365,7 @@ class Crocodile:
                 end_time = time.time()
                 if attempts == 4:
                     # Log the error if all attempts failed
-                    self.log_to_db(
+                    self.mongo_wrapper.log_to_db(
                         "FETCH_BOW_ERROR",
                         f"Error fetching BoW for row_hash={row_hash}, chunk_qids={chunk_qids}",
                         traceback.format_exc(),
@@ -735,7 +613,9 @@ class Crocodile:
             self.log_processing_speed(dataset_name, table_name)
 
         except Exception:
-            self.log_to_db("ERROR", "Error processing batch of rows", traceback.format_exc())
+            self.mongo_wrapper.log_to_db(
+                "ERROR", "Error processing batch of rows", traceback.format_exc()
+            )
 
     def map_kind_to_numeric(self, kind):
         mapping = {"entity": 1, "type": 2, "disambiguation": 3, "predicate": 4}
@@ -783,27 +663,18 @@ class Crocodile:
             nertype_numeric = self.map_nertype_to_numeric(candidate.get("NERtype", "OTHERS"))
 
             features = {
-                "ntoken_mention": round(
-                    candidate.get("ntoken_mention", len(entity_name.split())), 4
+                "ntoken_mention": candidate.get("ntoken_mention", len(entity_name.split())),
+                "ntoken_entity": candidate.get("ntoken_entity", len(candidate_name.split())),
+                "length_mention": len(entity_name),
+                "length_entity": len(candidate_name),
+                "popularity": candidate.get("popularity", 0.0),
+                "ed_score": candidate.get("ed_score", 0.0),
+                "jaccard_score": candidate.get("jaccard_score", 0.0),
+                "jaccardNgram_score": candidate.get("jaccardNgram_score", 0.0),
+                "desc": self.calculate_token_overlap(
+                    row_tokens, set(self.tokenize_text(candidate_description))
                 ),
-                "ntoken_entity": round(
-                    candidate.get("ntoken_entity", len(candidate_name.split())), 4
-                ),
-                "length_mention": round(len(entity_name), 4),
-                "length_entity": round(len(candidate_name), 4),
-                "popularity": round(candidate.get("popularity", 0.0), 4),
-                "ed_score": round(candidate.get("ed_score", 0.0), 4),
-                "jaccard_score": round(candidate.get("jaccard_score", 0.0), 4),
-                "jaccardNgram_score": round(candidate.get("jaccardNgram_score", 0.0), 4),
-                "desc": round(
-                    self.calculate_token_overlap(
-                        row_tokens, set(self.tokenize_text(candidate_description))
-                    ),
-                    4,
-                ),
-                "descNgram": round(
-                    self.calculate_ngram_similarity(entity_name, candidate_description), 4
-                ),
+                "descNgram": self.calculate_ngram_similarity(entity_name, candidate_description),
                 "bow_similarity": 0.0,
                 "kind": kind_numeric,
                 "NERtype": nertype_numeric,
@@ -924,33 +795,13 @@ class Crocodile:
             for (dataset_name, table_name), docs in tasks_by_table.items():
                 self.process_rows_batch(docs, dataset_name, table_name)
 
-    def ml_ranking_worker(self):
-        model = self.load_ml_model()
-        db = self.get_db()
-        table_trace_collection = db[self.table_trace_collection_name]
-        while True:
-            todo_table = self.find_one_document(
-                table_trace_collection, {"ml_ranking_status": None}
-            )
-            if todo_table is None:  # no more tasks to process
-                break
-            table_trace_obj = self.find_one_and_update(
-                table_trace_collection,
-                {"$and": [{"status": "COMPLETED"}, {"ml_ranking_status": None}]},
-                {"$set": {"ml_ranking_status": "PENDING"}},
-            )
-            if table_trace_obj:
-                dataset_name = table_trace_obj.get("dataset_name")
-                table_name = table_trace_obj.get("table_name")
-                self.apply_ml_ranking(dataset_name, table_name, model)
-
     def run(self):
         # mp.set_start_method("spawn", force=True) # it slows down everything
 
         db = self.get_db()
         input_collection = db[self.input_collection]
 
-        total_rows = self.count_documents(input_collection, {"status": "TODO"})
+        total_rows = self.mongo_wrapper.count_documents(input_collection, {"status": "TODO"})
         if total_rows == 0:
             print("No more tasks to process.")
         else:
@@ -963,7 +814,19 @@ class Crocodile:
             processes.append(p)
 
         for _ in range(self.ml_ranking_workers):
-            p = mp.Process(target=self.ml_ranking_worker)
+            p = MLWorker(
+                db_uri=self.mongo_uri,
+                db_name=self.db_name,
+                table_trace_collection_name=self.table_trace_collection_name,
+                training_collection_name=self.training_collection_name,
+                timing_collection_name=self.timing_collection_name,
+                error_log_collection_name=self.error_log_collection_name,
+                input_collection=self.input_collection,
+                ml_model_path=self.model_path,
+                batch_size=self.batch_size,
+                max_candidates=self.max_candidates,
+                top_n_for_type_freq=self.top_n_for_type_freq,
+            )
             p.start()
             processes.append(p)
 
@@ -982,207 +845,4 @@ class Crocodile:
             p.join()
 
         self.__del__()
-
         print("All tasks have been processed.")
-
-    def apply_ml_ranking(self, dataset_name, table_name, model):
-        db = self.get_db()
-        training_collection = db[self.training_collection_name]
-        input_collection = db[self.input_collection]
-        table_trace_collection = db[self.table_trace_collection_name]
-
-        processed_count = 0
-        total_count = self.count_documents(
-            training_collection,
-            {"dataset_name": dataset_name, "table_name": table_name, "ml_ranked": False},
-        )
-        print(f"Total unprocessed documents (for ML ranking): {total_count}")
-
-        # We'll restrict type-freq counting to the top N candidates in each row/col
-        top_n_for_type_freq = self.top_n_for_type_freq  # e.g., 3
-
-        while processed_count < total_count:
-            batch_docs = list(
-                training_collection.find(
-                    {"dataset_name": dataset_name, "table_name": table_name, "ml_ranked": False},
-                    limit=self.batch_size,
-                )
-            )
-            if not batch_docs:
-                break
-
-            # Map documents by _id so we can update them later
-            doc_map = {doc["_id"]: doc for doc in batch_docs}
-
-            # For each column, we'll store a Counter of type_id -> how many rows had that type
-            type_freq_by_column = defaultdict(Counter)
-
-            # We also track how many rows in the batch actually had that column
-            # so we can normalize frequencies to 0..1
-            rows_count_by_column = Counter()
-
-            # --------------------------------------------------------------------------
-            # 1) Collect "top N" type IDs per column, ignoring duplicates in same row
-            # --------------------------------------------------------------------------
-            for doc in batch_docs:
-                candidates_by_column = doc["candidates"]
-                for col_index, candidates in candidates_by_column.items():
-                    top_candidates_for_freq = candidates[:top_n_for_type_freq]
-
-                    # Collect distinct type IDs from those top candidates
-                    row_qids = set()
-                    for cand in top_candidates_for_freq:
-                        for t_dict in cand.get("types", []):
-                            qid = t_dict.get("id")
-                            if qid:
-                                row_qids.add(qid)
-
-                    # Increase counts for each distinct type in this row
-                    for qid in row_qids:
-                        type_freq_by_column[col_index][qid] += 1
-
-                    # Mark that this row *had* that column (so we can normalize)
-                    rows_count_by_column[col_index] += 1
-
-            # --------------------------------------------------------------------------
-            # 2) Convert raw counts to frequencies in [0..1].
-            # --------------------------------------------------------------------------
-            for col_index, freq_counter in type_freq_by_column.items():
-                row_count = rows_count_by_column[col_index]
-                if row_count == 0:
-                    continue
-                # Convert each type's raw count => ratio in [0..1]
-                for qid in freq_counter:
-                    freq_counter[qid] = freq_counter[qid] / row_count
-
-            # --------------------------------------------------------------------------
-            # 3) Assign new features (typeFreq1..typeFreq5) for each candidate
-            # --------------------------------------------------------------------------
-            for doc in batch_docs:
-                candidates_by_column = doc["candidates"]
-                for col_index, candidates in candidates_by_column.items():
-                    # If we never built a freq for this column, default to empty
-                    freq_counter = type_freq_by_column.get(col_index, {})
-
-                    for cand in candidates:
-                        # Ensure we have a features dict
-                        if "features" not in cand:
-                            cand["features"] = {}
-
-                        # Gather candidate's type IDs
-                        cand_qids = [
-                            t_obj.get("id") for t_obj in cand.get("types", []) if t_obj.get("id")
-                        ]
-
-                        # Find the frequency for each type
-                        cand_type_freqs = [freq_counter.get(qid, 0.0) for qid in cand_qids]
-
-                        # Sort descending
-                        cand_type_freqs.sort(reverse=True)
-
-                        # Assign typeFreq1..typeFreq5
-                        for i in range(1, 6):
-                            # If the candidate has fewer than i types, default to 0
-                            freq_val = (
-                                cand_type_freqs[i - 1] if (i - 1) < len(cand_type_freqs) else 0.0
-                            )
-                            cand["features"][f"typeFreq{i}"] = round(freq_val, 3)
-
-            # --------------------------------------------------------------------------
-            # 4) Build final feature matrix & do ML predictions
-            # --------------------------------------------------------------------------
-            all_candidates = []
-            doc_info = []
-            for doc in batch_docs:
-                row_index = doc["row_id"]
-                candidates_by_column = doc["candidates"]
-                for col_index, candidates in candidates_by_column.items():
-                    features_list = [self.extract_features(c) for c in candidates]
-                    all_candidates.extend(features_list)
-
-                    # doc_info: track the location of each candidate
-                    doc_info.extend(
-                        [(doc["_id"], row_index, col_index, idx) for idx in range(len(candidates))]
-                    )
-
-            if len(all_candidates) == 0:
-                print(
-                    f"No candidates to predict for dataset={dataset_name}, table={table_name}. "
-                    "Skipping..."
-                )
-                return
-
-            candidate_features = np.array(all_candidates)
-            print(f"Predicting scores for {len(candidate_features)} candidates...")
-            ml_scores = model.predict(candidate_features, batch_size=128)[:, 1]
-            print("Scores predicted.")
-
-            # Assign new ML scores back to candidates
-            for i, (doc_id, row_index, col_index, cand_idx) in enumerate(doc_info):
-                candidate = doc_map[doc_id]["candidates"][col_index][cand_idx]
-                candidate["score"] = float(ml_scores[i])
-
-            # --------------------------------------------------------------------------
-            # 5) Sort by final 'score' and trim to max_candidates; update DB
-            # --------------------------------------------------------------------------
-            for doc_id, doc in doc_map.items():
-                row_index = doc["row_id"]
-                updated_candidates_by_column = {}
-                for col_index, candidates in doc["candidates"].items():
-                    ranked_candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)
-                    updated_candidates_by_column[col_index] = ranked_candidates[
-                        : self.max_candidates
-                    ]
-
-                # Mark doc as ML-ranked
-                training_collection.update_one(
-                    {"_id": doc_id}, {"$set": {"candidates": doc["candidates"], "ml_ranked": True}}
-                )
-
-                # Update final results in input_collection
-                input_collection.update_one(
-                    {"dataset_name": dataset_name, "table_name": table_name, "row_id": row_index},
-                    {"$set": {"el_results": updated_candidates_by_column}},
-                )
-
-            processed_count += len(batch_docs)
-            progress = min((processed_count / total_count) * 100, 100.0)
-            print(
-                f"ML ranking progress for {dataset_name}.{table_name}: {progress:.2f}% completed"
-            )
-
-            # Update progress in table_trace
-            table_trace_collection.update_one(
-                {"dataset_name": dataset_name, "table_name": table_name},
-                {"$set": {"ml_ranking_progress": progress}},
-                upsert=True,
-            )
-
-        # Mark the table as COMPLETED
-        table_trace_collection.update_one(
-            {"dataset_name": dataset_name, "table_name": table_name},
-            {"$set": {"ml_ranking_status": "COMPLETED"}},
-        )
-        print("ML ranking completed.")
-
-    def extract_features(self, candidate):
-        numerical_features = [
-            "ntoken_mention",
-            "length_mention",
-            "ntoken_entity",
-            "length_entity",
-            "popularity",
-            "ed_score",
-            "desc",
-            "descNgram",
-            "bow_similarity",
-            "kind",
-            "NERtype",
-            "column_NERtype",
-        ]
-        return [candidate["features"].get(feature, 0.0) for feature in numerical_features]
-
-    def load_ml_model(self):
-        from tensorflow.keras.models import load_model
-
-        return load_model(self.model_path)

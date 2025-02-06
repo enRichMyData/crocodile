@@ -1,4 +1,5 @@
 # crocodile/__init__.py
+import os
 import warnings
 
 import absl.logging
@@ -32,6 +33,9 @@ nltk.download("stopwords", quiet=True)
 
 # Define STOP_WORDS
 STOP_WORDS = set(stopwords.words("english"))
+
+# Project root directory
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Import the main class
 from .crocodile import Crocodile as Crocodile

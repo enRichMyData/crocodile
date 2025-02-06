@@ -706,10 +706,11 @@ class Crocodile:
                 timing_collection_name=self.timing_collection_name,
                 error_log_collection_name=self.error_log_collection_name,
                 input_collection=self.input_collection,
-                ml_model_path=self.model_path,
+                model_path=self.model_path,
                 batch_size=self.batch_size,
                 max_candidates=self.max_candidates,
                 top_n_for_type_freq=self.top_n_for_type_freq,
+                features=self.feature.selected_features,
             )
             p.start()
             processes.append(p)

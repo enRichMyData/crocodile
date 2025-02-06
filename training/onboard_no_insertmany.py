@@ -1,7 +1,8 @@
 import os
+
 import pandas as pd
 from column_classifier import ColumnClassifier
-from pymongo import MongoClient, ASCENDING
+from pymongo import ASCENDING, MongoClient
 from tqdm import tqdm
 
 # MongoDB connection
@@ -12,31 +13,47 @@ table_trace_collection = db["table_trace"]
 dataset_trace_collection = db["dataset_trace"]
 process_queue = db["process_queue"]
 
+
 # Ensure indexes for uniqueness and performance
 def ensure_indexes():
-    input_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING), ("row_id", ASCENDING)], unique=True)
-    table_trace_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True)
+    input_collection.create_index(
+        [("dataset_name", ASCENDING), ("table_name", ASCENDING), ("row_id", ASCENDING)],
+        unique=True,
+    )
+    table_trace_collection.create_index(
+        [("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True
+    )
     dataset_trace_collection.create_index([("dataset_name", ASCENDING)], unique=True)
-    process_queue.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True)
+    process_queue.create_index(
+        [("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True
+    )
     process_queue.create_index([("status", ASCENDING)])  # Ensure fast retrieval of items by status
+
 
 ensure_indexes()
 
 datasets = ["Round1_T2D", "Round3_2019", "2T_2020", "Round4_2020", "HardTablesR2", "HardTablesR3"]
 
 # Initialize the column classifier
-classifier = ColumnClassifier(model_type='fast')
+classifier = ColumnClassifier(model_type="fast")
+
 
 # Function to get NE columns and correct QIDs from the GT file
 def get_ne_cols_and_correct_qids(table_name, cea_gt):
     filtered_cea_gt = cea_gt[cea_gt[0] == table_name]
-    ne_cols = {int(row[3]): None for row in filtered_cea_gt.itertuples()}  # Column index as integer
-    correct_qids = {f"{int(row[1])-1}-{row[2]}": row[3].split("/")[-1] for _, row in filtered_cea_gt.iterrows()}
+    ne_cols = {
+        int(row[3]): None for row in filtered_cea_gt.itertuples()
+    }  # Column index as integer
+    correct_qids = {
+        f"{int(row[1])-1}-{row[2]}": row[3].split("/")[-1] for _, row in filtered_cea_gt.iterrows()
+    }
     return ne_cols, correct_qids
+
 
 # Function to determine tag based on classification
 def determine_tag(classification):
     return "NE" if classification in ["LOCATION", "ORGANIZATION", "PERSON", "OTHER"] else "LIT"
+
 
 # Function to onboard data without using insert_many
 def onboard_data_batch(dataset_name, table_name, df, ne_cols, lit_cols, correct_qids):
@@ -47,7 +64,9 @@ def onboard_data_batch(dataset_name, table_name, df, ne_cols, lit_cols, correct_
 
     for index, row in df.iterrows():
         # Filter correct QIDs relevant for the current row
-        correct_qids_for_row = {key: value for key, value in correct_qids.items() if key.startswith(f"{index}-")}
+        correct_qids_for_row = {
+            key: value for key, value in correct_qids.items() if key.startswith(f"{index}-")
+        }
 
         document = {
             "dataset_name": dataset_name,
@@ -57,13 +76,13 @@ def onboard_data_batch(dataset_name, table_name, df, ne_cols, lit_cols, correct_
             "classified_columns": {
                 "NE": ne_cols,
                 "LIT": lit_cols,
-                "UNCLASSIFIED": list(unclassified_columns)
+                "UNCLASSIFIED": list(unclassified_columns),
             },
             "context_columns": list(all_columns),
             "correct_qids": correct_qids_for_row,
-            "status": "TODO"
+            "status": "TODO",
         }
-        
+
         try:
             input_collection.insert_one(document)  # Insert each document individually
         except Exception as e:
@@ -72,25 +91,24 @@ def onboard_data_batch(dataset_name, table_name, df, ne_cols, lit_cols, correct_
     # Store header separately in table_trace
     table_trace_collection.update_one(
         {"dataset_name": dataset_name, "table_name": table_name},
-        {"$set": {
-            "header": list(df.columns),  # Store the header
-            "total_rows": len(df),
-            "processed_rows": 0,
-            "status": "PENDING"
-        }},
-        upsert=True
+        {
+            "$set": {
+                "header": list(df.columns),  # Store the header
+                "total_rows": len(df),
+                "processed_rows": 0,
+                "status": "PENDING",
+            }
+        },
+        upsert=True,
     )
 
     # Queue table for processing
     process_queue.update_one(
         {"dataset_name": dataset_name, "table_name": table_name},
-        {"$set": {
-            "status": "QUEUED",
-            "table_name": table_name,
-            "dataset_name": dataset_name
-        }},
-        upsert=True
+        {"$set": {"status": "QUEUED", "table_name": table_name, "dataset_name": dataset_name}},
+        upsert=True,
     )
+
 
 # Main processing loop for onboarding datasets with debug mode
 def process_tables(datasets, max_tables_at_once=5, debug_n_tables=None):
@@ -127,15 +145,18 @@ def process_tables(datasets, max_tables_at_once=5, debug_n_tables=None):
         # Initialize dataset-level trace after processing all tables
         dataset_trace_collection.update_one(
             {"dataset_name": dataset},
-            {"$setOnInsert": {
-                "total_tables": len(tables),
-                "processed_tables": 0,
-                "total_rows": 0,
-                "processed_rows": 0,
-                "status": "PENDING"
-            }},
-            upsert=True
+            {
+                "$setOnInsert": {
+                    "total_tables": len(tables),
+                    "processed_tables": 0,
+                    "total_rows": 0,
+                    "processed_rows": 0,
+                    "status": "PENDING",
+                }
+            },
+            upsert=True,
         )
+
 
 # Process a batch of tables
 def process_table_batch(batch_tables_data, batch_table_names):
@@ -166,7 +187,12 @@ def process_table_batch(batch_tables_data, batch_table_names):
                 elif tag == "LIT":
                     lit_cols_classified[col_idx_str] = classification
 
-            onboard_data_batch(dataset, table_name, df, ne_cols_classified, lit_cols_classified, correct_qids)
+            onboard_data_batch(
+                dataset, table_name, df, ne_cols_classified, lit_cols_classified, correct_qids
+            )
+
 
 # Example of running the function with batching and debug mode
-process_tables(datasets, max_tables_at_once=10)  # Use debug_n_tables to onboard 2 tables per dataset
+process_tables(
+    datasets, max_tables_at_once=10
+)  # Use debug_n_tables to onboard 2 tables per dataset

@@ -1,3 +1,4 @@
+import os
 from collections import Counter, defaultdict
 from multiprocessing import Process
 from typing import TYPE_CHECKING, Any, DefaultDict, Dict, List, Tuple
@@ -6,6 +7,8 @@ import numpy as np
 from pymongo.collection import Collection
 from pymongo.database import Database
 
+from crocodile import PROJECT_ROOT
+from crocodile.feature import DEFAULT_FEATURES
 from crocodile.mongo import MongoConnectionManager, MongoWrapper
 
 if TYPE_CHECKING:
@@ -22,10 +25,11 @@ class MLWorker(Process):
         timing_collection_name: str,
         error_log_collection_name: str,
         input_collection: str,
-        ml_model_path: str,
+        model_path: str | None = None,
         batch_size: int = 100,
         max_candidates: int = 5,
         top_n_for_type_freq: int = 3,
+        features: List[str] | None = None,
     ) -> None:
         super(MLWorker, self).__init__()
         self.db_uri: str = db_uri
@@ -35,7 +39,9 @@ class MLWorker(Process):
         self.timing_collection_name: str = timing_collection_name
         self.error_log_collection_name: str = error_log_collection_name
         self.input_collection: str = input_collection
-        self.ml_model_path: str = ml_model_path
+        self.model_path: str = model_path or os.path.join(
+            PROJECT_ROOT, "crocodile", "models", "default.h5"
+        )
         self.batch_size: int = batch_size
         self.max_candidates: int = max_candidates
         self.top_n_for_type_freq: int = top_n_for_type_freq
@@ -45,6 +51,7 @@ class MLWorker(Process):
             timing_collection_name=self.timing_collection_name,
             error_log_collection_name=self.error_log_collection_name,
         )
+        self.selected_features = features or DEFAULT_FEATURES
 
     def get_db(self) -> Database:
         client = MongoConnectionManager.get_client(self.db_uri)
@@ -53,7 +60,7 @@ class MLWorker(Process):
     def load_ml_model(self) -> "Model":
         from tensorflow.keras.models import load_model  # Local import as in original code
 
-        return load_model(self.ml_model_path)
+        return load_model(self.model_path)
 
     def run(self) -> None:
         db: Database = self.get_db()
@@ -264,18 +271,4 @@ class MLWorker(Process):
         print("ML ranking completed.")
 
     def extract_features(self, candidate: Dict[str, Any]) -> List[float]:
-        numerical_features: List[str] = [
-            "ntoken_mention",
-            "length_mention",
-            "ntoken_entity",
-            "length_entity",
-            "popularity",
-            "ed_score",
-            "desc",
-            "descNgram",
-            "bow_similarity",
-            "kind",
-            "NERtype",
-            "column_NERtype",
-        ]
-        return [candidate["features"].get(feature, 0.0) for feature in numerical_features]
+        return [candidate["features"].get(feature, 0.0) for feature in self.selected_features]

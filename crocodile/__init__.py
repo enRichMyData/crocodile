@@ -4,6 +4,7 @@ import warnings
 import absl.logging
 import aiohttp
 import nltk
+from nltk.corpus import stopwords
 
 MY_TIMEOUT = aiohttp.ClientTimeout(
     total=30,  # Total time for the request
@@ -28,6 +29,9 @@ absl.logging.set_verbosity(absl.logging.ERROR)
 # NLTK setup
 nltk.download("punkt", quiet=True)
 nltk.download("stopwords", quiet=True)
+
+# Define STOP_WORDS
+STOP_WORDS = set(stopwords.words("english"))
 
 # Import the main class
 from .crocodile import Crocodile as Crocodile

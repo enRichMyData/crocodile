@@ -4,48 +4,47 @@ import multiprocessing as mp
 import time
 import traceback
 from datetime import datetime
+from typing import List, Optional
 from urllib.parse import quote
 
 import aiohttp
 import pandas as pd
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
 
 from crocodile import MY_TIMEOUT
+from crocodile.feature import Feature
 from crocodile.ml import MLWorker
 from crocodile.mongo import MongoCache, MongoConnectionManager, MongoWrapper
 from crocodile.trace import TraceWorker
-
-stop_words = set(stopwords.words("english"))
+from crocodile.utils import tokenize_text
 
 
 class Crocodile:
     def __init__(
         self,
-        mongo_uri="mongodb://localhost:27017/",
-        db_name="crocodile_db",
-        table_trace_collection_name="table_trace",
-        dataset_trace_collection_name="dataset_trace",
-        input_collection="input_data",
-        training_collection_name="training_data",
-        error_log_collection_name="error_logs",
-        timing_collection_name="timing_trace",
-        cache_collection_name="candidate_cache",
-        bow_cache_collection_name="bow_cache",
-        max_workers=None,
-        max_candidates=5,
-        max_training_candidates=10,
-        entity_retrieval_endpoint=None,
-        entity_bow_endpoint=None,
-        entity_retrieval_token=None,
-        selected_features=None,
-        candidate_retrieval_limit=100,
-        model_path=None,
-        batch_size=10000,
-        ml_ranking_workers=2,
-        top_n_for_type_freq=3,
-        max_bow_batch_size=100,
-    ):
+        mongo_uri: str = "mongodb://localhost:27017/",
+        db_name: str = "crocodile_db",
+        table_trace_collection_name: str = "table_trace",
+        dataset_trace_collection_name: str = "dataset_trace",
+        input_collection: str = "input_data",
+        training_collection_name: str = "training_data",
+        error_log_collection_name: str = "error_logs",
+        timing_collection_name: str = "timing_trace",
+        cache_collection_name: str = "candidate_cache",
+        bow_cache_collection_name: str = "bow_cache",
+        max_workers: Optional[int] = None,
+        max_candidates: int = 5,
+        max_training_candidates: int = 10,
+        entity_retrieval_endpoint: Optional[str] = None,
+        entity_bow_endpoint: Optional[str] = None,
+        entity_retrieval_token: Optional[str] = None,
+        selected_features: Optional[List[str]] = None,
+        candidate_retrieval_limit: int = 100,
+        model_path: Optional[str] = None,
+        batch_size: int = 10000,
+        ml_ranking_workers: int = 2,
+        top_n_for_type_freq: int = 3,
+        max_bow_batch_size: int = 100,
+    ) -> None:
         self.mongo_uri = mongo_uri
         self.db_name = db_name
         self.input_collection = input_collection
@@ -62,27 +61,6 @@ class Crocodile:
         self.entity_retrieval_endpoint = entity_retrieval_endpoint
         self.entity_retrieval_token = entity_retrieval_token
         self.candidate_retrieval_limit = candidate_retrieval_limit
-        self.selected_features = selected_features or [
-            "ntoken_mention",
-            "ntoken_entity",
-            "length_mention",
-            "length_entity",
-            "popularity",
-            "ed_score",
-            "jaccard_score",
-            "jaccardNgram_score",
-            "desc",
-            "descNgram",
-            "bow_similarity",
-            "kind",
-            "NERtype",
-            "column_NERtype",
-            "typeFreq1",
-            "typeFreq2",
-            "typeFreq3",
-            "typeFreq4",
-            "typeFreq5",
-        ]
         self.model_path = model_path
         self.entity_bow_endpoint = entity_bow_endpoint
         self.batch_size = batch_size
@@ -92,6 +70,7 @@ class Crocodile:
         self.mongo_wrapper = MongoWrapper(
             mongo_uri, db_name, timing_collection_name, error_log_collection_name
         )
+        self.feature = Feature(selected_features)
 
     def get_db(self):
         """Get MongoDB database connection for current process"""
@@ -135,8 +114,8 @@ class Crocodile:
                 async with session.get(url) as response:
                     response.raise_for_status()
                     candidates = await response.json()
-                    row_tokens = set(self.tokenize_text(row_text))
-                    fetched_candidates = self._process_candidates(
+                    row_tokens = set(tokenize_text(row_text))
+                    fetched_candidates = self.feature.process_candidates(
                         candidates, entity_name, row_tokens
                     )
 
@@ -563,9 +542,9 @@ class Crocodile:
                                 cand["features"]["bow_similarity"] = bow_data.get(qid, {}).get(
                                     "similarity_score", 0.0
                                 )
-                                cand["features"]["column_NERtype"] = self.map_nertype_to_numeric(
-                                    ner_type
-                                )
+                                cand["features"][
+                                    "column_NERtype"
+                                ] = self.feature.map_nertype_to_numeric(ner_type)
 
                             # 4. Rank candidates by feature scoring
                             ranked_candidates = self.rank_with_feature_scoring(candidates)
@@ -610,87 +589,12 @@ class Crocodile:
                 )
 
             # Optionally track speed after full batch
-            self.log_processing_speed(dataset_name, table_name)
+            self.mongo_wrapper.log_processing_speed(dataset_name, table_name)
 
         except Exception:
             self.mongo_wrapper.log_to_db(
                 "ERROR", "Error processing batch of rows", traceback.format_exc()
             )
-
-    def map_kind_to_numeric(self, kind):
-        mapping = {"entity": 1, "type": 2, "disambiguation": 3, "predicate": 4}
-        return mapping.get(kind, 1)
-
-    def map_nertype_to_numeric(self, nertype):
-        mapping = {
-            "LOCATION": 1,
-            "LOC": 1,
-            "ORGANIZATION": 2,
-            "ORG": 2,
-            "PERSON": 3,
-            "PERS": 3,
-            "OTHER": 4,
-            "OTHERS": 4,
-        }
-        return mapping.get(nertype, 4)
-
-    def calculate_token_overlap(self, tokens_a, tokens_b):
-        intersection = tokens_a & tokens_b
-        union = tokens_a | tokens_b
-        return len(intersection) / len(union) if union else 0
-
-    def calculate_ngram_similarity(self, a, b, n=3):
-        a_ngrams = self.ngrams(a, n)
-        b_ngrams = self.ngrams(b, n)
-        intersection = len(set(a_ngrams) & set(b_ngrams))
-        union = len(set(a_ngrams) | set(b_ngrams))
-        return intersection / union if union > 0 else 0
-
-    def ngrams(self, string, n=3):
-        tokens = [string[i : i + n] for i in range(len(string) - n + 1)]
-        return tokens
-
-    def tokenize_text(self, text):
-        tokens = word_tokenize(text.lower())
-        return set(t for t in tokens if t not in stop_words)
-
-    def _process_candidates(self, candidates, entity_name, row_tokens):
-        processed_candidates = []
-        for candidate in candidates:
-            candidate_name = candidate.get("name", "")
-            candidate_description = candidate.get("description", "") or ""
-            kind_numeric = self.map_kind_to_numeric(candidate.get("kind", "entity"))
-            nertype_numeric = self.map_nertype_to_numeric(candidate.get("NERtype", "OTHERS"))
-
-            features = {
-                "ntoken_mention": candidate.get("ntoken_mention", len(entity_name.split())),
-                "ntoken_entity": candidate.get("ntoken_entity", len(candidate_name.split())),
-                "length_mention": len(entity_name),
-                "length_entity": len(candidate_name),
-                "popularity": candidate.get("popularity", 0.0),
-                "ed_score": candidate.get("ed_score", 0.0),
-                "jaccard_score": candidate.get("jaccard_score", 0.0),
-                "jaccardNgram_score": candidate.get("jaccardNgram_score", 0.0),
-                "desc": self.calculate_token_overlap(
-                    row_tokens, set(self.tokenize_text(candidate_description))
-                ),
-                "descNgram": self.calculate_ngram_similarity(entity_name, candidate_description),
-                "bow_similarity": 0.0,
-                "kind": kind_numeric,
-                "NERtype": nertype_numeric,
-                "column_NERtype": None,
-            }
-
-            processed_candidates.append(
-                {
-                    "id": candidate.get("id"),
-                    "name": candidate_name,
-                    "description": candidate_description,
-                    "types": candidate.get("types"),
-                    "features": features,
-                }
-            )
-        return processed_candidates
 
     def score_candidate(self, candidate):
         """
@@ -717,7 +621,7 @@ class Crocodile:
         else:
             total_score = sum(feats) / len(feats)
 
-        candidate["score"] = round(total_score, 3)
+        candidate["score"] = total_score
         return candidate
 
     def rank_with_feature_scoring(self, candidates):
@@ -737,24 +641,6 @@ class Crocodile:
             "ml_ranked": False,
         }
         training_collection.insert_one(training_document)
-
-    def log_processing_speed(self, dataset_name, table_name):
-        db = self.get_db()
-        table_trace_collection = db[self.table_trace_collection_name]
-
-        trace = table_trace_collection.find_one(
-            {"dataset_name": dataset_name, "table_name": table_name}
-        )
-        if not trace:
-            return
-        processed_rows = trace.get("processed_rows", 1)
-        start_time = trace.get("start_time")
-        elapsed_time = (datetime.now() - start_time).total_seconds() if start_time else 0
-        rows_per_second = processed_rows / elapsed_time if elapsed_time > 0 else 0
-        table_trace_collection.update_one(
-            {"dataset_name": dataset_name, "table_name": table_name},
-            {"$set": {"rows_per_second": rows_per_second}},
-        )
 
     def claim_todo_batch(self, input_collection, batch_size=10):
         """

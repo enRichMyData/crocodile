@@ -206,3 +206,21 @@ class MongoWrapper:
         if attempt is not None:
             log_entry["attempt"] = attempt
         log_collection.insert_one(log_entry)
+
+    def log_processing_speed(self, dataset_name, table_name):
+        db = self.get_db()
+        table_trace_collection = db[self.table_trace_collection_name]
+
+        trace = table_trace_collection.find_one(
+            {"dataset_name": dataset_name, "table_name": table_name}
+        )
+        if not trace:
+            return
+        processed_rows = trace.get("processed_rows", 1)
+        start_time = trace.get("start_time")
+        elapsed_time = (datetime.now() - start_time).total_seconds() if start_time else 0
+        rows_per_second = processed_rows / elapsed_time if elapsed_time > 0 else 0
+        table_trace_collection.update_one(
+            {"dataset_name": dataset_name, "table_name": table_name},
+            {"$set": {"rows_per_second": rows_per_second}},
+        )

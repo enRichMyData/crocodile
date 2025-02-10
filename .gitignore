@@ -170,3 +170,4 @@ mongo_data/
 .DS_Store
 *.zip
 training/datasets/
+notebooks/

@@ -1,7 +1,8 @@
 import os
+
 import pandas as pd
 from column_classifier import ColumnClassifier
-from pymongo import MongoClient, ASCENDING
+from pymongo import ASCENDING, MongoClient
 from tqdm import tqdm
 
 # MongoDB connection
@@ -14,41 +15,88 @@ process_queue = db["process_queue"]
 training_data_collection = db["training_data"]
 timing_trace_collection = db["timing_trace"]
 
+# Drop all collections except 'bow_cache' and 'candidate_cache'
+collections_to_keep = ["bow_cache", "candidate_cache"]
+all_collections = db.list_collection_names()
+
+for collection in all_collections:
+    if collection not in collections_to_keep:
+        db[collection].drop()
+        print(f"Dropped collection: {collection}")
+
+print("All unwanted collections have been dropped.")
+
+
 # Ensure indexes for uniqueness and performance
 def ensure_indexes():
-    input_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)])  # Ensure fast retrieval of items by dataset and table
-    input_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING), ("row_id", ASCENDING)], unique=True)
-    input_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING), ("status", ASCENDING)])  # Ensure fast retrieval of items by status
-    input_collection.create_index([("status", ASCENDING)])  # Ensure fast retrieval of items by status
-    table_trace_collection.create_index([("dataset_name", ASCENDING)]) # Ensure unique dataset-level trace
-    table_trace_collection.create_index([("table_name", ASCENDING)])  # Ensure fast retrieval of items by table_name
-    table_trace_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True)
+    input_collection.create_index(
+        [("dataset_name", ASCENDING), ("table_name", ASCENDING)]
+    )  # Ensure fast retrieval of items by dataset and table
+    input_collection.create_index(
+        [("dataset_name", ASCENDING), ("table_name", ASCENDING), ("row_id", ASCENDING)],
+        unique=True,
+    )
+    input_collection.create_index(
+        [("dataset_name", ASCENDING), ("table_name", ASCENDING), ("status", ASCENDING)]
+    )  # Ensure fast retrieval of items by status
+    input_collection.create_index(
+        [("status", ASCENDING)]
+    )  # Ensure fast retrieval of items by status
+    table_trace_collection.create_index(
+        [("dataset_name", ASCENDING)]
+    )  # Ensure unique dataset-level trace
+    table_trace_collection.create_index(
+        [("table_name", ASCENDING)]
+    )  # Ensure fast retrieval of items by table_name
+    table_trace_collection.create_index(
+        [("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True
+    )
     dataset_trace_collection.create_index([("dataset_name", ASCENDING)], unique=True)
-    training_data_collection.create_index([("dataset_name", ASCENDING)])  # Ensure fast retrieval of items by dataset
-    training_data_collection.create_index([("table_name", ASCENDING)])  # Ensure fast retrieval of items by table
-    training_data_collection.create_index([("ml_ranked", ASCENDING)])  # Ensure fast retrieval of items by ml_ranked
-    training_data_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)])  # Ensure fast retrieval of items by dataset and table
-    training_data_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING), ("ml_ranked", ASCENDING)])  # Ensure fast retrieval of items by dataset, table, and ml_ranked
-    timing_trace_collection.create_index([("duration_seconds", ASCENDING)])  # Ensure fast retrieval of items by duration_seconds
+    training_data_collection.create_index(
+        [("dataset_name", ASCENDING)]
+    )  # Ensure fast retrieval of items by dataset
+    training_data_collection.create_index(
+        [("table_name", ASCENDING)]
+    )  # Ensure fast retrieval of items by table
+    training_data_collection.create_index(
+        [("ml_ranked", ASCENDING)]
+    )  # Ensure fast retrieval of items by ml_ranked
+    training_data_collection.create_index(
+        [("dataset_name", ASCENDING), ("table_name", ASCENDING)]
+    )  # Ensure fast retrieval of items by dataset and table
+    training_data_collection.create_index(
+        [("dataset_name", ASCENDING), ("table_name", ASCENDING), ("ml_ranked", ASCENDING)]
+    )  # Ensure fast retrieval of items by dataset, table, and ml_ranked
+    timing_trace_collection.create_index(
+        [("duration_seconds", ASCENDING)]
+    )  # Ensure fast retrieval of items by duration_seconds
+
 
 ensure_indexes()
 
 datasets = ["Round4_2020", "2T_2020", "Round3_2019", "HardTablesR2", "HardTablesR3", "Round1_T2D"]
-datasets = ["HardTablesR2"]  # For debugging
+# datasets = ["HardTablesR2"]  # For debugging
 
 # Initialize the column classifier
-classifier = ColumnClassifier(model_type='fast')
+classifier = ColumnClassifier(model_type="fast")
+
 
 # Function to get NE columns and correct QIDs from the GT file
 def get_ne_cols_and_correct_qids(table_name, cea_gt):
     filtered_cea_gt = cea_gt[cea_gt[0] == table_name]
-    ne_cols = {int(row[3]): None for row in filtered_cea_gt.itertuples()}  # Column index as integer
-    correct_qids = {f"{int(row[1])-1}-{row[2]}": row[3].split("/")[-1] for _, row in filtered_cea_gt.iterrows()}
+    ne_cols = {
+        int(row[3]): None for row in filtered_cea_gt.itertuples()
+    }  # Column index as integer
+    correct_qids = {
+        f"{int(row[1])-1}-{row[2]}": row[3].split("/")[-1] for _, row in filtered_cea_gt.iterrows()
+    }
     return ne_cols, correct_qids
+
 
 # Function to determine tag based on classification
 def determine_tag(classification):
     return "NE" if classification in ["LOCATION", "ORGANIZATION", "PERSON", "OTHER"] else "LIT"
+
 
 # Function to batch onboard data into MongoDB
 def onboard_data_batch(dataset_name, table_name, df, ne_cols, lit_cols, correct_qids):
@@ -60,36 +108,42 @@ def onboard_data_batch(dataset_name, table_name, df, ne_cols, lit_cols, correct_
     documents = []
     for index, row in df.iterrows():
         # Filter correct QIDs relevant for the current row
-        correct_qids_for_row = {key: value for key, value in correct_qids.items() if key.startswith(f"{index}-")}
-        
-        documents.append({
-            "dataset_name": dataset_name,
-            "table_name": table_name,
-            "row_id": index,
-            "data": row.tolist(),  # Storing data as array
-            "classified_columns": {
-                "NE": ne_cols,
-                "LIT": lit_cols,
-                "UNCLASSIFIED": list(unclassified_columns)
-            },
-            "context_columns": list(all_columns),
-            "correct_qids": correct_qids_for_row,
-            "status": "TODO"
-        })
-    
+        correct_qids_for_row = {
+            key: value for key, value in correct_qids.items() if key.startswith(f"{index}-")
+        }
+
+        documents.append(
+            {
+                "dataset_name": dataset_name,
+                "table_name": table_name,
+                "row_id": index,
+                "data": row.tolist(),  # Storing data as array
+                "classified_columns": {
+                    "NE": ne_cols,
+                    "LIT": lit_cols,
+                    "UNCLASSIFIED": list(unclassified_columns),
+                },
+                "context_columns": list(all_columns),
+                "correct_qids": correct_qids_for_row,
+                "status": "TODO",
+            }
+        )
+
     if documents:
         input_collection.insert_many(documents)  # Batch insert the documents
 
     # Store header separately in table_trace
     table_trace_collection.update_one(
         {"dataset_name": dataset_name, "table_name": table_name},
-        {"$set": {
-            "header": list(df.columns),  # Store the header
-            "total_rows": len(df),
-            "processed_rows": 0,
-            "status": "PENDING"
-        }},
-        upsert=True
+        {
+            "$set": {
+                "header": list(df.columns),  # Store the header
+                "total_rows": len(df),
+                "processed_rows": 0,
+                "status": "PENDING",
+            }
+        },
+        upsert=True,
     )
 
 
@@ -136,15 +190,18 @@ def process_tables(datasets, max_tables_at_once=5, debug_n_tables=None, debug_ta
         # Initialize dataset-level trace after processing all tables
         dataset_trace_collection.update_one(
             {"dataset_name": dataset},
-            {"$setOnInsert": {
-                "total_tables": total_tables,
-                "processed_tables": 0,
-                "total_rows": total_rows,
-                "processed_rows": 0,
-                "status": "PENDING"
-            }},
-            upsert=True
+            {
+                "$setOnInsert": {
+                    "total_tables": total_tables,
+                    "processed_tables": 0,
+                    "total_rows": total_rows,
+                    "processed_rows": 0,
+                    "status": "PENDING",
+                }
+            },
+            upsert=True,
         )
+
 
 # Process a batch of tables
 def process_table_batch(batch_tables_data, batch_table_names):
@@ -175,7 +232,12 @@ def process_table_batch(batch_tables_data, batch_table_names):
                 elif tag == "LIT":
                     lit_cols_classified[col_idx_str] = classification
 
-            onboard_data_batch(dataset, table_name, df, ne_cols_classified, lit_cols_classified, correct_qids)
+            onboard_data_batch(
+                dataset, table_name, df, ne_cols_classified, lit_cols_classified, correct_qids
+            )
+
 
 # Example of running the function with batching and debug mode
-process_tables(datasets, max_tables_at_once=10)  # Use debug_n_tables to onboard n tables per dataset
+process_tables(
+    datasets, max_tables_at_once=10
+)  # Use debug_n_tables to onboard n tables per dataset

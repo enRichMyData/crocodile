@@ -11,7 +11,7 @@
       status
     }
     prevCursor
-    nextCursor 
+    nextCursor
     hasNextPage
   }
 }
@@ -26,7 +26,7 @@
       status
     }
     prevCursor
-    nextCursor 
+    nextCursor
     hasNextPage
   }
 }

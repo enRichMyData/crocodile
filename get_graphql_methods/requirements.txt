@@ -1,4 +1,0 @@
-fastapi
-pymongo
-uvicorn
-git+https://github.com/strawberry-graphql/strawberry.git

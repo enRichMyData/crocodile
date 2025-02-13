@@ -9,19 +9,15 @@ class TableMetadata(BaseModel):
 class DatasetMetadata(BaseModel):
     column: List[TableMetadata]
 
-class DatasetItem(BaseModel):
-    datasetName: str
-    tableName: str
-    header: List[str]
-    rows: List[dict]
-    semanticAnnotations: dict
-    metadata: DatasetMetadata
-    kgReference: str
-
 class TableItem(BaseModel):
     tableName: str
     header: List[str]
-    rows: List[dict]
-    semanticAnnotations: dict
-    metadata: DatasetMetadata
-    kgReference: str
+    rows: List[List[str]]  # 
+    semanticAnnotations: dict  
+    metadata: DatasetMetadata  
+    kgReference: str  
+
+class DatasetItem(BaseModel):
+    datasetName: str
+    tables: List[TableItem]  
+

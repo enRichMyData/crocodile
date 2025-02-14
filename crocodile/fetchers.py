@@ -43,8 +43,6 @@ class CandidateFetcher:
                 async with session.get(url) as response:
                     response.raise_for_status()
                     candidates = await response.json()
-                    print(f"Got {len(candidates)} candidates for {entity_name}")
-                    print(f"candiates: {candidates}")
                     row_tokens = set(tokenize_text(row_text))
                     fetched_candidates = self.crocodile.feature.process_candidates(
                         candidates, entity_name, row_tokens

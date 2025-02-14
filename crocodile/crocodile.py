@@ -1,21 +1,15 @@
 import asyncio
-import hashlib
 import multiprocessing as mp
-import time
-import traceback
-from datetime import datetime
 from typing import List, Optional
-from urllib.parse import quote
 
-import aiohttp
-import pandas as pd
-
-from crocodile import MY_TIMEOUT
 from crocodile.feature import Feature
+
+# 1) Import our newly created helper classes
+from crocodile.fetchers import BowFetcher, CandidateFetcher
 from crocodile.ml import MLWorker
 from crocodile.mongo import MongoCache, MongoConnectionManager, MongoWrapper
+from crocodile.processors import RowBatchProcessor
 from crocodile.trace import TraceWorker
-from crocodile.utils import tokenize_text
 
 
 class Crocodile:
@@ -72,6 +66,11 @@ class Crocodile:
         )
         self.feature = Feature(selected_features)
 
+        # Instantiate our helper objects
+        self._candidate_fetcher = CandidateFetcher(self)
+        self._bow_fetcher = BowFetcher(self)
+        self._row_processor = RowBatchProcessor(self)
+
     def get_db(self):
         """Get MongoDB database connection for current process"""
         client = MongoConnectionManager.get_client(self.mongo_uri)
@@ -92,568 +91,36 @@ class Crocodile:
         db = self.get_db()
         return MongoCache(db, self.bow_cache_collection_name)
 
-    async def _fetch_candidates(self, entity_name, row_text, fuzzy, qid, session):
-        db = self.get_db()
-        timing_trace_collection = db[self.timing_collection_name]
-
-        # Encode the entity_name to handle special characters
-        encoded_entity_name = quote(entity_name)
-        url = (
-            f"{self.entity_retrieval_endpoint}?name={encoded_entity_name}"
-            f"&limit={self.candidate_retrieval_limit}&fuzzy={fuzzy}&token={self.entity_retrieval_token}"
+    # -- Public method that calls the candidate fetcher
+    def fetch_candidates_batch(self, entities, row_texts, fuzzies, qids):
+        """
+        Now we just run the async fetch in a synchronous manner.
+        """
+        return asyncio.run(
+            self._candidate_fetcher.fetch_candidates_batch_async(
+                entities, row_texts, fuzzies, qids
+            )
         )
 
-        if qid:
-            url += f"&ids={qid}"
-        backoff = 1
-        # We'll attempt up to 5 times
-        for attempts in range(5):
-            start_time = time.time()
-            try:
-                async with session.get(url) as response:
-                    response.raise_for_status()
-                    candidates = await response.json()
-                    print(f"Got {len(candidates)} candidates for {entity_name}")
-                    print(f"candiates: {candidates}")
-                    row_tokens = set(tokenize_text(row_text))
-                    fetched_candidates = self.feature.process_candidates(
-                        candidates, entity_name, row_tokens
-                    )
-                    # Ensure all QIDs are included by adding placeholders for missing ones
-                    required_qids = qid.split() if qid else []
-                    existing_qids = {c["id"] for c in fetched_candidates if c.get("id")}
-                    missing_qids = set(required_qids) - existing_qids
-
-                    for missing_qid in missing_qids:
-                        fetched_candidates.append(
-                            {
-                                "id": missing_qid,  # Placeholder for missing QID
-                                "name": None,
-                                "description": None,
-                                "features": None,  # Explicitly set features to None
-                                "is_placeholder": True,  # Explicitly mark as placeholder
-                            }
-                        )
-
-                    # Merge with existing cache if present
-                    cache = self.get_candidate_cache()
-                    cache_key = f"{entity_name}_{fuzzy}"
-                    cached_result = cache.get(cache_key)
-
-                    if cached_result:
-                        # Use a dict keyed by QID to ensure uniqueness
-                        all_candidates = {c["id"]: c for c in cached_result if "id" in c}
-                        for c in fetched_candidates:
-                            if c.get("id"):
-                                all_candidates[c["id"]] = c
-                        merged_candidates = list(all_candidates.values())
-                    else:
-                        merged_candidates = fetched_candidates
-
-                    # Update cache with merged results
-                    cache.put(cache_key, merged_candidates)
-
-                    # Log success
-                    end_time = time.time()
-                    timing_trace_collection.insert_one(
-                        {
-                            "operation_name": "_fetch_candidate",
-                            "url": url,
-                            "start_time": datetime.fromtimestamp(start_time),
-                            "end_time": datetime.fromtimestamp(end_time),
-                            "duration_seconds": end_time - start_time,
-                            "status": "SUCCESS",
-                            "attempt": attempts + 1,
-                        }
-                    )
-
-                    return entity_name, merged_candidates
-            except Exception:
-                end_time = time.time()
-                if attempts == 4:
-                    # Log the error if all attempts failed
-                    self.mongo_wrapper.log_to_db(
-                        "FETCH_CANDIDATES_ERROR",
-                        f"Error fetching candidates for {entity_name}",
-                        traceback.format_exc(),
-                        attempt=attempts + 1,
-                    )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 16)
-
-        # If all attempts fail, return empty
-        return entity_name, []
-
-    async def fetch_candidates_batch_async(self, entities, row_texts, fuzzies, qids):
-        results = {}
-        cache = self.get_candidate_cache()
-        to_fetch = []
-
-        # Decide which entities need to be fetched
-        for entity_name, fuzzy, row_text, qid_str in zip(entities, fuzzies, row_texts, qids):
-            cache_key = f"{entity_name}_{fuzzy}"
-            cached_result = cache.get(cache_key)
-            forced_qids = qid_str.split() if qid_str else []
-
-            if cached_result is not None:
-                if forced_qids:
-                    # Check if all forced QIDs are already present
-                    cached_qids = {c["id"] for c in cached_result if "id" in c}
-                    if all(q in cached_qids for q in forced_qids):
-                        # All required QIDs are present, no fetch needed
-                        results[entity_name] = cached_result
-                    else:
-                        # Forced QIDs not all present, must fetch
-                        to_fetch.append((entity_name, fuzzy, row_text, qid_str))
-                else:
-                    # No forced QIDs, just use cached
-                    results[entity_name] = cached_result
-            else:
-                # No cache entry, must fetch
-                to_fetch.append((entity_name, fuzzy, row_text, qid_str))
-
-        # If nothing to fetch, return what we have
-        if not to_fetch:
-            return self._remove_placeholders(results)
-
-        # Fetch missing data
-        async with aiohttp.ClientSession(
-            timeout=MY_TIMEOUT, connector=aiohttp.TCPConnector(ssl=False, limit=10)
-        ) as session:
-            tasks = []
-            for entity_name, fuzzy, row_text, qid_str in to_fetch:
-                tasks.append(
-                    self._fetch_candidates(entity_name, row_text, fuzzy, qid_str, session)
-                )
-            done = await asyncio.gather(*tasks, return_exceptions=False)
-            for entity_name, candidates in done:
-                results[entity_name] = candidates
-
-        return self._remove_placeholders(results)
-
-    def _remove_placeholders(self, results):
-        """Removes placeholder candidates from the results based on `is_placeholder` attribute."""
-        for entity_name, candidates in results.items():
-            results[entity_name] = [c for c in candidates if not c.get("is_placeholder", False)]
-        return results
-
-    def fetch_candidates_batch(self, entities, row_texts, fuzzies, qids):
-        return asyncio.run(self.fetch_candidates_batch_async(entities, row_texts, fuzzies, qids))
-
-    async def _fetch_bow_for_multiple_qids(self, row_hash, row_text, qids, session):
-        """
-        Entry point for fetching BoW data for multiple QIDs in one row.
-        This function:
-          1) Splits QIDs into smaller batches;
-          2) Fetches each batch sequentially (or you could parallelize);
-          3) Merges results into a single dict;
-          4) Returns bow_results (qid -> bow_info).
-        """
-        db = self.get_db()
-        db[self.timing_collection_name]
-        bow_cache = self.get_bow_cache()
-
-        # 1) Check which QIDs we actually need to fetch
-        to_fetch = []
-        bow_results = {}
-
-        for qid in qids:
-            cache_key = f"{row_hash}_{qid}"
-            cached_result = bow_cache.get(cache_key)
-            if cached_result is not None:
-                bow_results[qid] = cached_result
-            else:
-                to_fetch.append(qid)
-
-        # If everything is cached, no need to query
-        if len(to_fetch) == 0:
-            return bow_results
-
-        # 2) Break the `to_fetch` QIDs into small batches
-        #    We define chunk size = MAX_BOW_BATCH_SIZE (e.g. 50).
-        chunked_qids = [
-            to_fetch[i : i + self.MAX_BOW_BATCH_SIZE]
-            for i in range(0, len(to_fetch), self.MAX_BOW_BATCH_SIZE)
-        ]
-
-        # 3) Fetch each chunk (serially here, but could use asyncio.gather for concurrency)
-        for chunk in chunked_qids:
-            # We define a helper method that tries to fetch BoW data for a single chunk
-            chunk_results = await self._fetch_bow_for_chunk(row_hash, row_text, chunk, session)
-            # Merge the chunk results into bow_results
-            for qid, data in chunk_results.items():
-                bow_results[qid] = data
-
-        return bow_results
-
-    async def _fetch_bow_for_chunk(self, row_hash, row_text, chunk_qids, session):
-        """
-        Fetch BoW data for a *subset* (chunk) of QIDs.
-        Includes the same backoff/retry logic as before, but only
-        for these chunk_qids.
-        """
-        db = self.get_db()
-        timing_trace_collection = db[self.timing_collection_name]
-        bow_cache = self.get_bow_cache()
-
-        # Prepare the results dictionary
-        chunk_bow_results = {}
-
-        # If empty chunk somehow, just return
-        if not chunk_qids:
-            return chunk_bow_results
-
-        url = f"{self.entity_bow_endpoint}?token={self.entity_retrieval_token}"
-        # The payload includes only the chunk of QIDs
-        payload = {"json": {"text": row_text, "qids": chunk_qids}}
-
-        backoff = 1
-        for attempts in range(5):
-            start_time = time.time()
-            try:
-                async with session.post(url, json=payload) as response:
-                    response.raise_for_status()
-                    bow_data = await response.json()
-
-                    # Cache the results and populate
-                    for qid in chunk_qids:
-                        qid_data = bow_data.get(
-                            qid, {"similarity_score": 0.0, "matched_words": []}
-                        )
-                        cache_key = f"{row_hash}_{qid}"
-                        bow_cache.put(cache_key, qid_data)
-                        chunk_bow_results[qid] = qid_data
-
-                    # Log success
-                    end_time = time.time()
-                    timing_trace_collection.insert_one(
-                        {
-                            "operation_name": "_fetch_bow_for_multiple_qids:CHUNK",
-                            "url": url,
-                            "start_time": start_time,
-                            "end_time": end_time,
-                            "duration_seconds": end_time - start_time,
-                            "status": "SUCCESS",
-                            "attempt": attempts + 1,
-                        }
-                    )
-
-                    return chunk_bow_results
-
-            except Exception:
-                end_time = time.time()
-                if attempts == 4:
-                    # Log the error if all attempts failed
-                    self.mongo_wrapper.log_to_db(
-                        "FETCH_BOW_ERROR",
-                        f"Error fetching BoW for row_hash={row_hash}, chunk_qids={chunk_qids}",
-                        traceback.format_exc(),
-                        attempt=attempts + 1,
-                    )
-                # Exponential backoff
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 16)
-
-        # If all attempts fail, return partial or empty
-        return chunk_bow_results
-
+    # -- Public method that calls the bow fetcher
     def fetch_bow_vectors_batch(self, row_hash, row_text, qids):
-        """
-        Public method that logs the request, calls the async method,
-        and returns the final BoW results.
-        """
-        self.get_db()
-
         async def runner():
-            async with aiohttp.ClientSession(
-                timeout=MY_TIMEOUT, connector=aiohttp.TCPConnector(ssl=False, limit=10)
-            ) as session:
-                return await self._fetch_bow_for_multiple_qids(row_hash, row_text, qids, session)
+            return await self._bow_fetcher.fetch_bow_vectors_batch_async(row_hash, row_text, qids)
 
         return asyncio.run(runner())
 
+    # -- Public method that calls our row-batch processor
     def process_rows_batch(self, docs, dataset_name, table_name):
-        db = self.get_db()
-        try:
-            # Step 1: Collect all entities from all rows (batch) for candidate fetch
-            all_entities_to_process = []
-            all_row_texts = []
-            all_fuzzies = []
-            all_qids = []
-            all_row_indices = []
-            all_col_indices = []
-            all_ner_types = []
+        self._row_processor.process_rows_batch(docs, dataset_name, table_name)
 
-            # This list will hold info for each row so we can process them individually later
-            row_data_list = []
-
-            # ---------------------------------------------------------------------
-            # Gather row data and NE columns for candidate fetching
-            # ---------------------------------------------------------------------
-            for doc in docs:
-                row = doc["data"]
-                ne_columns = doc["classified_columns"]["NE"]
-                context_columns = doc.get("context_columns", [])
-                correct_qids = doc.get("correct_qids", {})
-                row_index = doc.get("row_id", None)
-
-                # Build row_text from the context columns
-                raw_context_text = " ".join(
-                    str(row[int(c)])
-                    for c in sorted(context_columns, key=lambda col: str(row[int(col)]))
-                )
-                # Normalize row text: lowercase and remove extra spaces
-                normalized_row_text = raw_context_text.lower()
-                normalized_row_text = " ".join(normalized_row_text.split())
-
-                # Hash the normalized text for caching
-                row_hash = hashlib.sha256(normalized_row_text.encode()).hexdigest()
-
-                # Save row-level info for later
-                row_data_list.append(
-                    (
-                        doc["_id"],
-                        row,
-                        ne_columns,
-                        context_columns,
-                        correct_qids,
-                        row_index,
-                        raw_context_text,
-                        row_hash,
-                    )
-                )
-
-                # For each NE column, prepare entity lookups
-                for c, ner_type in ne_columns.items():
-                    c = str(c)
-                    if int(c) < len(row):
-                        ne_value = row[int(c)]
-                        if ne_value and pd.notna(ne_value):
-                            # Normalize entity value for consistent lookups
-                            ne_value = str(ne_value).strip().replace("_", " ").lower()
-                            correct_qid = correct_qids.get(f"{row_index}-{c}", None)
-
-                            all_entities_to_process.append(ne_value)
-                            all_row_texts.append(raw_context_text)
-                            all_fuzzies.append(False)
-                            all_qids.append(correct_qid)
-                            all_row_indices.append(row_index)
-                            all_col_indices.append(c)
-                            all_ner_types.append(ner_type)
-
-            # ---------------------------------------------------------------------
-            # Fetch candidates (batch) for all entities
-            # ---------------------------------------------------------------------
-            # 1. Initial fetch
-            candidates_results = self.fetch_candidates_batch(
-                all_entities_to_process, all_row_texts, all_fuzzies, all_qids
-            )
-
-            # ---------------------------------------------------------------------
-            # 2. Fuzzy retry for items that returned exactly 1 candidate
-            # ---------------------------------------------------------------------
-            entities_to_retry = []
-            row_texts_retry = []
-            fuzzies_retry = []
-            qids_retry = []
-            row_indices_retry = []
-            col_indices_retry = []
-            ner_types_retry = []
-
-            for ne_value, r_index, c_index, n_type in zip(
-                all_entities_to_process, all_row_indices, all_col_indices, all_ner_types
-            ):
-                candidates = candidates_results.get(ne_value, [])
-                # If there's exactly 1 candidate, let's attempt a fuzzy retry
-                if len(candidates) <= 1:
-                    entities_to_retry.append(ne_value)
-                    idx = all_entities_to_process.index(ne_value)
-                    row_texts_retry.append(all_row_texts[idx])
-                    fuzzies_retry.append(True)
-                    correct_qid = all_qids[idx]
-                    qids_retry.append(correct_qid)
-                    row_indices_retry.append(r_index)
-                    col_indices_retry.append(c_index)
-                    ner_types_retry.append(n_type)
-                else:
-                    # Keep the existing candidates
-                    candidates_results[ne_value] = candidates
-
-            if entities_to_retry:
-                retry_results = self.fetch_candidates_batch(
-                    entities_to_retry, row_texts_retry, fuzzies_retry, qids_retry
-                )
-                for ne_value in entities_to_retry:
-                    candidates_results[ne_value] = retry_results.get(ne_value, [])
-
-            # ---------------------------------------------------------------------
-            # Process each row individually (including BoW retrieval for that row)
-            # ---------------------------------------------------------------------
-            for (
-                doc_id,
-                row,
-                ne_columns,
-                context_columns,
-                correct_qids,
-                row_index,
-                raw_context_text,
-                row_hash,
-            ) in row_data_list:
-                # -------------------------------------------------------------
-                # 1. Gather the QIDs relevant to this row
-                # -------------------------------------------------------------
-                row_qids = []
-                for c, ner_type in ne_columns.items():
-                    if int(c) < len(row):
-                        ne_value = row[int(c)]
-                        if ne_value and pd.notna(ne_value):
-                            ne_value = str(ne_value).strip().replace("_", " ").lower()
-                            candidates = candidates_results.get(ne_value, [])
-                            for cand in candidates:
-                                if cand["id"]:
-                                    row_qids.append(cand["id"])
-                row_qids = list(set(q for q in row_qids if q))
-
-                # -------------------------------------------------------------
-                # 2. Fetch BoW vectors for this row’s QIDs
-                # -------------------------------------------------------------
-                if row_qids and self.entity_bow_endpoint and self.entity_retrieval_token:
-                    bow_data = self.fetch_bow_vectors_batch(row_hash, raw_context_text, row_qids)
-                else:
-                    bow_data = {}
-
-                # -------------------------------------------------------------
-                # 3. Build final linked_entities + training_candidates
-                # -------------------------------------------------------------
-                linked_entities = {}
-                training_candidates_by_ne_column = {}
-
-                for c, ner_type in ne_columns.items():
-                    c = str(c)
-                    if int(c) < len(row):
-                        ne_value = row[int(c)]
-                        if ne_value and pd.notna(ne_value):
-                            ne_value = str(ne_value).strip().replace("_", " ").lower()
-                            candidates = candidates_results.get(ne_value, [])
-
-                            # Assign the BoW score + numeric NER type
-                            for cand in candidates:
-                                qid = cand["id"]
-                                cand["features"]["bow_similarity"] = bow_data.get(qid, {}).get(
-                                    "similarity_score", 0.0
-                                )
-                                cand["features"][
-                                    "column_NERtype"
-                                ] = self.feature.map_nertype_to_numeric(ner_type)
-
-                            # 4. Rank candidates by feature scoring
-                            ranked_candidates = self.rank_with_feature_scoring(candidates)
-
-                            # 4.1 Ensure they are sorted by 'score' descending
-                            ranked_candidates.sort(key=lambda x: x.get("score", 0.0), reverse=True)
-
-                            # If there's a correct_qid, ensure it appears in the top training slice
-                            correct_qid = correct_qids.get(f"{row_index}-{c}", None)
-                            if correct_qid and correct_qid not in [
-                                rc["id"]
-                                for rc in ranked_candidates[: self.max_training_candidates]
-                            ]:
-                                correct_candidate = next(
-                                    (x for x in ranked_candidates if x["id"] == correct_qid), None
-                                )
-                                if correct_candidate:
-                                    top_slice = ranked_candidates[
-                                        : self.max_training_candidates - 1
-                                    ]
-                                    top_slice.append(correct_candidate)
-                                    ranked_candidates = top_slice
-                                    # Re-sort after adding the correct candidate
-                                    ranked_candidates.sort(
-                                        key=lambda x: x.get("score", 0.0), reverse=True
-                                    )
-
-                            el_results_candidates = ranked_candidates[: self.max_candidates]
-                            linked_entities[c] = el_results_candidates
-                            training_candidates_by_ne_column[c] = ranked_candidates[
-                                : self.max_training_candidates
-                            ]
-
-                # -------------------------------------------------------------
-                # 5. Save to DB: training candidates + final EL results
-                # -------------------------------------------------------------
-                self.save_candidates_for_training(
-                    training_candidates_by_ne_column, dataset_name, table_name, row_index
-                )
-                db[self.input_collection].update_one(
-                    {"_id": doc_id}, {"$set": {"el_results": linked_entities, "status": "DONE"}}
-                )
-
-            # Optionally track speed after full batch
-            self.mongo_wrapper.log_processing_speed(dataset_name, table_name)
-
-        except Exception:
-            self.mongo_wrapper.log_to_db(
-                "ERROR", "Error processing batch of rows", traceback.format_exc()
-            )
-
-    def score_candidate(self, candidate):
-        """
-        Equal-weight formula across key features [0..1].
-        Includes 'popularity' as well.
-        Result is simply the mean of all chosen features, each in [0..1].
-        """
-        feat_names = [
-            "ed_score",
-            "jaccard_score",
-            "jaccardNgram_score",
-            "desc",
-            "descNgram",
-            "bow_similarity",
-            "popularity",
-        ]
-
-        # Collect them, defaulting to 0.0 if missing
-        feats = [candidate["features"].get(fname, 0.0) for fname in feat_names]
-
-        # Just compute the average
-        if not feats:
-            total_score = 0.0
-        else:
-            total_score = sum(feats) / len(feats)
-
-        candidate["score"] = total_score
-        return candidate
-
-    def rank_with_feature_scoring(self, candidates):
-        scored_candidates = [self.score_candidate(c) for c in candidates]
-        return sorted(scored_candidates, key=lambda x: x["score"], reverse=True)
-
-    def save_candidates_for_training(
-        self, candidates_by_ne_column, dataset_name, table_name, row_index
-    ):
-        db = self.get_db()
-        training_collection = db[self.training_collection_name]
-        training_document = {
-            "dataset_name": dataset_name,
-            "table_name": table_name,
-            "row_id": row_index,
-            "candidates": candidates_by_ne_column,
-            "ml_ranked": False,
-        }
-        training_collection.insert_one(training_document)
-
+    # The rest (claim_todo_batch, worker, run) remain basically the same
     def claim_todo_batch(self, input_collection, batch_size=10):
-        """
-        Atomically claims a batch of TODO documents by setting them to DOING,
-        and returns the full documents so we don't have to fetch them again.
-        """
         docs = []
         for _ in range(batch_size):
             doc = input_collection.find_one_and_update(
                 {"status": "TODO"}, {"$set": {"status": "DOING"}}
             )
             if doc is None:
-                # No more TODO docs
                 break
             docs.append(doc)
         return docs
@@ -663,21 +130,17 @@ class Crocodile:
         input_collection = db[self.input_collection]
 
         while True:
-            # Atomically claim a batch of documents (full docs, not partial)
             todo_docs = self.claim_todo_batch(input_collection)
             if not todo_docs:
                 print("No more tasks to process.")
                 break
 
-            # Group the claimed documents by (dataset_name, table_name)
             tasks_by_table = {}
             for doc in todo_docs:
                 dataset_name = doc["dataset_name"]
                 table_name = doc["table_name"]
-                # Accumulate full docs in a list
                 tasks_by_table.setdefault((dataset_name, table_name), []).append(doc)
 
-            # Process each group as a batch
             for (dataset_name, table_name), docs in tasks_by_table.items():
                 self.process_rows_batch(docs, dataset_name, table_name)
 

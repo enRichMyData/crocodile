@@ -106,7 +106,6 @@ class Crocodile:
         if qid:
             url += f"&ids={qid}"
         backoff = 1
-
         # We'll attempt up to 5 times
         for attempts in range(5):
             start_time = time.time()
@@ -114,11 +113,12 @@ class Crocodile:
                 async with session.get(url) as response:
                     response.raise_for_status()
                     candidates = await response.json()
+                    print(f"Got {len(candidates)} candidates for {entity_name}")
+                    print(f"candiates: {candidates}")
                     row_tokens = set(tokenize_text(row_text))
                     fetched_candidates = self.feature.process_candidates(
                         candidates, entity_name, row_tokens
                     )
-
                     # Ensure all QIDs are included by adding placeholders for missing ones
                     required_qids = qid.split() if qid else []
                     existing_qids = {c["id"] for c in fetched_candidates if c.get("id")}

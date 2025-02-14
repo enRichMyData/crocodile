@@ -178,7 +178,7 @@ class Crocodile:
             p.start()
             processes.append(p)
 
-        trace_thread = TraceWorker(
+        trace_work = TraceWorker(
             self.mongo_uri,
             self.db_name,
             self.input_collection,
@@ -186,8 +186,8 @@ class Crocodile:
             self.table_trace_collection_name,
             self.timing_collection_name,
         )
-        trace_thread.start()
-        processes.append(trace_thread)
+        trace_work.start()
+        processes.append(trace_work)
 
         for p in processes:
             p.join()

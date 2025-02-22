@@ -75,11 +75,13 @@ class MongoWrapper:
         db_name: str,
         timing_collection_name: str = "timing_trace",
         error_log_collection_name: str = "error_log",
+        table_trace_collection_name: str = "table_trace",
     ) -> None:
         self.mongo_uri: str = mongo_uri
         self.db_name: str = db_name
         self.timing_collection_name: str = timing_collection_name
         self.error_log_collection_name: str = error_log_collection_name
+        self.table_trace_collection_name: str = table_trace_collection_name
         # Note: self.table_trace_collection_name is referenced later in log_processing_speed.
         # It should be defined (or set externally) if needed.
 

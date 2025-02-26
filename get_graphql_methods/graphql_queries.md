@@ -101,6 +101,84 @@
 }
 ```
 
+## Upload CSV File and Metadata JSON
+## Query to get dataset metadata
+
+```query GetDatasetMetadata {
+  getDatasetMetadata(datasetName: "dataset_name") {
+    datasetName
+    tableName
+    classifiedColumns
+    totalRows
+    createdAt
+    additionalInfo
+  }
+}
+```
+
+## Query to get table data with semantic annotations
+
+```query GetTableWithAnnotations {
+  getTableWithAnnotations(
+    datasetName: "dataset_name", 
+    tableName: "table_name", 
+    pageSize: 10
+  ) {
+    rowId
+    data
+    semanticAnnotations {
+      entityId
+      entityType
+      entityName
+      confidenceScore
+      sourceColumn
+      rowIndex
+    }
+  }
+}
+```
+
+## Query to get dataset status 
+```query GetDatasetStatus {
+  getDatasetStatus(datasetName: "dataset_name")
+}
+```
+
+## Query to get all datasets with pagination 
+
+```query GetDatasets {
+  getDatasets(pageSize: 10) {
+    nodes {
+      datasetName
+      tables
+      status
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+```
+
+## Query to filter datasets by name 
+
+```query GetFilteredDatasets {
+  getDatasets(datasetName: "dataset_name") {
+    nodes {
+      datasetName
+      tables
+      status
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+```
+
+
 ---
 
 ### 📌 Notes:

@@ -1,5 +1,5 @@
 # Use an official Python runtime as a parent image
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 # Install Git and any other necessary packages
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*

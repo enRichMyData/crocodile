@@ -18,4 +18,4 @@ COPY . .
 EXPOSE 8006
 
 # Run the FastAPI/GraphQL server using uvicorn.
-CMD ["uvicorn", "crocodile_upload:app", "--host", "0.0.0.0", "--port", "8006"]
+CMD ["uvicorn", "crocodile_upload_file:app", "--host", "0.0.0.0", "--port", "8006"]

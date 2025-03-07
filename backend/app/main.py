@@ -1,11 +1,20 @@
 from fastapi import FastAPI
 from config import settings
 from endpoints.crocodile_api import router
+from strawberry.fastapi import GraphQLRouter
+ 
 
-app = FastAPI(title=settings.FASTAPI_APP_NAME, debug=settings.DEBUG)
+app = FastAPI(
+    title=settings.FASTAPI_APP_NAME, 
+    description="API for dataset management and entity linking",
+    debug=settings.DEBUG
+)
 
-# Include the crocodile router
+# Include the existing REST API router
 app.include_router(router)
+
+
+app.include_router(prefix="/graphql")
 
 @app.get("/")
 def read_root():
@@ -15,4 +24,9 @@ def read_root():
         "database_url": settings.MONGO_URI,
         "mongo_server_port": settings.MONGO_SERVER_PORT,
         "fastapi_server_port": settings.FASTAPI_SERVER_PORT,
+        "endpoints": {
+            "REST API": "/",
+            "GraphQL": "/graphql",
+            "GraphiQL Interface": "/graphql"
+        }
     }

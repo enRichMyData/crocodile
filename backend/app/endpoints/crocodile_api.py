@@ -3,7 +3,7 @@ from pymongo.database import Database
 from typing import List, Optional
 from dependencies import get_db
 from schemas import DatasetItem, TableItem  # Import models from schemas 
-import pandas as pd
+#import pandas as pd
 import json
 from io import StringIO
 from bson import ObjectId

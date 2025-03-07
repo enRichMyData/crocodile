@@ -347,9 +347,9 @@ async def delete_dataset(datasetName: str, db: Database = Depends(get_db)):
 #             "tableName": tableName,
 #             "datasetName": datasetName
 #         }
-        
-    # except Exception as e:
-    #     raise HTTPException(status_code=500, detail=f"Error processing JSON: {str(e)}")
+       
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Error processing JSON: {str(e)}")
 
 @router.post("/dataset/{datasetName}/table", status_code=status.HTTP_201_CREATED)
 async def add_table(datasetName: str, table: TableItem, db: Database = Depends(get_db)):

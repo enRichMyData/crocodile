@@ -12,14 +12,15 @@ services:
 
   fastapi:
     build:
-      context: ./backend  # Path to the FastAPI backend
-      dockerfile: Dockerfile  # Use the Dockerfile in the backend folder
+      context: .  # Path to the FastAPI backend
+      dockerfile: backend/Dockerfile  # Use the Dockerfile in the backend folder
     container_name: crocodile_fastapi
     ports:
       - "${FASTAPI_SERVER_PORT:-8000}:8000"  # Default to 8000 if not set
     volumes:
     # Mount the app directory to the container
       - ./backend/app:/app
+      - ./crocodile:/app/crocodile
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     env_file:
       - .env  # Load environment variables from .env file

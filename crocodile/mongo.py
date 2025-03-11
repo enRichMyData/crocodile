@@ -75,14 +75,14 @@ class MongoWrapper:
         db_name: str,
         timing_collection_name: str = "timing_trace",
         error_log_collection_name: str = "error_log",
+        table_trace_collection_name: str = "table_trace"
     ) -> None:
         self.mongo_uri: str = mongo_uri
         self.db_name: str = db_name
         self.timing_collection_name: str = timing_collection_name
         self.error_log_collection_name: str = error_log_collection_name
-        # Note: self.table_trace_collection_name is referenced later in log_processing_speed.
-        # It should be defined (or set externally) if needed.
-
+        self.table_trace_collection_name = table_trace_collection_name
+      
     def get_db(self) -> Database:
         client: MongoClient = MongoConnectionManager.get_client(self.mongo_uri)
         return client[self.db_name]
@@ -258,8 +258,7 @@ class MongoWrapper:
 
     def log_processing_speed(self, dataset_name: str, table_name: str) -> None:
         db: Database = self.get_db()
-        # NOTE: self.table_trace_collection_name should be defined; if not, adjust as needed.
-        table_trace_collection: Collection = db[self.table_trace_collection_name]  # type: ignore
+        table_trace_collection: Collection = db[self.table_trace_collection_name]  
         trace: Optional[Dict[str, Any]] = table_trace_collection.find_one(
             {"dataset_name": dataset_name, "table_name": table_name}
         )

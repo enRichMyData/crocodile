@@ -5,12 +5,19 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Copy the app files directly to the root of the container's working directory
-COPY ./app /app
+COPY ./backend/app /app
 
 # Install pip and any dependencies from the requirements file
-COPY requirements.txt .
+COPY ./backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN rm requirements.txt
+
+# Copy project configuration and requirements from the repository root
+COPY pyproject.toml .
+COPY ./crocodile ./crocodile
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -e ".[app]"
 
 # Expose the port that FastAPI will use
 EXPOSE 8000

@@ -13,18 +13,22 @@ from crocodile.trace import TraceWorker
 
 
 class Crocodile:
+    """
+    Crocodile entity linking system with hidden MongoDB configuration.
+    """
+    _MONGO_URI = "mongodb://mongodb:27017/"
+    _DB_NAME = "crocodile_db"
+    _TABLE_TRACE_COLLECTION = "table_trace"
+    _DATASET_TRACE_COLLECTION = "dataset_trace"
+    _INPUT_COLLECTION = "input_data"
+    _TRAINING_COLLECTION = "training_data"
+    _ERROR_LOG_COLLECTION = "error_logs"
+    _TIMING_COLLECTION = "timing_trace"
+    _CACHE_COLLECTION = "candidate_cache"
+    _BOW_CACHE_COLLECTION = "bow_cache"
+
     def __init__(
         self,
-        mongo_uri: str = "mongodb://localhost:27017/",
-        db_name: str = "crocodile_db",
-        table_trace_collection_name: str = "table_trace",
-        dataset_trace_collection_name: str = "dataset_trace",
-        input_collection: str = "input_data",
-        training_collection_name: str = "training_data",
-        error_log_collection_name: str = "error_logs",
-        timing_collection_name: str = "timing_trace",
-        cache_collection_name: str = "candidate_cache",
-        bow_cache_collection_name: str = "bow_cache",
         max_workers: Optional[int] = None,
         max_candidates: int = 5,
         max_training_candidates: int = 10,
@@ -39,16 +43,6 @@ class Crocodile:
         top_n_for_type_freq: int = 3,
         max_bow_batch_size: int = 100,
     ) -> None:
-        self.mongo_uri = mongo_uri
-        self.db_name = db_name
-        self.input_collection = input_collection
-        self.table_trace_collection_name = table_trace_collection_name
-        self.dataset_trace_collection_name = dataset_trace_collection_name
-        self.training_collection_name = training_collection_name
-        self.error_log_collection_name = error_log_collection_name
-        self.timing_collection_name = timing_collection_name
-        self.cache_collection_name = cache_collection_name
-        self.bow_cache_collection_name = bow_cache_collection_name
         self.max_workers = max_workers or mp.cpu_count()
         self.max_candidates = max_candidates
         self.max_training_candidates = max_training_candidates
@@ -62,7 +56,7 @@ class Crocodile:
         self.top_n_for_type_freq = top_n_for_type_freq
         self.MAX_BOW_BATCH_SIZE = max_bow_batch_size
         self.mongo_wrapper = MongoWrapper(
-            mongo_uri, db_name, timing_collection_name, error_log_collection_name
+            self._MONGO_URI, self._DB_NAME, self._TIMING_COLLECTION, self._ERROR_LOG_COLLECTION
         )
         self.feature = Feature(selected_features)
 
@@ -73,8 +67,8 @@ class Crocodile:
 
     def get_db(self):
         """Get MongoDB database connection for current process"""
-        client = MongoConnectionManager.get_client(self.mongo_uri)
-        return client[self.db_name]
+        client = MongoConnectionManager.get_client(self._MONGO_URI)
+        return client[self._DB_NAME]
 
     def __del__(self):
         """Cleanup when instance is destroyed"""
@@ -85,35 +79,27 @@ class Crocodile:
 
     def get_candidate_cache(self):
         db = self.get_db()
-        return MongoCache(db, self.cache_collection_name)
+        return MongoCache(db, self._CACHE_COLLECTION)
 
     def get_bow_cache(self):
         db = self.get_db()
-        return MongoCache(db, self.bow_cache_collection_name)
+        return MongoCache(db, self._BOW_CACHE_COLLECTION)
 
-    # -- Public method that calls the candidate fetcher
     def fetch_candidates_batch(self, entities, row_texts, fuzzies, qids):
-        """
-        Now we just run the async fetch in a synchronous manner.
-        """
         return asyncio.run(
             self._candidate_fetcher.fetch_candidates_batch_async(
                 entities, row_texts, fuzzies, qids
             )
         )
 
-    # -- Public method that calls the bow fetcher
     def fetch_bow_vectors_batch(self, row_hash, row_text, qids):
         async def runner():
             return await self._bow_fetcher.fetch_bow_vectors_batch_async(row_hash, row_text, qids)
-
         return asyncio.run(runner())
 
-    # -- Public method that calls our row-batch processor
     def process_rows_batch(self, docs, dataset_name, table_name):
         self._row_processor.process_rows_batch(docs, dataset_name, table_name)
 
-    # The rest (claim_todo_batch, worker, run) remain basically the same
     def claim_todo_batch(self, input_collection, batch_size=10):
         docs = []
         for _ in range(batch_size):
@@ -127,7 +113,7 @@ class Crocodile:
 
     def worker(self):
         db = self.get_db()
-        input_collection = db[self.input_collection]
+        input_collection = db[self._INPUT_COLLECTION]
 
         while True:
             todo_docs = self.claim_todo_batch(input_collection)
@@ -146,7 +132,7 @@ class Crocodile:
 
     def run(self):
         db = self.get_db()
-        input_collection = db[self.input_collection]
+        input_collection = db[self._INPUT_COLLECTION]
 
         total_rows = self.mongo_wrapper.count_documents(input_collection, {"status": "TODO"})
         if total_rows == 0:
@@ -162,13 +148,13 @@ class Crocodile:
 
         for _ in range(self.ml_ranking_workers):
             p = MLWorker(
-                db_uri=self.mongo_uri,
-                db_name=self.db_name,
-                table_trace_collection_name=self.table_trace_collection_name,
-                training_collection_name=self.training_collection_name,
-                timing_collection_name=self.timing_collection_name,
-                error_log_collection_name=self.error_log_collection_name,
-                input_collection=self.input_collection,
+                db_uri=self._MONGO_URI,
+                db_name=self._DB_NAME,
+                table_trace_collection_name=self._TABLE_TRACE_COLLECTION,
+                training_collection_name=self._TRAINING_COLLECTION,
+                timing_collection_name=self._TIMING_COLLECTION,
+                error_log_collection_name=self._ERROR_LOG_COLLECTION,
+                input_collection=self._INPUT_COLLECTION,
                 model_path=self.model_path,
                 batch_size=self.batch_size,
                 max_candidates=self.max_candidates,
@@ -179,12 +165,12 @@ class Crocodile:
             processes.append(p)
 
         trace_work = TraceWorker(
-            self.mongo_uri,
-            self.db_name,
-            self.input_collection,
-            self.dataset_trace_collection_name,
-            self.table_trace_collection_name,
-            self.timing_collection_name,
+            self._MONGO_URI,
+            self._DB_NAME,
+            self._INPUT_COLLECTION,
+            self._DATASET_TRACE_COLLECTION,
+            self._TABLE_TRACE_COLLECTION,
+            self._TIMING_COLLECTION,
         )
         trace_work.start()
         processes.append(trace_work)

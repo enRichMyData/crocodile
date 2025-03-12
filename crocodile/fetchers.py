@@ -25,7 +25,7 @@ class CandidateFetcher:
         This used to be Crocodile._fetch_candidates. Logic unchanged.
         """
         db = self.crocodile.get_db()
-        timing_trace_collection = db[self.crocodile.timing_collection_name]
+        timing_trace_collection = db[self.crocodile._TIMING_COLLECTION]
 
         encoded_entity_name = quote(entity_name)
         url = (
@@ -204,7 +204,7 @@ class BowFetcher:
         This used to be Crocodile._fetch_bow_for_chunk.
         """
         db = self.crocodile.get_db()
-        timing_trace_collection = db[self.crocodile.timing_collection_name]
+        timing_trace_collection = db[self.crocodile._TIMING_COLLECTION]
         bow_cache = self.crocodile.get_bow_cache()
 
         chunk_bow_results = {}

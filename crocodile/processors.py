@@ -232,7 +232,7 @@ class RowBatchProcessor:
             self.save_candidates_for_training(
                 training_candidates_by_ne_column, dataset_name, table_name, row_index
             )
-            db[self.crocodile.input_collection].update_one(
+            db[self.crocodile._INPUT_COLLECTION].update_one(
                 {"_id": doc_id}, {"$set": {"el_results": linked_entities, "status": "DONE"}}
             )
 
@@ -353,7 +353,7 @@ class RowBatchProcessor:
         This used to be Crocodile.save_candidates_for_training.
         """
         db = self.crocodile.get_db()
-        training_collection = db[self.crocodile.training_collection_name]
+        training_collection = db[self.crocodile._TRAINING_COLLECTION]
         training_document = {
             "dataset_name": dataset_name,
             "table_name": table_name,

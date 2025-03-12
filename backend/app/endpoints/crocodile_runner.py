@@ -10,10 +10,6 @@ def run_crocodile_task(dataset_name: str, table_name: str, db: Database):
     try:
         # Create an instance of Crocodile
         crocodile_instance = Crocodile(
-            mongo_uri="mongodb://mongodb:27017/",
-            db_name="crocodile_db",
-            table_trace_collection_name="table_trace",
-            dataset_trace_collection_name="dataset_trace",
             max_candidates=3,
             entity_retrieval_endpoint=os.environ["ENTITY_RETRIEVAL_ENDPOINT"],
             entity_bow_endpoint=os.environ["ENTITY_BOW_ENDPOINT"],

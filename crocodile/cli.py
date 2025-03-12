@@ -3,32 +3,75 @@ import argparse
 import os
 import json
 import pandas as pd
-from pymongo import MongoClient
+from pymongo import MongoClient, ASCENDING
 from crocodile import Crocodile
+
+def ensure_indexes(db):
+    """Ensures MongoDB indexes exist for performance and uniqueness."""
+    db["input_data"].create_index(
+        [("dataset_name", ASCENDING), ("table_name", ASCENDING), ("row_id", ASCENDING)], unique=True
+    )
+    db["table_trace"].create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True)
+    db["dataset_trace"].create_index([("dataset_name", ASCENDING)], unique=True)
+    db["process_queue"].create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True)
+    db["process_queue"].create_index([("status", ASCENDING)])  # Faster retrieval of pending tasks
 
 def onboard_data(db, df, dataset_name, table_name, classified):
     """
-    Onboards data into MongoDB. It stores the CSV header in the table_trace collection,
-    and for each row creates a document in input_data that contains the original row data,
-    the classified columns (for NE and LIT), and other metadata.
+    Onboards data into MongoDB. It stores the CSV header in `table_trace`,
+    creates dataset tracking in `dataset_trace`, and adds rows to `input_data`.
     """
     input_collection = db["input_data"]
     table_trace_collection = db["table_trace"]
-    
-    # Save header info in table_trace
-    table_trace_collection.insert_one({
-        "dataset_name": dataset_name,
-        "table_name": table_name,
-        "header": list(df.columns),
-        "total_rows": len(df),
-        "processed_rows": 0,
-        "status": "PENDING"
-    })
-    
+    dataset_trace_collection = db["dataset_trace"]
+    process_queue = db["process_queue"]
+
+    # Ensure table trace entry exists
+    table_trace_collection.update_one(
+        {"dataset_name": dataset_name, "table_name": table_name},
+        {
+            "$setOnInsert": {
+                "header": list(df.columns),
+                "total_rows": len(df),
+                "processed_rows": 0,
+                "status": "PENDING"
+            }
+        },
+        upsert=True
+    )
+
+    # Ensure dataset trace entry exists
+    dataset_trace_collection.update_one(
+        {"dataset_name": dataset_name},
+        {
+            "$setOnInsert": {
+                "total_tables": 0,
+                "processed_tables": 0,
+                "total_rows": 0,
+                "processed_rows": 0,
+                "status": "PENDING"
+            }
+        },
+        upsert=True
+    )
+
+    # Ensure process queue entry exists
+    process_queue.update_one(
+        {"dataset_name": dataset_name, "table_name": table_name},
+        {
+            "$setOnInsert": {
+                "status": "PENDING",
+                "total_rows": len(df),
+                "processed_rows": 0
+            }
+        },
+        upsert=True
+    )
+
     # Define context columns as string indices
     context_columns = [str(i) for i in range(len(df.columns))]
-    
-    # Insert each row as a document
+
+    # Insert rows into input_data
     for index, row in df.iterrows():
         document = {
             "dataset_name": dataset_name,
@@ -45,7 +88,70 @@ def onboard_data(db, df, dataset_name, table_name, classified):
             "status": "TODO"
         }
         input_collection.insert_one(document)
-    print(f"Data onboarded for dataset '{dataset_name}' and table '{table_name}'.")
+    
+    # Update dataset trace with new row and table count
+    dataset_trace_collection.update_one(
+        {"dataset_name": dataset_name},
+        {
+            "$inc": {
+                "total_tables": 1,
+                "total_rows": len(df)
+            }
+        }
+    )
+
+    print(f"✅ Data onboarded for dataset '{dataset_name}' and table '{table_name}'.")
+
+def fetch_el_results(input_collection, dataset_name, table_name):
+    """
+    Retrieves processed documents from MongoDB including `el_results`.
+    Extracts the first candidate per NE column (if available).
+    """
+    docs = list(input_collection.find({"dataset_name": dataset_name, "table_name": table_name}))
+    
+    if not docs:
+        print(f"⚠️ No processed documents found for {dataset_name}/{table_name}.")
+        return [], []
+
+    # Retrieve header info from table_trace
+    table_trace = input_collection.database["table_trace"].find_one(
+        {"dataset_name": dataset_name, "table_name": table_name}
+    )
+    header = table_trace.get("header") if table_trace else [f"col_{i}" for i in range(len(docs[0]["data"]))]
+
+    # Identify NE columns
+    ne_cols = docs[0]["classified_columns"].get("NE", {})  # Get NE column indices (keys are strings)
+    print(docs[0])
+    extracted_rows = []
+    for doc in docs:
+        row_data = dict(zip(header, doc["data"]))  # Original row data as dict
+        el_results = doc.get("el_results", {})  # Retrieved entity linking results
+
+        # Extract first candidate for each NE column
+        for col_idx, col_type in ne_cols.items():
+            try:
+                col_index = int(col_idx)
+                col_header = header[col_index]  # Get column name
+            except (ValueError, IndexError):
+                col_header = f"col_{col_idx}"  # Fallback for missing columns
+
+            # Default field names for annotation
+            id_field = f"{col_header}_id"
+            name_field = f"{col_header}_name"
+            desc_field = f"{col_header}_desc"
+            score_field = f"{col_header}_score"
+
+            # Extract first candidate from el_results (if available)
+            candidate = el_results.get(col_idx, [{}])[0]  # Default to empty dict if missing
+        
+            row_data[id_field] = candidate.get("id", "")
+            row_data[name_field] = candidate.get("name", "")
+            row_data[desc_field] = candidate.get("description", "")
+            row_data[score_field] = candidate.get("score", "")
+
+        extracted_rows.append(row_data)
+
+    return extracted_rows, header
 
 def main():
     parser = argparse.ArgumentParser(
@@ -54,23 +160,25 @@ def main():
     parser.add_argument("--csv", type=str, required=True, help="Path to the input CSV file.")
     parser.add_argument("--classified", type=str, required=True,
                         help="Path to the JSON file containing classified columns for NE and LIT types.")
+    parser.add_argument("--db-uri", type=str, default="mongodb://localhost:27017/",
+                        help="MongoDB URI to use for connections (override the default for non-Docker env)")
     args = parser.parse_args()
     
     # Load CSV file
     try:
         df = pd.read_csv(args.csv)
-        print(f"Loaded CSV file '{args.csv}' with {len(df)} rows.")
+        print(f"📂 Loaded CSV file '{args.csv}' with {len(df)} rows.")
     except Exception as e:
-        print(f"Error loading CSV file: {e}")
+        print(f"❌ Error loading CSV file: {e}")
         return
 
     # Load classified columns from JSON file
     try:
         with open(args.classified, "r") as f:
             classified = json.load(f)
-        print(f"Loaded classified columns from '{args.classified}'.")
+        print(f"📂 Loaded classified columns from '{args.classified}'.")
     except Exception as e:
-        print(f"Error loading classified columns JSON file: {e}")
+        print(f"❌ Error loading classified columns JSON file: {e}")
         return
 
     # Use default dataset name and derive table name from CSV filename
@@ -78,94 +186,44 @@ def main():
     table_name = os.path.splitext(os.path.basename(args.csv))[0]
     
     # Connect to MongoDB
-    client = MongoClient("mongodb://mongodb:27017/")
+    print(f"🔗 Connecting to MongoDB at '{args.db_uri}'...")
+    client = MongoClient(args.db_uri)
     db = client["crocodile_db"]
 
-    # (Optional) Clean up: drop all collections except caches.
+    # Ensure MongoDB indexes exist
+    ensure_indexes(db)
+
+    # Drop all collections except 'bow_cache' and 'candidate_cache'
     collections_to_keep = ["bow_cache", "candidate_cache"]
     for collection in db.list_collection_names():
         if collection not in collections_to_keep:
             db[collection].drop()
-            print(f"Dropped collection: {collection}")
-    
-    # Onboard the CSV data into MongoDB
+            print(f"🗑️ Dropped collection: {collection}")
+
+    # Onboard data into MongoDB
     onboard_data(db, df, dataset_name, table_name, classified)
-    
-    # Retrieve endpoints and tokens from environment variables
-    entity_retrieval_endpoint = os.environ.get("ENTITY_RETRIEVAL_ENDPOINT")
-    entity_bow_endpoint = os.environ.get("ENTITY_BOW_ENDPOINT")
-    entity_retrieval_token = os.environ.get("ENTITY_RETRIEVAL_TOKEN")
-    if not (entity_retrieval_endpoint and entity_bow_endpoint and entity_retrieval_token):
-        print("Warning: Missing one or more entity service endpoints/tokens from environment variables.")
-    
-    # Create an instance of Crocodile
-    crocodile_instance = Crocodile(
-        max_candidates=3,
-        entity_retrieval_endpoint=entity_retrieval_endpoint,
-        entity_bow_endpoint=entity_bow_endpoint,
-        entity_retrieval_token=entity_retrieval_token,
-        max_workers=8,
-        candidate_retrieval_limit=10,
-        model_path="./crocodile/models/default.h5"
-    )
-    
-    # Run the entity linking process
-    print("Starting the entity linking process...")
+
+    # Initialize and run Crocodile
+    crocodile_instance = Crocodile(mongo_uri=args.db_uri)
+    print("🚀 Starting the entity linking process...")
     crocodile_instance.run()
-    print("Entity linking process completed.")
-    
-    # Retrieve processed documents from MongoDB
+    print("✅ Entity linking process completed.")
+
+    # Retrieve processed documents from MongoDB including `el_results`
     input_collection = db["input_data"]
-    docs = list(input_collection.find({"dataset_name": dataset_name, "table_name": table_name}))
-    
-    # Retrieve header info from table_trace
-    table_trace = db["table_trace"].find_one({"dataset_name": dataset_name, "table_name": table_name})
-    header = table_trace.get("header") if table_trace else [f"col_{i}" for i in range(len(df.columns))]
-    
-    # Determine which columns are NE from the classified JSON
-    ne_cols = classified.get("NE", {})  # keys are string indices
-    
-    annotated_rows = []
-    for doc in docs:
-        # Map original row data using the header
-        row_data = doc.get("data", [])
-        row_dict = dict(zip(header, row_data))
-        
-        # For each NE column, add annotation columns from el_results
-        el_results = doc.get("el_results", {})
-        for col_idx in ne_cols:
-            # Get the column header name for the NE column
-            try:
-                col_index = int(col_idx)
-                col_header = header[col_index]
-            except (ValueError, IndexError):
-                col_header = f"col_{col_idx}"
-            
-            # Default field names for annotation
-            id_field = f"{col_header}_id"
-            name_field = f"{col_header}_name"
-            desc_field = f"{col_header}_desc"
-            score_field = f"{col_header}_score"
-            
-            candidate = None
-            # If there are results for this column in el_results, take the first candidate.
-            if col_idx in el_results and isinstance(el_results[col_idx], list) and el_results[col_idx]:
-                candidate = el_results[col_idx][0]
-            
-            # Add candidate info or empty values if not found.
-            row_dict[id_field] = candidate.get("id") if candidate else ""
-            row_dict[name_field] = candidate.get("name") if candidate else ""
-            # Use "description" field as "desc"
-            row_dict[desc_field] = candidate.get("description") if candidate else ""
-            row_dict[score_field] = candidate.get("score") if candidate else ""
-        
-        annotated_rows.append(row_dict)
-    
-    # Create DataFrame with original columns first and then appended annotation columns.
-    annotated_df = pd.DataFrame(annotated_rows)
+    extracted_rows, header = fetch_el_results(input_collection, dataset_name, table_name)
+
+    if not extracted_rows:
+        print("⚠️ No annotated data found. Skipping output CSV generation.")
+        return
+
+    # Create a DataFrame including extracted annotations at the end
+    annotated_df = pd.DataFrame(extracted_rows)
+
+    # Save final annotated CSV
     output_file = f"annotated_{table_name}.csv"
     annotated_df.to_csv(output_file, index=False)
-    print(f"Annotated table saved to '{output_file}'.")
-
+    print(f"✅ Annotated table saved to '{output_file}'.")
+    
 if __name__ == "__main__":
     main()

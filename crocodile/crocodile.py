@@ -16,7 +16,7 @@ class Crocodile:
     """
     Crocodile entity linking system with hidden MongoDB configuration.
     """
-    _MONGO_URI = "mongodb://mongodb:27017/"
+    _DEFAULT_MONGO_URI = "mongodb://mongodb:27017/"  # Change this to a class-level default
     _DB_NAME = "crocodile_db"
     _TABLE_TRACE_COLLECTION = "table_trace"
     _DATASET_TRACE_COLLECTION = "dataset_trace"
@@ -29,6 +29,7 @@ class Crocodile:
 
     def __init__(
         self,
+        mongo_uri: Optional[str] = None,  # Allow passing the MongoDB URI
         max_workers: Optional[int] = None,
         max_candidates: int = 5,
         max_training_candidates: int = 10,
@@ -43,6 +44,8 @@ class Crocodile:
         top_n_for_type_freq: int = 3,
         max_bow_batch_size: int = 100,
     ) -> None:
+        # Use the provided mongo_uri or fallback to the default
+        self._MONGO_URI = mongo_uri or self._DEFAULT_MONGO_URI
         self.max_workers = max_workers or mp.cpu_count()
         self.max_candidates = max_candidates
         self.max_training_candidates = max_training_candidates

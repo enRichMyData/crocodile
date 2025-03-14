@@ -1,6 +1,12 @@
 import asyncio
 import multiprocessing as mp
+import os
+import uuid
+from pathlib import Path
 from typing import List, Optional
+
+import pandas as pd
+from column_classifier import ColumnClassifier
 
 from crocodile.feature import Feature
 from crocodile.fetchers import BowFetcher, CandidateFetcher
@@ -15,7 +21,7 @@ class Crocodile:
     Crocodile entity linking system with hidden MongoDB configuration.
     """
 
-    _DEFAULT_MONGO_URI = "mongodb://mongodb:27017/"  # Change this to a class-level default
+    _DEFAULT_mongo_uri = "mongodb://mongodb:27017/"  # Change this to a class-level default
     _DB_NAME = "crocodile_db"
     _TABLE_TRACE_COLLECTION = "table_trace"
     _DATASET_TRACE_COLLECTION = "dataset_trace"
@@ -28,23 +34,22 @@ class Crocodile:
 
     def __init__(
         self,
-        mongo_uri: Optional[str] = None,  # Allow passing the MongoDB URI
+        input_csv: str | Path,
         max_workers: Optional[int] = None,
         max_candidates: int = 5,
         max_training_candidates: int = 10,
         entity_retrieval_endpoint: Optional[str] = None,
-        entity_bow_endpoint: Optional[str] = None,
         entity_retrieval_token: Optional[str] = None,
         selected_features: Optional[List[str]] = None,
-        candidate_retrieval_limit: int = 100,
+        candidate_retrieval_limit: int = 16,
         model_path: Optional[str] = None,
-        batch_size: int = 10000,
+        batch_size: int = 1024,
         ml_ranking_workers: int = 2,
         top_n_for_type_freq: int = 3,
-        max_bow_batch_size: int = 100,
+        **kwargs,
     ) -> None:
+        self.input_csv = input_csv
         # Use the provided mongo_uri or fallback to the default
-        self._MONGO_URI = mongo_uri or self._DEFAULT_MONGO_URI
         self.max_workers = max_workers or mp.cpu_count()
         self.max_candidates = max_candidates
         self.max_training_candidates = max_training_candidates
@@ -52,13 +57,14 @@ class Crocodile:
         self.entity_retrieval_token = entity_retrieval_token
         self.candidate_retrieval_limit = candidate_retrieval_limit
         self.model_path = model_path
-        self.entity_bow_endpoint = entity_bow_endpoint
         self.batch_size = batch_size
         self.ml_ranking_workers = ml_ranking_workers
         self.top_n_for_type_freq = top_n_for_type_freq
-        self.MAX_BOW_BATCH_SIZE = max_bow_batch_size
+        self.max_bow_batch_size = kwargs.pop("max_bow_batch_size", 128)
+        self.entity_bow_endpoint = kwargs.pop("entity_bow_endpoint", None)
+        self._mongo_uri = kwargs.pop("mongo_uri", None) or self._DEFAULT_mongo_uri
         self.mongo_wrapper = MongoWrapper(
-            self._MONGO_URI, self._DB_NAME, self._TIMING_COLLECTION, self._ERROR_LOG_COLLECTION
+            self._mongo_uri, self._DB_NAME, self._TIMING_COLLECTION, self._ERROR_LOG_COLLECTION
         )
         self.feature = Feature(selected_features)
 
@@ -67,9 +73,12 @@ class Crocodile:
         self._bow_fetcher = BowFetcher(self)
         self._row_processor = RowBatchProcessor(self)
 
+        # Create indexes
+        self.mongo_wrapper.create_indexes()
+
     def get_db(self):
         """Get MongoDB database connection for current process"""
-        client = MongoConnectionManager.get_client(self._MONGO_URI)
+        client = MongoConnectionManager.get_client(self._mongo_uri)
         return client[self._DB_NAME]
 
     def close_mongo_connection(self):
@@ -103,7 +112,7 @@ class Crocodile:
     def process_rows_batch(self, docs, dataset_name, table_name):
         self._row_processor.process_rows_batch(docs, dataset_name, table_name)
 
-    def claim_todo_batch(self, input_collection, batch_size=10):
+    def claim_todo_batch(self, input_collection, batch_size=16):
         docs = []
         for _ in range(batch_size):
             doc = input_collection.find_one_and_update(
@@ -133,7 +142,93 @@ class Crocodile:
             for (dataset_name, table_name), docs in tasks_by_table.items():
                 self.process_rows_batch(docs, dataset_name, table_name)
 
-    def run(self):
+    def onboard_data(self, dataset_name: str = None, table_name: str = None):
+        df = pd.read_csv(self.input_csv)
+
+        classifier = ColumnClassifier(model_type="fast")
+        classification_results = classifier.classify_multiple_tables([df])
+        table_classification = classification_results[0].get("table_1", {})
+
+        # We'll create two dictionaries: one for NE (Named Entity) columns and
+        # one for LIT (Literal) columns.
+        ne_cols = {}
+        lit_cols = {}
+
+        # Define which classification types should be considered as NE.
+        NE_classifications = {"PERSON", "OTHER", "ORGANIZATION", "LOCATION"}
+
+        # Iterate over the DataFrame columns by order so that
+        # we use the column's index (as a string)
+        for idx, col in enumerate(df.columns):
+            # Get the classification result for this column.
+            # If the classifier didn't return a result for a column, we default to "UNKNOWN".
+            col_result = table_classification.get(col, {})
+            classification = col_result.get("classification", "UNKNOWN")
+
+            if classification in NE_classifications:
+                ne_cols[str(idx)] = classification
+            else:
+                lit_cols[str(idx)] = classification
+
+        db = self.get_db()
+        input_collection = db["input_data"]
+        table_trace_collection = db["table_trace"]
+        dataset_trace_collection = db["dataset_trace"]
+
+        if dataset_name is None:
+            dataset_name = uuid.uuid4().hex
+        if table_name is None:
+            table_name = os.path.basename(self.input_csv).split(".")[0]
+        table_trace_collection.insert_one(
+            {
+                "dataset_name": dataset_name,
+                "table_name": table_name,
+                "header": list(df.columns),  # Store the header (column names)
+                "total_rows": len(df),
+                "processed_rows": 0,
+                "status": "PENDING",
+                "classified_columns": {"NE": ne_cols, "LIT": lit_cols},
+            }
+        )
+
+        # Onboard data (values only, no headers) along with the classification metadata
+        for index, row in df.iterrows():
+            document = {
+                "dataset_name": dataset_name,
+                "table_name": table_name,
+                "row_id": index,
+                "data": row.tolist(),  # Store row values as a list
+                "classified_columns": {"NE": ne_cols, "LIT": lit_cols},
+                "context_columns": [
+                    str(i) for i in range(len(df.columns))
+                ],  # Context columns (by index)
+                "correct_qids": {},  # Empty as ground truth is not available
+                "status": "TODO",
+            }
+            input_collection.insert_one(document)
+
+        # Initialize dataset-level trace (if not done earlier)
+        dataset_trace_collection.update_one(
+            {"dataset_name": dataset_name},
+            {
+                "$setOnInsert": {
+                    "total_tables": 1,
+                    "processed_tables": 0,
+                    "total_rows": len(df),
+                    "processed_rows": 0,
+                    "status": "PENDING",
+                }
+            },
+            upsert=True,
+        )
+
+        print(
+            f"Data onboarded successfully for dataset '{dataset_name}' and table '{table_name}'."
+        )
+
+    def run(self, dataset_name: str = None, table_name: str = None):
+        self.onboard_data(dataset_name, table_name)
+
         db = self.get_db()
         input_collection = db[self._INPUT_COLLECTION]
 
@@ -151,7 +246,7 @@ class Crocodile:
 
         for _ in range(self.ml_ranking_workers):
             p = MLWorker(
-                db_uri=self._MONGO_URI,
+                db_uri=self._mongo_uri,
                 db_name=self._DB_NAME,
                 table_trace_collection_name=self._TABLE_TRACE_COLLECTION,
                 training_collection_name=self._TRAINING_COLLECTION,
@@ -168,7 +263,7 @@ class Crocodile:
             processes.append(p)
 
         trace_work = TraceWorker(
-            self._MONGO_URI,
+            self._mongo_uri,
             self._DB_NAME,
             self._INPUT_COLLECTION,
             self._DATASET_TRACE_COLLECTION,

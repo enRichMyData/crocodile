@@ -4,7 +4,7 @@ from datetime import datetime
 from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
-from pymongo import MongoClient
+from pymongo import ASCENDING, MongoClient
 from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.results import DeleteResult, InsertManyResult, InsertOneResult, UpdateResult
@@ -81,9 +81,7 @@ class MongoWrapper:
         self.db_name: str = db_name
         self.timing_collection_name: str = timing_collection_name
         self.error_log_collection_name: str = error_log_collection_name
-        self.table_trace_collection_name: str = table_trace_collection_name
-        # Note: self.table_trace_collection_name is referenced later in log_processing_speed.
-        # It should be defined (or set externally) if needed.
+        self.table_trace_collection_name = table_trace_collection_name
 
     def get_db(self) -> Database:
         client: MongoClient = MongoConnectionManager.get_client(self.mongo_uri)
@@ -260,7 +258,6 @@ class MongoWrapper:
 
     def log_processing_speed(self, dataset_name: str, table_name: str) -> None:
         db: Database = self.get_db()
-        # NOTE: self.table_trace_collection_name should be defined; if not, adjust as needed.
         table_trace_collection: Collection = db[self.table_trace_collection_name]  # type: ignore
         trace: Optional[Dict[str, Any]] = table_trace_collection.find_one(
             {"dataset_name": dataset_name, "table_name": table_name}
@@ -277,3 +274,54 @@ class MongoWrapper:
             {"dataset_name": dataset_name, "table_name": table_name},
             {"$set": {"rows_per_second": rows_per_second}},
         )
+
+    # Ensure indexes for uniqueness and performance
+    def create_indexes(self):
+        db: Database = self.get_db()
+        input_collection: Collection = db["input_data"]
+        table_trace_collection: Collection = db["table_trace"]
+        dataset_trace_collection: Collection = db["dataset_trace"]
+        training_data_collection: Collection = db["training_data"]
+        timing_trace_collection: Collection = db["timing_trace"]
+
+        input_collection.create_index(
+            [("dataset_name", ASCENDING), ("table_name", ASCENDING)]
+        )  # Ensure fast retrieval of items by dataset and table
+        input_collection.create_index(
+            [("dataset_name", ASCENDING), ("table_name", ASCENDING), ("row_id", ASCENDING)],
+            unique=True,
+        )
+        input_collection.create_index(
+            [("dataset_name", ASCENDING), ("table_name", ASCENDING), ("status", ASCENDING)]
+        )  # Ensure fast retrieval of items by status
+        input_collection.create_index(
+            [("status", ASCENDING)]
+        )  # Ensure fast retrieval of items by status
+        table_trace_collection.create_index(
+            [("dataset_name", ASCENDING)]
+        )  # Ensure unique dataset-level trace
+        table_trace_collection.create_index(
+            [("table_name", ASCENDING)]
+        )  # Ensure fast retrieval of items by table_name
+        table_trace_collection.create_index(
+            [("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True
+        )
+        dataset_trace_collection.create_index([("dataset_name", ASCENDING)], unique=True)
+        training_data_collection.create_index(
+            [("dataset_name", ASCENDING)]
+        )  # Ensure fast retrieval of items by dataset
+        training_data_collection.create_index(
+            [("table_name", ASCENDING)]
+        )  # Ensure fast retrieval of items by table
+        training_data_collection.create_index(
+            [("ml_ranked", ASCENDING)]
+        )  # Ensure fast retrieval of items by ml_ranked
+        training_data_collection.create_index(
+            [("dataset_name", ASCENDING), ("table_name", ASCENDING)]
+        )  # Ensure fast retrieval of items by dataset and table
+        training_data_collection.create_index(
+            [("dataset_name", ASCENDING), ("table_name", ASCENDING), ("ml_ranked", ASCENDING)]
+        )  # Ensure fast retrieval of items by dataset, table, and ml_ranked
+        timing_trace_collection.create_index(
+            [("duration_seconds", ASCENDING)]
+        )  # Ensure fast retrieval of items by duration_seconds

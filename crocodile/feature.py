@@ -80,8 +80,8 @@ class Feature:
         processed_candidates: List[Dict[str, Any]] = []
         for candidate in candidates:
             # Retrieve original values, which might be None.
-            candidate_name: Optional[str] = candidate.get("name")
-            candidate_description: Optional[str] = candidate.get("description")
+            candidate_name: Optional[str] = candidate.get("name", "")
+            candidate_description: Optional[str] = candidate.get("description", "")
 
             # Create safe versions for computation.
             safe_candidate_name: str = candidate_name if candidate_name is not None else ""

@@ -213,7 +213,7 @@ class RowBatchProcessor:
             bow_data = {}
             if (
                 row_qids
-                and self.crocodile.entity_bow_endpoint
+                and self.crocodile._entity_bow_endpoint
                 and self.crocodile.entity_retrieval_token
             ):
                 bow_data = self.crocodile.fetch_bow_vectors_batch(

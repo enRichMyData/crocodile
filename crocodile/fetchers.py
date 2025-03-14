@@ -20,7 +20,9 @@ class CandidateFetcher:
     def __init__(self, crocodile):
         self.crocodile = crocodile
 
-    async def _fetch_candidates(self, entity_name, row_text, fuzzy, qid, session):
+    async def _fetch_candidates(
+        self, entity_name, row_text, fuzzy, qid, session, cache: bool = True
+    ):
         """
         This used to be Crocodile._fetch_candidates. Logic unchanged.
         """
@@ -188,8 +190,8 @@ class BowFetcher:
             return bow_results
 
         chunked_qids = [
-            to_fetch[i : i + self.crocodile.MAX_BOW_BATCH_SIZE]
-            for i in range(0, len(to_fetch), self.crocodile.MAX_BOW_BATCH_SIZE)
+            to_fetch[i : i + self.crocodile.max_bow_batch_size]
+            for i in range(0, len(to_fetch), self.crocodile.max_bow_batch_size)
         ]
 
         for chunk in chunked_qids:

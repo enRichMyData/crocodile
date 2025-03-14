@@ -1,11 +1,14 @@
-from typing import List, Optional, Dict, Any
-from pydantic import BaseModel
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel
+
 
 # Models for Candidate Entity Linking (EL) Results
 class ELResultType(BaseModel):
     id: str
     name: str
+
 
 class ELResultFeature(BaseModel):
     ntoken_mention: int
@@ -23,6 +26,7 @@ class ELResultFeature(BaseModel):
     NERtype: int
     column_NERtype: int
 
+
 class ELResultCandidate(BaseModel):
     id: str
     name: str
@@ -31,11 +35,13 @@ class ELResultCandidate(BaseModel):
     features: ELResultFeature
     score: float
 
+
 # Model for Classified Columns (NE, LIT, UNCLASSIFIED)
 class ClassifiedColumns(BaseModel):
     NE: Optional[Dict[str, str]] = {}
     LIT: Optional[Dict[str, str]] = {}
     UNCLASSIFIED: Optional[Dict[str, str]] = {}
+
 
 # Model for a Row in the input_data collection
 class RowItem(BaseModel):
@@ -54,6 +60,7 @@ class RowItem(BaseModel):
     # Optional entity linking results; keys correspond to column indices
     el_results: Optional[Dict[str, List[ELResultCandidate]]] = None
 
+
 # Model for table-level metadata in the table_trace collection
 class TableTrace(BaseModel):
     dataset_name: str
@@ -68,6 +75,7 @@ class TableTrace(BaseModel):
     status_counts: Dict[str, int]
     time_passed_seconds: float
     end_time: datetime
+
 
 # Model for dataset-level metadata in the dataset_trace collection
 class DatasetTrace(BaseModel):

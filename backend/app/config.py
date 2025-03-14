@@ -1,5 +1,7 @@
-from pydantic_settings import BaseSettings
 from pathlib import Path
+
+from pydantic_settings import BaseSettings
+
 
 class Settings(BaseSettings):
     FASTAPI_APP_NAME: str = "Crocodile FastAPI"
@@ -10,5 +12,6 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = str(Path(__file__).parent.parent / ".env")  # Adjust path to .env
+
 
 settings = Settings()

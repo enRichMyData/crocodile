@@ -35,7 +35,7 @@ class Crocodile:
 
     def __init__(
         self,
-        input_csv: str | Path,
+        input_csv: str | Path | pd.DataFrame,
         output_csv: str | Path | None = None,
         dataset_name: str = None,
         table_name: str = None,
@@ -55,7 +55,11 @@ class Crocodile:
     ) -> None:
         self.input_csv = input_csv
         self.output_csv = output_csv
-        if self.output_csv is None:
+        if self.output_csv is None and additional_params.get("save_output_to_csv", True):
+            if isinstance(self.input_csv, pd.DataFrame):
+                raise ValueError(
+                    "An output name must be specified is the input is a `pd.Dataframe`"
+                )
             self.output_csv = os.path.splitext(input_csv)[0] + "_output.csv"
         if dataset_name is None:
             dataset_name = uuid.uuid4().hex
@@ -164,7 +168,10 @@ class Crocodile:
         table_name: str = None,
         columns_type: ColType | None = None,
     ):
-        df = pd.read_csv(self.input_csv)
+        if not isinstance(self.input_csv, pd.DataFrame):
+            df = pd.read_csv(self.input_csv)
+        else:
+            df = self.input_csv
 
         if columns_type is None:
             classifier = ColumnClassifier(model_type="fast")

@@ -120,6 +120,7 @@ class Crocodile:
 
         return asyncio.run(runner())
 
+    # -- Public method that calls our row-batch processor
     def process_rows_batch(self, docs, dataset_name, table_name):
         self._row_processor.process_rows_batch(docs, dataset_name, table_name)
 

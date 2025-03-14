@@ -191,6 +191,11 @@ class Crocodile:
             ne_cols = columns_type.get("NE", {})
             lit_cols = columns_type.get("LIT", {})
             ignored_cols = columns_type.get("IGNORED", [])
+        all_recognized_cols = set(ne_cols.keys()) | set(lit_cols.keys())
+        all_cols = set([str(i) for i in range(len(df.columns))])
+        if len(all_recognized_cols) != len(all_cols):
+            ignored_cols.extend(list(all_cols - all_recognized_cols))
+        ignored_cols = list(set(ignored_cols))
         context_cols = list(set([str(i) for i in range(len(df.columns))]) - set(ignored_cols))
 
         db = self.get_db()

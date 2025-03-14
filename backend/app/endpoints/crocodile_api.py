@@ -8,8 +8,6 @@ from fastapi import APIRouter, BackgroundTasks, Body, Depends, status
 from pydantic import BaseModel
 from pymongo.database import Database
 
-from crocodile import Crocodile
-
 router = APIRouter()
 
 # ------------------------------------------------------------------
@@ -113,6 +111,8 @@ def add_table(
     print("Triggering Crocodile task...")
 
     def run_crocodile_task():
+        from crocodile import Crocodile
+
         croco = Crocodile(
             input_csv=pd.DataFrame(table_upload.data),
             dataset_name=datasetName,

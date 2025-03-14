@@ -22,5 +22,7 @@ RUN pip install --no-cache-dir -e ".[app]"
 # Expose the port that FastAPI will use
 EXPOSE 8000
 
+RUN python -m spacy download en_core_web_sm
+
 # Run the FastAPI app
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

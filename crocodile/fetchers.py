@@ -190,8 +190,8 @@ class BowFetcher:
             return bow_results
 
         chunked_qids = [
-            to_fetch[i : i + self.crocodile.max_bow_batch_size]
-            for i in range(0, len(to_fetch), self.crocodile.max_bow_batch_size)
+            to_fetch[i : i + self.crocodile._max_bow_batch_size]
+            for i in range(0, len(to_fetch), self.crocodile._max_bow_batch_size)
         ]
 
         for chunk in chunked_qids:
@@ -213,7 +213,9 @@ class BowFetcher:
         if not chunk_qids:
             return chunk_bow_results
 
-        url = f"{self.crocodile.entity_bow_endpoint}?token={self.crocodile.entity_retrieval_token}"
+        url = (
+            f"{self.crocodile._entity_bow_endpoint}?token={self.crocodile.entity_retrieval_token}"
+        )
         payload = {"json": {"text": row_text, "qids": chunk_qids}}
 
         backoff = 1

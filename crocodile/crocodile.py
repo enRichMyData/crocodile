@@ -36,6 +36,7 @@ class Crocodile:
     def __init__(
         self,
         input_csv: str | Path,
+        output_csv: str | Path | None = None,
         dataset_name: str = None,
         table_name: str = None,
         columns_type: ColType | None = None,
@@ -53,6 +54,9 @@ class Crocodile:
         **kwargs,
     ) -> None:
         self.input_csv = input_csv
+        self.output_csv = output_csv
+        if self.output_csv is None:
+            self.output_csv = os.path.splitext(input_csv)[0] + "_output.csv"
         if dataset_name is None:
             dataset_name = uuid.uuid4().hex
         if table_name is None:
@@ -71,9 +75,10 @@ class Crocodile:
         self.batch_size = batch_size
         self.ml_ranking_workers = ml_ranking_workers
         self.top_n_for_type_freq = top_n_for_type_freq
-        self.max_bow_batch_size = kwargs.pop("max_bow_batch_size", 128)
-        self.entity_bow_endpoint = kwargs.pop("entity_bow_endpoint", None)
-        self._mongo_uri = kwargs.pop("mongo_uri", None) or self._DEFAULT_MONGO_URI
+        self._max_bow_batch_size = kwargs.pop("max_bow_batch_size", 128)
+        self._entity_bow_endpoint = kwargs.pop("entity_bow_endpoint", None)
+        self._mongo_uri = kwargs.pop("mongo_uri", None) or self._DEFAULT_mongo_uri
+        self._save_output_to_csv = kwargs.pop("save_output_to_csv", True)
         self.mongo_wrapper = MongoWrapper(
             self._mongo_uri, self._DB_NAME, self._TIMING_COLLECTION, self._ERROR_LOG_COLLECTION
         )
@@ -248,6 +253,53 @@ class Crocodile:
             f"Data onboarded successfully for dataset '{dataset_name}' and table '{table_name}'."
         )
 
+    def fetch_results(self):
+        """Retrieves processed documents from MongoDB including `el_results`.
+
+        Extracts the first candidate per NE column (if available).
+        Uses a **streaming approach** to avoid memory overload on large tables.
+        """
+        db = self.get_db()
+        input_collection = db["input_data"]
+        cursor = input_collection.find(
+            {"dataset_name": self.dataset_name, "table_name": self.table_name}
+        )
+
+        extracted_rows = []
+        table_trace = input_collection.database["table_trace"].find_one(
+            {"dataset_name": self.dataset_name, "table_name": self.table_name}
+        )
+        header = table_trace.get("header")
+
+        for doc in cursor:
+            row_data = dict(zip(header, doc["data"]))  # Original row data as dict
+            el_results = doc.get("el_results", {})
+
+            # Extract first candidate for each NE column
+            for col_idx, col_type in doc["classified_columns"].get("NE", {}).items():
+                try:
+                    col_index = int(col_idx)
+                    col_header = header[col_index]
+                except (ValueError, IndexError):
+                    col_header = f"col_{col_idx}"
+
+                id_field = f"{col_header}_id"
+                name_field = f"{col_header}_name"
+                desc_field = f"{col_header}_desc"
+                score_field = f"{col_header}_score"
+
+                # Extract first candidate from el_results (if available)
+                candidate = el_results.get(col_idx, [{}])[0]
+
+                row_data[id_field] = candidate.get("id", "")
+                row_data[name_field] = candidate.get("name", "")
+                row_data[desc_field] = candidate.get("description", "")
+                row_data[score_field] = candidate.get("score", "")
+
+            extracted_rows.append(row_data)
+
+        return extracted_rows
+
     def run(self):
         self.onboard_data(self.dataset_name, self.table_name, columns_type=self.columns_type)
 
@@ -300,3 +352,8 @@ class Crocodile:
 
         self.close_mongo_connection()
         print("All tasks have been processed.")
+
+        if self._save_output_to_csv:
+            extracted_rows = self.fetch_results()
+            pd.DataFrame(extracted_rows).to_csv(self.output_csv, index=False)
+            print(f"Results saved to '{self.output_csv}'.")

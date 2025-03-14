@@ -21,7 +21,7 @@ class CandidateFetcher:
         self.crocodile = crocodile
 
     async def _fetch_candidates(
-        self, entity_name, row_text, fuzzy, qid, session, cache: bool = False
+        self, entity_name, row_text, fuzzy, qid, session, cache: bool = True
     ):
         """
         This used to be Crocodile._fetch_candidates. Logic unchanged.

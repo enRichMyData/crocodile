@@ -73,7 +73,7 @@ class Crocodile:
         client = MongoConnectionManager.get_client(self._MONGO_URI)
         return client[self._DB_NAME]
 
-    def __del__(self):
+    def close_mongo_connection(self):
         """Cleanup when instance is destroyed"""
         try:
             MongoConnectionManager.close_connection()
@@ -181,5 +181,5 @@ class Crocodile:
         for p in processes:
             p.join()
 
-        self.__del__()
+        self.close_mongo_connection()
         print("All tasks have been processed.")

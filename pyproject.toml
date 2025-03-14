@@ -32,7 +32,8 @@ dependencies = [
     "column-classifier",
     "fastapi==0.115.8",
     "uvicorn==0.34.0",
-    "strawberry-graphql==0.259.0"
+    "strawberry-graphql==0.259.0",
+    "jsonargparse==4.37.0",
 ]
 
 [project.optional-dependencies]

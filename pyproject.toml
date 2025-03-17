@@ -37,6 +37,7 @@ dependencies = [
 app = [
     "fastapi==0.115",
     "pydantic<3",
+    "pydantic-settings==2.8.1",
     "uvicorn==0.34",
 ]
 dev = [

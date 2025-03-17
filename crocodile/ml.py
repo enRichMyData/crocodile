@@ -59,58 +59,6 @@ class MLWorker(Process):
 
         return load_model(self.model_path)
 
-    # def run(self) -> None:
-    #     db: Database = self.get_db()
-    #     model: "Model" = self.load_ml_model()
-    #     input_collection: Collection = db[self.input_collection]
-    #     training_collection: Collection = db[self.training_collection_name]
-    #     while True:
-    #         done_rows: int = self.mongo_wrapper.count_documents(
-    #             input_collection,
-    #             {
-    #                 "dataset_name": self.dataset_name,
-    #                 "table_name": self.table_name,
-    #                 "status": "DONE",
-    #             },
-    #         )
-    #         total_rows: int = self.mongo_wrapper.count_documents(
-    #             input_collection,
-    #             {"dataset_name": self.dataset_name, "table_name": self.table_name},
-    #         )
-    #         if done_rows >= total_rows:
-    #             break
-
-    #     to_process = self.mongo_wrapper.count_documents(
-    #         training_collection,
-    #         {
-    #             "dataset_name": self.dataset_name,
-    #             "table_name": self.table_name,
-    #             "ml_ranked": False,
-    #         },
-    #     )
-    #     print(f"Total unprocessed documents (for ML ranking): {to_process}")
-    #     while True:
-    #         processed = self.mongo_wrapper.count_documents(
-    #             training_collection,
-    #             {
-    #                 "dataset_name": self.dataset_name,
-    #                 "table_name": self.table_name,
-    #                 "ml_ranked": True,
-    #             },
-    #         )
-    #         if processed >= to_process:
-    #             return
-    #         to_process_row = self.mongo_wrapper.find_one_document(
-    #             training_collection,
-    #             {
-    #                 "dataset_name": self.dataset_name,
-    #                 "table_name": self.table_name,
-    #                 "ml_ranked": False,
-    #             },
-    #         )
-    #         if to_process_row:
-    #             self.apply_ml_ranking(self.dataset_name, self.table_name, model)
-
     def run(self) -> None:
         db: Database = self.get_db()
         model: "Model" = self.load_ml_model()

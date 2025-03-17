@@ -52,16 +52,16 @@ python3 -m crocodile.cli \
   --croco.input_csv tables/imdb_top_1000.csv \
   --croco.entity_retrieval_endpoint "$ENTITY_RETRIEVAL_ENDPOINT" \
   --croco.entity_retrieval_token "$ENTITY_RETRIEVAL_TOKEN" \
-  --croco.columns_type '{ 
-    "NE": { "0": "OTHER" }, 
-    "LIT": { 
-      "1": "NUMBER", 
-      "2": "NUMBER", 
-      "3": "STRING", 
-      "4": "NUMBER", 
-      "5": "STRING" 
-    }, 
-    "IGNORED": ["6", "9", "10", "7", "8"] 
+  --croco.columns_type '{
+    "NE": { "0": "OTHER" },
+    "LIT": {
+      "1": "NUMBER",
+      "2": "NUMBER",
+      "3": "STRING",
+      "4": "NUMBER",
+      "5": "STRING"
+    },
+    "IGNORED": ["6", "9", "10", "7", "8"]
   }' \
   --croco.additional_params.mongo_uri "localhost:27017"
 ```

@@ -13,7 +13,6 @@ from crocodile.fetchers import BowFetcher, CandidateFetcher
 from crocodile.ml import MLWorker
 from crocodile.mongo import MongoCache, MongoConnectionManager, MongoWrapper
 from crocodile.processors import RowBatchProcessor
-from crocodile.trace import TraceWorker
 from crocodile.typing import ColType
 
 
@@ -24,12 +23,9 @@ class Crocodile:
 
     _DEFAULT_MONGO_URI = "mongodb://mongodb:27017/"  # Change this to a class-level default
     _DB_NAME = "crocodile_db"
-    _TABLE_TRACE_COLLECTION = "table_trace"
-    _DATASET_TRACE_COLLECTION = "dataset_trace"
     _INPUT_COLLECTION = "input_data"
     _TRAINING_COLLECTION = "training_data"
     _ERROR_LOG_COLLECTION = "error_logs"
-    _TIMING_COLLECTION = "timing_trace"
     _CACHE_COLLECTION = "candidate_cache"
     _BOW_CACHE_COLLECTION = "bow_cache"
 
@@ -84,7 +80,7 @@ class Crocodile:
         self._mongo_uri = kwargs.pop("mongo_uri", None) or self._DEFAULT_MONGO_URI
         self._save_output_to_csv = kwargs.pop("save_output_to_csv", True)
         self.mongo_wrapper = MongoWrapper(
-            self._mongo_uri, self._DB_NAME, self._TIMING_COLLECTION, self._ERROR_LOG_COLLECTION
+            self._mongo_uri, self._DB_NAME, self._ERROR_LOG_COLLECTION
         )
         self.feature = Feature(selected_features)
 
@@ -212,20 +208,6 @@ class Crocodile:
 
         db = self.get_db()
         input_collection = db["input_data"]
-        table_trace_collection = db["table_trace"]
-        dataset_trace_collection = db["dataset_trace"]
-
-        table_trace_collection.insert_one(
-            {
-                "dataset_name": dataset_name,
-                "table_name": table_name,
-                "header": list(df.columns),  # Store the header (column names)
-                "total_rows": len(df),
-                "processed_rows": 0,
-                "status": "PENDING",
-                "classified_columns": {"NE": ne_cols, "LIT": lit_cols, "IGNORED": ignored_cols},
-            }
-        )
 
         # Onboard data (values only, no headers) along with the classification metadata
         for index, row in df.iterrows():
@@ -240,21 +222,6 @@ class Crocodile:
                 "status": "TODO",
             }
             input_collection.insert_one(document)
-
-        # Initialize dataset-level trace (if not done earlier)
-        dataset_trace_collection.update_one(
-            {"dataset_name": dataset_name},
-            {
-                "$setOnInsert": {
-                    "total_tables": 1,
-                    "processed_tables": 0,
-                    "total_rows": len(df),
-                    "processed_rows": 0,
-                    "status": "PENDING",
-                }
-            },
-            upsert=True,
-        )
 
         print(
             f"Data onboarded successfully for dataset '{dataset_name}' and table '{table_name}'."
@@ -273,11 +240,14 @@ class Crocodile:
         )
 
         extracted_rows = []
-        table_trace = input_collection.database["table_trace"].find_one(
-            {"dataset_name": self.dataset_name, "table_name": self.table_name}
-        )
-        header = table_trace.get("header")
-
+        header = None
+        if isinstance(self.input_csv, pd.DataFrame):
+            header = self.input_csv.columns.tolist()
+        elif isinstance(self.input_csv, str):
+            header = pd.read_csv(self.input_csv, nrows=0).columns.tolist()
+        if header is None:
+            print("Could not extract header from input table.")
+            header = [f"col_{i}" for i in range(1, 1 + len(cursor[0]["data"]))]
         for doc in cursor:
             row_data = dict(zip(header, doc["data"]))  # Original row data as dict
             el_results = doc.get("el_results", {})
@@ -324,14 +294,17 @@ class Crocodile:
             p = mp.Process(target=self.worker)
             p.start()
             processes.append(p)
+        for p in processes:
+            p.join()
 
+        processes = []
         for _ in range(self.ml_ranking_workers):
             p = MLWorker(
                 db_uri=self._mongo_uri,
                 db_name=self._DB_NAME,
-                table_trace_collection_name=self._TABLE_TRACE_COLLECTION,
+                table_name=self.table_name,
+                dataset_name=self.dataset_name,
                 training_collection_name=self._TRAINING_COLLECTION,
-                timing_collection_name=self._TIMING_COLLECTION,
                 error_log_collection_name=self._ERROR_LOG_COLLECTION,
                 input_collection=self._INPUT_COLLECTION,
                 model_path=self.model_path,
@@ -342,18 +315,6 @@ class Crocodile:
             )
             p.start()
             processes.append(p)
-
-        trace_work = TraceWorker(
-            self._mongo_uri,
-            self._DB_NAME,
-            self._INPUT_COLLECTION,
-            self._DATASET_TRACE_COLLECTION,
-            self._TABLE_TRACE_COLLECTION,
-            self._TIMING_COLLECTION,
-        )
-        trace_work.start()
-        processes.append(trace_work)
-
         for p in processes:
             p.join()
 

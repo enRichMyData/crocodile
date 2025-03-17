@@ -14,15 +14,60 @@
 
 ## Installation
 
-Install the Crocodile library via pip:
+Crocodile is not yet available on PyPI. To install it, clone the repository and install it manually:
 
 ```bash
-pip install crocodile
+git clone https://github.com/your-org/crocodile.git
+cd crocodile
+pip install -e .
 ```
 
 ## Usage
 
-You can run the entity linking process using the `Crocodile` class like the following:
+### Using the CLI
+You can run the entity linking process via the command line interface (CLI) as follows:
+
+First, create a `.env` file with the required environment variables:
+
+```ini
+ENTITY_RETRIEVAL_ENDPOINT=https://lamapi.hel.sintef.cloud/lookup/entity-retrieval
+ENTITY_RETRIEVAL_TOKEN=lamapi_demo_2023
+```
+
+Then, use the following command:
+
+```bash
+python3 -m crocodile.cli \
+  --croco.input_csv tables/imdb_top_1000.csv \
+  --croco.entity_retrieval_endpoint "$ENTITY_RETRIEVAL_ENDPOINT" \
+  --croco.entity_retrieval_token "$ENTITY_RETRIEVAL_TOKEN" \
+  --croco.additional_params.mongo_uri "localhost:27017"
+```
+
+#### Specifying Column Types via CLI
+To specify column types for your input table, use the following command:
+
+```bash
+python3 -m crocodile.cli \
+  --croco.input_csv tables/imdb_top_1000.csv \
+  --croco.entity_retrieval_endpoint "$ENTITY_RETRIEVAL_ENDPOINT" \
+  --croco.entity_retrieval_token "$ENTITY_RETRIEVAL_TOKEN" \
+  --croco.columns_type '{ 
+    "NE": { "0": "OTHER" }, 
+    "LIT": { 
+      "1": "NUMBER", 
+      "2": "NUMBER", 
+      "3": "STRING", 
+      "4": "NUMBER", 
+      "5": "STRING" 
+    }, 
+    "IGNORED": ["6", "9", "10", "7", "8"] 
+  }' \
+  --croco.additional_params.mongo_uri "localhost:27017"
+```
+
+### Using Python API
+You can also run the entity linking process using the `Crocodile` class in Python:
 
 ```python
 from crocodile import Crocodile
@@ -35,7 +80,7 @@ crocodile_instance = Crocodile(
     table_name="imdb",
     dataset_name="cinema",
     max_candidates=3,
-    entity_retrieval_token=os.environ["ENTITY_RETRIEVAL_TOKEN"]
+    entity_retrieval_token=os.environ["ENTITY_RETRIEVAL_TOKEN"],
     entity_retrieval_endpoint=os.environ["ENTITY_RETRIEVAL_ENDPOINT"],
 )
 
@@ -45,7 +90,8 @@ crocodile_instance.run()
 print("Entity linking process completed.")
 ```
 
-If one wants to specify column types for its input table, then it can run the following:
+### Specifying Column Types
+If you want to specify column types for your input table, use the following example:
 
 ```python
 from crocodile import Crocodile
@@ -58,7 +104,7 @@ crocodile_instance = Crocodile(
     table_name="imdb",
     dataset_name="cinema",
     max_candidates=3,
-    entity_retrieval_token=os.environ["ENTITY_RETRIEVAL_TOKEN"]
+    entity_retrieval_token=os.environ["ENTITY_RETRIEVAL_TOKEN"],
     entity_retrieval_endpoint=os.environ["ENTITY_RETRIEVAL_ENDPOINT"],
     columns_type={
         "NE": {

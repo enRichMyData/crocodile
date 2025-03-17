@@ -10,6 +10,12 @@ load_dotenv()
 def main():
     parser = ArgumentParser()
     parser.add_class_arguments(Crocodile, "croco")
+    parser.add_argument(
+        "--croco.mongo-uri",
+        type=str,
+        help="MongoDB connection URI",
+        default="mongodb://localhost:27017",
+    )
     args = parser.parse_args()
 
     print("🚀 Starting the entity linking process...")

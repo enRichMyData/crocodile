@@ -29,6 +29,7 @@ absl.logging.set_verbosity(absl.logging.ERROR)
 
 # NLTK setup
 nltk.download("punkt", quiet=True)
+nltk.download("punkt_tab", quiet=True)
 nltk.download("stopwords", quiet=True)
 
 # Define STOP_WORDS

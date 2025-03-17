@@ -123,7 +123,7 @@ def add_table(
             max_workers=8,
             candidate_retrieval_limit=10,
             model_path="./crocodile/models/default.h5",
-            additional_params={"save_output_to_csv": False},
+            save_output_to_csv=False,
         )
         croco.run()
 

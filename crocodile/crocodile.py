@@ -3,7 +3,7 @@ import multiprocessing as mp
 import os
 import uuid
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import List, Optional
 
 import pandas as pd
 from column_classifier import ColumnClassifier
@@ -51,11 +51,11 @@ class Crocodile:
         batch_size: int = 1024,
         ml_ranking_workers: int = 2,
         top_n_for_type_freq: int = 3,
-        additional_params: dict[str, Any] = {},
+        **kwargs,
     ) -> None:
         self.input_csv = input_csv
         self.output_csv = output_csv
-        if self.output_csv is None and additional_params.get("save_output_to_csv", True):
+        if self.output_csv is None and kwargs.get("save_output_to_csv", True):
             if isinstance(self.input_csv, pd.DataFrame):
                 raise ValueError(
                     "An output name must be specified is the input is a `pd.Dataframe`"
@@ -79,10 +79,10 @@ class Crocodile:
         self.batch_size = batch_size
         self.ml_ranking_workers = ml_ranking_workers
         self.top_n_for_type_freq = top_n_for_type_freq
-        self._max_bow_batch_size = additional_params.pop("max_bow_batch_size", 128)
-        self._entity_bow_endpoint = additional_params.pop("entity_bow_endpoint", None)
-        self._mongo_uri = additional_params.pop("mongo_uri", None) or self._DEFAULT_MONGO_URI
-        self._save_output_to_csv = additional_params.pop("save_output_to_csv", True)
+        self._max_bow_batch_size = kwargs.pop("max_bow_batch_size", 128)
+        self._entity_bow_endpoint = kwargs.pop("entity_bow_endpoint", None)
+        self._mongo_uri = kwargs.pop("mongo_uri", None) or self._DEFAULT_MONGO_URI
+        self._save_output_to_csv = kwargs.pop("save_output_to_csv", True)
         self.mongo_wrapper = MongoWrapper(
             self._mongo_uri, self._DB_NAME, self._TIMING_COLLECTION, self._ERROR_LOG_COLLECTION
         )

@@ -22,7 +22,7 @@ class Crocodile:
     Crocodile entity linking system with hidden MongoDB configuration.
     """
 
-    _DEFAULT_mongo_uri = "mongodb://mongodb:27017/"  # Change this to a class-level default
+    _DEFAULT_MONGO_URI = "mongodb://mongodb:27017/"  # Change this to a class-level default
     _DB_NAME = "crocodile_db"
     _TABLE_TRACE_COLLECTION = "table_trace"
     _DATASET_TRACE_COLLECTION = "dataset_trace"
@@ -35,7 +35,7 @@ class Crocodile:
 
     def __init__(
         self,
-        input_csv: str | Path,
+        input_csv: str | Path | pd.DataFrame,
         output_csv: str | Path | None = None,
         dataset_name: str = None,
         table_name: str = None,
@@ -55,7 +55,11 @@ class Crocodile:
     ) -> None:
         self.input_csv = input_csv
         self.output_csv = output_csv
-        if self.output_csv is None:
+        if self.output_csv is None and kwargs.get("save_output_to_csv", True):
+            if isinstance(self.input_csv, pd.DataFrame):
+                raise ValueError(
+                    "An output name must be specified is the input is a `pd.Dataframe`"
+                )
             self.output_csv = os.path.splitext(input_csv)[0] + "_output.csv"
         if dataset_name is None:
             dataset_name = uuid.uuid4().hex
@@ -77,7 +81,7 @@ class Crocodile:
         self.top_n_for_type_freq = top_n_for_type_freq
         self._max_bow_batch_size = kwargs.pop("max_bow_batch_size", 128)
         self._entity_bow_endpoint = kwargs.pop("entity_bow_endpoint", None)
-        self._mongo_uri = kwargs.pop("mongo_uri", None) or self._DEFAULT_mongo_uri
+        self._mongo_uri = kwargs.pop("mongo_uri", None) or self._DEFAULT_MONGO_URI
         self._save_output_to_csv = kwargs.pop("save_output_to_csv", True)
         self.mongo_wrapper = MongoWrapper(
             self._mongo_uri, self._DB_NAME, self._TIMING_COLLECTION, self._ERROR_LOG_COLLECTION
@@ -125,7 +129,6 @@ class Crocodile:
 
         return asyncio.run(runner())
 
-    # -- Public method that calls our row-batch processor
     def process_rows_batch(self, docs, dataset_name, table_name):
         self._row_processor.process_rows_batch(docs, dataset_name, table_name)
 
@@ -165,7 +168,10 @@ class Crocodile:
         table_name: str = None,
         columns_type: ColType | None = None,
     ):
-        df = pd.read_csv(self.input_csv)
+        if not isinstance(self.input_csv, pd.DataFrame):
+            df = pd.read_csv(self.input_csv)
+        else:
+            df = self.input_csv
 
         if columns_type is None:
             classifier = ColumnClassifier(model_type="fast")

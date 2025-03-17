@@ -52,9 +52,6 @@ class RowBatchProcessor:
                 row_data_list, candidates_results, dataset_name, table_name, db
             )
 
-            # 4) Log overall speed
-            self.crocodile.mongo_wrapper.log_processing_speed(dataset_name, table_name)
-
         except Exception:
             self.crocodile.mongo_wrapper.log_to_db(
                 "ERROR", "Error processing batch of rows", traceback.format_exc()

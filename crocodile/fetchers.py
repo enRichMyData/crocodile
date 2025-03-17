@@ -1,7 +1,5 @@
 import asyncio
-import time
 import traceback
-from datetime import datetime
 from urllib.parse import quote
 
 import aiohttp
@@ -26,9 +24,6 @@ class CandidateFetcher:
         """
         This used to be Crocodile._fetch_candidates. Logic unchanged.
         """
-        db = self.crocodile.get_db()
-        timing_trace_collection = db[self.crocodile._TIMING_COLLECTION]
-
         encoded_entity_name = quote(entity_name)
         url = (
             f"{self.crocodile.entity_retrieval_endpoint}?name={encoded_entity_name}"
@@ -40,7 +35,6 @@ class CandidateFetcher:
 
         backoff = 1
         for attempts in range(5):
-            start_time = time.time()
             try:
                 async with session.get(url) as response:
                     response.raise_for_status()
@@ -80,23 +74,9 @@ class CandidateFetcher:
                         merged_candidates = fetched_candidates
 
                     cache.put(cache_key, merged_candidates)
-
-                    end_time = time.time()
-                    timing_trace_collection.insert_one(
-                        {
-                            "operation_name": "_fetch_candidate",
-                            "url": url,
-                            "start_time": datetime.fromtimestamp(start_time),
-                            "end_time": datetime.fromtimestamp(end_time),
-                            "duration_seconds": end_time - start_time,
-                            "status": "SUCCESS",
-                            "attempt": attempts + 1,
-                        }
-                    )
                     return entity_name, merged_candidates
 
             except Exception:
-                end_time = time.time()
                 if attempts == 4:
                     self.crocodile.mongo_wrapper.log_to_db(
                         "FETCH_CANDIDATES_ERROR",
@@ -205,8 +185,6 @@ class BowFetcher:
         """
         This used to be Crocodile._fetch_bow_for_chunk.
         """
-        db = self.crocodile.get_db()
-        timing_trace_collection = db[self.crocodile._TIMING_COLLECTION]
         bow_cache = self.crocodile.get_bow_cache()
 
         chunk_bow_results = {}
@@ -220,7 +198,6 @@ class BowFetcher:
 
         backoff = 1
         for attempts in range(5):
-            start_time = time.time()
             try:
                 async with session.post(url, json=payload) as response:
                     response.raise_for_status()
@@ -234,22 +211,9 @@ class BowFetcher:
                         bow_cache.put(cache_key, qid_data)
                         chunk_bow_results[qid] = qid_data
 
-                    end_time = time.time()
-                    timing_trace_collection.insert_one(
-                        {
-                            "operation_name": "_fetch_bow_for_multiple_qids:CHUNK",
-                            "url": url,
-                            "start_time": start_time,
-                            "end_time": end_time,
-                            "duration_seconds": end_time - start_time,
-                            "status": "SUCCESS",
-                            "attempt": attempts + 1,
-                        }
-                    )
                     return chunk_bow_results
 
             except Exception:
-                end_time = time.time()
                 if attempts == 4:
                     self.crocodile.mongo_wrapper.log_to_db(
                         "FETCH_BOW_ERROR",

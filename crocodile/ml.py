@@ -135,16 +135,7 @@ class MLWorker(Process):
             )
             if processed_rows >= to_process:
                 return
-            to_process_row = self.mongo_wrapper.find_one_document(
-                training_collection,
-                {
-                    "dataset_name": self.dataset_name,
-                    "table_name": self.table_name,
-                    "ml_ranked": False,
-                },
-            )
-            if to_process_row:
-                self.apply_ml_ranking(self.dataset_name, self.table_name, model)
+            self.apply_ml_ranking(self.dataset_name, self.table_name, model)
 
     def apply_ml_ranking(self, dataset_name: str, table_name: str, model: "Model") -> None:
         db: Database = self.get_db()

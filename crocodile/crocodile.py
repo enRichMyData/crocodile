@@ -1,5 +1,6 @@
 import multiprocessing as mp
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import List, Optional
@@ -155,30 +156,32 @@ class Crocodile:
         table_name: str = None,
         columns_type: ColType | None = None,
     ):
+        """Efficiently load data into MongoDB using batched inserts."""
+        # Load data from CSV if needed
         if not isinstance(self.input_csv, pd.DataFrame):
             df = pd.read_csv(self.input_csv)
         else:
             df = self.input_csv
 
+        total_rows = len(df)
+        print(f"Onboarding {total_rows} rows for dataset '{dataset_name}', table '{table_name}'")
+
+        # Perform column classification
         if columns_type is None:
             classifier = ColumnClassifier(model_type="fast")
             classification_results = classifier.classify_multiple_tables([df])
             table_classification = classification_results[0].get("table_1", {})
 
-            # We'll create two dictionaries: one for NE (Named Entity) columns and
-            # one for LIT (Literal) columns.
+            # Create dictionaries for column types
             ne_cols = {}
             lit_cols = {}
             ignored_cols = []
 
-            # Define which classification types should be considered as NE.
+            # Define NE classification types
             NE_classifications = {"PERSON", "OTHER", "ORGANIZATION", "LOCATION"}
 
-            # Iterate over the DataFrame columns by order so that
-            # we use the column's index (as a string)
+            # Classify columns
             for idx, col in enumerate(df.columns):
-                # Get the classification result for this column.
-                # If the classifier didn't return a result for a column, we default to "UNKNOWN".
                 col_result = table_classification.get(col, {})
                 classification = col_result.get("classification", "UNKNOWN")
 
@@ -190,6 +193,8 @@ class Crocodile:
             ne_cols = columns_type.get("NE", {})
             lit_cols = columns_type.get("LIT", {})
             ignored_cols = columns_type.get("IGNORED", [])
+
+        # Determine ignored columns
         all_recognized_cols = set(ne_cols.keys()) | set(lit_cols.keys())
         all_cols = set([str(i) for i in range(len(df.columns))])
         if len(all_recognized_cols) != len(all_cols):
@@ -197,25 +202,75 @@ class Crocodile:
         ignored_cols = list(set(ignored_cols))
         context_cols = list(set([str(i) for i in range(len(df.columns))]) - set(ignored_cols))
 
+        # Get database connection
         db = self.get_db()
         input_collection = db["input_data"]
 
-        # Onboard data (values only, no headers) along with the classification metadata
-        for index, row in df.iterrows():
-            document = {
-                "dataset_name": dataset_name,
-                "table_name": table_name,
-                "row_id": index,
-                "data": row.tolist(),  # Store row values as a list
-                "classified_columns": {"NE": ne_cols, "LIT": lit_cols, "IGNORED": ignored_cols},
-                "context_columns": context_cols,  # Context columns (by index)
-                "correct_qids": {},  # Empty as ground truth is not available
-                "status": "TODO",
-            }
-            input_collection.insert_one(document)
+        # Determine optimal chunk size based on dataframe size
+        if total_rows > 100000:
+            chunk_size = 1024
+        elif total_rows > 10000:
+            chunk_size = 2048
+        else:
+            chunk_size = 4096
 
+        # Process in batches
+        total_chunks = (total_rows + chunk_size - 1) // chunk_size  # Ceiling division
+        start_time = time.perf_counter()
+
+        for chunk_idx in range(total_chunks):
+            chunk_start = chunk_idx * chunk_size
+            chunk_end = min(chunk_start + chunk_size, total_rows)
+
+            # Extract chunk
+            chunk = df.iloc[chunk_start:chunk_end]
+
+            # Prepare documents for batch insertion
+            documents = []
+            for index, row in chunk.iterrows():
+                document = {
+                    "dataset_name": dataset_name,
+                    "table_name": table_name,
+                    "row_id": index,
+                    "data": row.tolist(),
+                    "classified_columns": {
+                        "NE": ne_cols,
+                        "LIT": lit_cols,
+                        "IGNORED": ignored_cols,
+                    },
+                    "context_columns": context_cols,
+                    "correct_qids": {},
+                    "status": "TODO",
+                }
+                documents.append(document)
+
+            # Insert batch
+            if documents:
+                try:
+                    input_collection.insert_many(documents, ordered=False)
+
+                    # Report progress
+                    elapsed = time.time() - start_time
+                    rows_processed = chunk_end
+                    rows_per_second = rows_processed / elapsed if elapsed > 0 else 0
+
+                    print(
+                        f"Chunk {chunk_idx+1}/{total_chunks}: "
+                        f"Onboarded rows {chunk_start+1}-{chunk_end} "
+                        f"({rows_per_second:.1f} rows/sec)"
+                    )
+
+                except Exception as e:
+                    print(f"Error inserting batch {chunk_idx+1}: {str(e)}")
+                    # If error is not a duplicate key error, re-raise it
+                    if "duplicate key" not in str(e).lower():
+                        raise
+
+        total_time = time.perf_counter() - start_time
+        print(f"Data onboarding complete for dataset '{dataset_name}' and table '{table_name}'")
         print(
-            f"Data onboarded successfully for dataset '{dataset_name}' and table '{table_name}'."
+            f"Onboarded {total_rows} rows in {total_time:.2f} seconds "
+            f"({total_rows/total_time:.1f} rows/sec)"
         )
 
     def fetch_results(self):
@@ -269,8 +324,12 @@ class Crocodile:
 
         # Process in batches with cursor
         batch_size = 1024  # Process 1024 documents at a time
+
+        # Only fetch fields we actually need to reduce network transfer
+        projection = {"data": 1, "el_results": 1, "classified_columns.NE": 1}
         cursor = input_collection.find(
-            {"dataset_name": self.dataset_name, "table_name": self.table_name}
+            {"dataset_name": self.dataset_name, "table_name": self.table_name},
+            projection=projection,
         ).batch_size(batch_size)
 
         # Determine whether to stream to CSV or collect results

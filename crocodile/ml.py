@@ -67,12 +67,10 @@ class MLWorker:
         input_collection: Collection = db[self.input_collection]
         training_collection: Collection = db[self.training_collection_name]
 
-        # Count total rows that need processing for this dataset/table
         total_docs = self.mongo_wrapper.count_documents(
             input_collection,
-            {"dataset_name": self.dataset_name, "table_name": self.table_name, "status": "DONE"},
+            {"dataset_name": self.dataset_name, "table_name": self.table_name},
         )
-        print(f"Total documents to process for ML ranking: {total_docs}")
 
         # Count how many rows have been ML-ranked already
         processed_count = self.mongo_wrapper.count_documents(
@@ -93,6 +91,7 @@ class MLWorker:
 
             # Process a batch of documents
             docs_processed = self.apply_ml_ranking(self.dataset_name, self.table_name, model)
+            processed_count += docs_processed
 
             # If no documents were processed in this batch, there might be none left
             if docs_processed == 0:
@@ -105,12 +104,9 @@ class MLWorker:
                         "ml_ranked": False,
                     },
                 )
-
                 if remaining == 0:
                     print(f"No unranked documents left. Processed {processed_count}/{total_docs}.")
                     return
-
-            processed_count += docs_processed
 
     def apply_ml_ranking(self, dataset_name: str, table_name: str, model: "Model") -> bool:
         """Apply ML ranking to a batch of documents. Returns True if documents were processed."""

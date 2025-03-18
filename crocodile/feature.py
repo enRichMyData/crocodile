@@ -25,6 +25,20 @@ DEFAULT_FEATURES = [
 ]
 
 
+def map_nertype_to_numeric(nertype: str) -> int:
+    mapping: Dict[str, int] = {
+        "LOCATION": 1,
+        "LOC": 1,
+        "ORGANIZATION": 2,
+        "ORG": 2,
+        "PERSON": 3,
+        "PERS": 3,
+        "OTHER": 4,
+        "OTHERS": 4,
+    }
+    return mapping.get(nertype, 4)
+
+
 class Feature:
     def __init__(self, features: Optional[List[str]] = None):
         self.selected_features = features or DEFAULT_FEATURES
@@ -37,19 +51,6 @@ class Feature:
             "predicate": 4,
         }
         return mapping.get(kind, 1)
-
-    def map_nertype_to_numeric(self, nertype: str) -> int:
-        mapping: Dict[str, int] = {
-            "LOCATION": 1,
-            "LOC": 1,
-            "ORGANIZATION": 2,
-            "ORG": 2,
-            "PERSON": 3,
-            "PERS": 3,
-            "OTHER": 4,
-            "OTHERS": 4,
-        }
-        return mapping.get(nertype, 4)
 
     def calculate_token_overlap(self, tokens_a: Set[str], tokens_b: Set[str]) -> float:
         intersection: Set[str] = tokens_a & tokens_b
@@ -90,7 +91,7 @@ class Feature:
             )
 
             kind_numeric: int = self.map_kind_to_numeric(candidate.get("kind", "entity"))
-            nertype_numeric: int = self.map_nertype_to_numeric(candidate.get("NERtype", "OTHERS"))
+            nertype_numeric: int = map_nertype_to_numeric(candidate.get("NERtype", "OTHERS"))
 
             desc: float = 0.0
             descNgram: float = 0.0

@@ -3,6 +3,10 @@ import traceback
 
 import pandas as pd
 
+from crocodile.feature import map_nertype_to_numeric
+from crocodile.fetchers import BowFetcher, CandidateFetcher
+from crocodile.mongo import MongoWrapper
+
 
 class RowBatchProcessor:
     """
@@ -10,8 +14,32 @@ class RowBatchProcessor:
     Takes the Crocodile instance so we can reference .mongo_wrapper, .feature, etc.
     """
 
-    def __init__(self, crocodile):
-        self.crocodile = crocodile
+    def __init__(
+        self,
+        candidate_fetcher: CandidateFetcher,
+        input_collection: str,
+        training_collection: str,
+        max_training_candidates: int = 16,
+        max_candidates: int = 5,
+        bow_fetcher: BowFetcher | None = None,
+        **kwargs,
+    ):
+        self.candidate_fetcher = candidate_fetcher
+        self.input_collection = input_collection
+        self.training_collection = training_collection
+        self.max_training_candidates = max_training_candidates
+        self.max_candidates = max_candidates
+        self.bow_fetcher = bow_fetcher
+        self._db_name = kwargs.get("db_name", "crocodile_db")
+        self._mongo_uri = kwargs.get("mongo_uri", "mongodb://mongodb:27017")
+        self.mongo_wrapper = MongoWrapper(self._mongo_uri, self._db_name)
+
+    def get_db(self):
+        """Get MongoDB database connection for current process"""
+        from crocodile.mongo import MongoConnectionManager
+
+        client = MongoConnectionManager.get_client(self._mongo_uri)
+        return client[self._db_name]
 
     def process_rows_batch(self, docs, dataset_name, table_name):
         """
@@ -22,7 +50,7 @@ class RowBatchProcessor:
           4) Process each row individually, fetching BoW data as needed.
           5) Save results and update DB.
         """
-        db = self.crocodile.get_db()
+        db = self.get_db()
         try:
             # 1) Gather all needed info from docs
             (
@@ -53,7 +81,7 @@ class RowBatchProcessor:
             )
 
         except Exception:
-            self.crocodile.mongo_wrapper.log_to_db(
+            self.mongo_wrapper.log_to_db(
                 "ERROR", "Error processing batch of rows", traceback.format_exc()
             )
 
@@ -150,7 +178,7 @@ class RowBatchProcessor:
         for any entity that returned <= 1 candidate.
         """
         # 1) Initial fetch
-        candidates_results = self.crocodile.fetch_candidates_batch(
+        candidates_results = self.candidate_fetcher.fetch_candidates_batch(
             all_entities_to_process, all_row_texts, all_fuzzies, all_qids
         )
 
@@ -172,7 +200,7 @@ class RowBatchProcessor:
                 qids_retry.append(all_qids[idx])
 
         if entities_to_retry:
-            retry_results = self.crocodile.fetch_candidates_batch(
+            retry_results = self.candidate_fetcher.fetch_candidates_batch(
                 entities_to_retry, row_texts_retry, fuzzies_retry, qids_retry
             )
             for ne_value in entities_to_retry:
@@ -208,12 +236,8 @@ class RowBatchProcessor:
 
             # Fetch BoW data if needed
             bow_data = {}
-            if (
-                row_qids
-                and self.crocodile._entity_bow_endpoint
-                and self.crocodile.entity_retrieval_token
-            ):
-                bow_data = self.crocodile.fetch_bow_vectors_batch(
+            if row_qids and self.bow_fetcher is not None:
+                bow_data = self.bow_fetcher.fetch_bow_vectors_batch(
                     row_hash, raw_context_text, row_qids
                 )
 
@@ -225,11 +249,11 @@ class RowBatchProcessor:
                 ne_columns, row, correct_qids, row_index, candidates_results, bow_data
             )
 
-            # Save to DB
+            # Save to DB - Ensure status is explicitly set to "DONE"
             self.save_candidates_for_training(
                 training_candidates_by_ne_column, dataset_name, table_name, row_index
             )
-            db[self.crocodile._INPUT_COLLECTION].update_one(
+            db[self.input_collection].update_one(
                 {"_id": doc_id}, {"$set": {"el_results": linked_entities, "status": "DONE"}}
             )
 
@@ -277,9 +301,7 @@ class RowBatchProcessor:
                             cand["features"]["bow_similarity"] = bow_data.get(qid, {}).get(
                                 "similarity_score", 0.0
                             )
-                            cand["features"][
-                                "column_NERtype"
-                            ] = self.crocodile.feature.map_nertype_to_numeric(ner_type)
+                            cand["features"]["column_NERtype"] = map_nertype_to_numeric(ner_type)
 
                     # Rank
                     ranked_candidates = self.rank_with_feature_scoring(candidates)
@@ -288,25 +310,20 @@ class RowBatchProcessor:
                     # If correct QID is missing in top training slice, insert it
                     correct_qid = correct_qids.get(f"{row_index}-{c}", None)
                     if correct_qid and correct_qid not in [
-                        rc["id"]
-                        for rc in ranked_candidates[: self.crocodile.max_training_candidates]
+                        rc["id"] for rc in ranked_candidates[: self.max_training_candidates]
                     ]:
                         correct_candidate = next(
                             (x for x in ranked_candidates if x["id"] == correct_qid), None
                         )
                         if correct_candidate:
-                            top_slice = ranked_candidates[
-                                : self.crocodile.max_training_candidates - 1
-                            ]
+                            top_slice = ranked_candidates[: self.max_training_candidates - 1]
                             top_slice.append(correct_candidate)
                             ranked_candidates = top_slice
                             ranked_candidates.sort(key=lambda x: x.get("score", 0.0), reverse=True)
 
                     # Slice final results
-                    el_results_candidates = ranked_candidates[: self.crocodile.max_candidates]
-                    training_candidates = ranked_candidates[
-                        : self.crocodile.max_training_candidates
-                    ]
+                    el_results_candidates = ranked_candidates[: self.max_candidates]
+                    training_candidates = ranked_candidates[: self.max_training_candidates]
 
                     linked_entities[c] = el_results_candidates
                     training_candidates_by_ne_column[c] = training_candidates
@@ -349,8 +366,8 @@ class RowBatchProcessor:
         """
         This used to be Crocodile.save_candidates_for_training.
         """
-        db = self.crocodile.get_db()
-        training_collection = db[self.crocodile._TRAINING_COLLECTION]
+        db = self.get_db()
+        training_collection = db[self.training_collection]
         training_document = {
             "dataset_name": dataset_name,
             "table_name": table_name,

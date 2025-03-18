@@ -41,7 +41,7 @@ python3 -m crocodile.cli \
   --croco.input_csv tables/imdb_top_1000.csv \
   --croco.entity_retrieval_endpoint "$ENTITY_RETRIEVAL_ENDPOINT" \
   --croco.entity_retrieval_token "$ENTITY_RETRIEVAL_TOKEN" \
-  --croco.additional_params.mongo_uri "localhost:27017"
+  --croco.mongo_uri "localhost:27017"
 ```
 
 #### Specifying Column Types via CLI
@@ -63,7 +63,7 @@ python3 -m crocodile.cli \
     },
     "IGNORED": ["6", "9", "10", "7", "8"]
   }' \
-  --croco.additional_params.mongo_uri "localhost:27017"
+  --croco.mongo_uri "localhost:27017"
 ```
 
 ### Using Python API

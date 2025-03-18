@@ -5,10 +5,11 @@ from datetime import datetime
 import pandas as pd
 from dependencies import get_db, get_crocodile_db
 from endpoints.imdb_example import IMDB_EXAMPLE  # Example input
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status, UploadFile, File, Form
 from pydantic import BaseModel
 from pymongo.database import Database
 from bson import ObjectId
+import json
 
 router = APIRouter()
 
@@ -21,7 +22,7 @@ class TableUpload(BaseModel):
     data: List[dict]
 
 
-@router.post("/dataset/{datasetName}/table", status_code=status.HTTP_201_CREATED)
+@router.post("/dataset/{datasetName}/table/json", status_code=status.HTTP_201_CREATED)
 def add_table(
     datasetName: str,
     table_upload: TableUpload = Body(..., example=IMDB_EXAMPLE),
@@ -89,6 +90,86 @@ def add_table(
     return {
         "message": "Table added successfully.",
         "tableName": table_upload.table_name,
+        "datasetName": datasetName,
+    }
+
+
+@router.post("/dataset/{datasetName}/table/csv", status_code=status.HTTP_201_CREATED)
+def add_table_csv(
+    datasetName: str,
+    file: UploadFile = File(...),
+    table_name: str = Form(...),
+    column_classification: Optional[str] = Form(None),
+    background_tasks: BackgroundTasks = None,
+    db: Database = Depends(get_db)
+):
+    # Read CSV file
+    df = pd.read_csv(file.file)
+    header = df.columns.tolist()
+    total_rows = len(df)
+    
+    # Parse column_classification if provided
+    classification = json.loads(column_classification) if column_classification else {}
+    
+    # Check if dataset exists; if not, create it
+    dataset = db.datasets.find_one({"name": datasetName})
+    if not dataset:
+        dataset_id = db.datasets.insert_one({
+            "name": datasetName,
+            "created_at": datetime.now(),
+            "total_tables": 0,
+            "total_rows": 0
+        }).inserted_id
+    else:
+        dataset_id = dataset["_id"]
+    
+    # Create table metadata
+    table_metadata = {
+        "dataset_name": datasetName,
+        "table_name": table_name,
+        "header": header,
+        "total_rows": total_rows,
+        "created_at": datetime.now(),
+        "status": "processing",
+        "classified_columns": classification  # updated field for CSV input
+    }
+    db.tables.insert_one(table_metadata)
+    
+    # Update dataset metadata
+    db.datasets.update_one(
+        {"_id": dataset_id},
+        {"$inc": {"total_tables": 1, "total_rows": total_rows}}
+    )
+    
+    # Trigger background task
+    def run_crocodile_task():
+        from crocodile import Crocodile
+
+        croco = Crocodile(
+            input_csv=df,
+            dataset_name=datasetName,
+            table_name=table_name,
+            max_candidates=3,
+            entity_retrieval_endpoint=os.environ.get("ENTITY_RETRIEVAL_ENDPOINT"),
+            entity_retrieval_token=os.environ.get("ENTITY_RETRIEVAL_TOKEN"),
+            max_workers=8,
+            candidate_retrieval_limit=10,
+            model_path="./crocodile/models/default.h5",
+            save_output_to_csv=False,
+        )
+        croco.run()
+        
+        # Update table status to completed
+        db.tables.update_one(
+            {"dataset_name": datasetName, "table_name": table_name},
+            {"$set": {"status": "completed", "completed_at": datetime.now()}}
+        )
+
+    background_tasks.add_task(run_crocodile_task)
+    
+    return {
+        "message": "CSV table added successfully.",
+        "tableName": table_name,
         "datasetName": datasetName,
     }
 

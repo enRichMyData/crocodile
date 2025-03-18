@@ -23,18 +23,16 @@ class CandidateFetcher:
         token: str,
         num_candidates: int,
         feature: Feature,
-        input_collection: str,
-        cache_collection: str,
         **kwargs,
     ):
         self.endpoint = endpoint
         self.token = token
         self.num_candidates = num_candidates
         self.feature = feature
-        self.input_collection = input_collection
-        self.cache_collection = cache_collection
         self._db_name = kwargs.get("db_name", "crocodile_db")
         self._mongo_uri = kwargs.get("mongo_uri", "mongodb://mongodb:27017")
+        self.input_collection = kwargs.get("input_collection", "input_data")
+        self.cache_collection = kwargs.get("cache_collection", "candidate_cache")
         self.mongo_wrapper = MongoWrapper(self._mongo_uri, self._db_name)
 
     def get_db(self):
@@ -181,18 +179,16 @@ class BowFetcher:
         token: str,
         max_bow_batch_size: int,
         feature: Feature,
-        input_collection: str,
-        bow_cache_collection: str,
         **kwargs,
     ):
         self.endpoint = endpoint
         self.token = token
         self.max_bow_batch_size = max_bow_batch_size
         self.feature = feature
-        self.input_collection = input_collection
-        self.bow_cache_collection = bow_cache_collection
         self._db_name = kwargs.get("db_name", "crocodile_db")
         self._mongo_uri = kwargs.get("mongo_uri", "mongodb://mongodb:27017")
+        self.input_collection = kwargs.get("input_collection", "input_data")
+        self.bow_cache_collection = kwargs.get("bow_cache_collection", "bow_cache")
         self.mongo_wrapper = MongoWrapper(self._mongo_uri, self._db_name)
 
     def get_db(self):

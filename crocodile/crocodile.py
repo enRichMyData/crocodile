@@ -91,30 +91,30 @@ class Crocodile:
             self.entity_retrieval_token,
             self.candidate_retrieval_limit,
             self.feature,
-            self._INPUT_COLLECTION,
-            self._CACHE_COLLECTION,
             db_name=self._DB_NAME,
             mongo_uri=self._mongo_uri,
+            input_collection=self._INPUT_COLLECTION,
+            cache_collection=self._CACHE_COLLECTION,
         )
         self._bow_fetcher = BowFetcher(
             self._entity_bow_endpoint,
             self.entity_retrieval_token,
             self._max_bow_batch_size,
             self.feature,
-            self._INPUT_COLLECTION,
-            self._BOW_CACHE_COLLECTION,
             db_name=self._DB_NAME,
             mongo_uri=self._mongo_uri,
+            input_collection=self._INPUT_COLLECTION,
+            bow_cache_collection=self._BOW_CACHE_COLLECTION,
         )
         self._row_processor = RowBatchProcessor(
             self._candidate_fetcher,
-            self._INPUT_COLLECTION,
-            self._TRAINING_COLLECTION,
             self.max_training_candidates,
             self.max_candidates,
             self._bow_fetcher if self._entity_bow_endpoint else None,
             db_name=self._DB_NAME,
             mongo_uri=self._mongo_uri,
+            input_collection=self._INPUT_COLLECTION,
+            training_collection=self._TRAINING_COLLECTION,
         )
 
         # Create indexes

@@ -22,6 +22,12 @@ cd crocodile
 pip install -e .
 ```
 
+Additionally, one needs to download the SpaCy model by running the following code:
+
+```bash
+python -m spacy download en_core_web_sm
+```
+
 ## Usage
 
 ### Using the CLI

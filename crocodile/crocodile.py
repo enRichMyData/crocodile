@@ -1,4 +1,3 @@
-import asyncio
 import multiprocessing as mp
 import os
 import uuid
@@ -11,7 +10,6 @@ from column_classifier import ColumnClassifier
 from crocodile.feature import Feature
 from crocodile.fetchers import BowFetcher, CandidateFetcher
 from crocodile.ml import MLWorker
-from crocodile.mongo import MongoCache, MongoConnectionManager, MongoWrapper
 from crocodile.processors import RowBatchProcessor
 from crocodile.typing import ColType
 
@@ -49,6 +47,8 @@ class Crocodile:
         top_n_for_type_freq: int = 3,
         **kwargs,
     ) -> None:
+        from crocodile.mongo import MongoWrapper
+
         self.input_csv = input_csv
         self.output_csv = output_csv
         if self.output_csv is None and kwargs.get("save_output_to_csv", True):
@@ -85,45 +85,55 @@ class Crocodile:
         self.feature = Feature(selected_features)
 
         # Instantiate our helper objects
-        self._candidate_fetcher = CandidateFetcher(self)
-        self._bow_fetcher = BowFetcher(self)
-        self._row_processor = RowBatchProcessor(self)
+        self._candidate_fetcher = CandidateFetcher(
+            self.entity_retrieval_endpoint,
+            self.entity_retrieval_token,
+            self.candidate_retrieval_limit,
+            self.feature,
+            self._INPUT_COLLECTION,
+            self._CACHE_COLLECTION,
+            db_name=self._DB_NAME,
+            mongo_uri=self._mongo_uri,
+        )
+        self._bow_fetcher = BowFetcher(
+            self._entity_bow_endpoint,
+            self.entity_retrieval_token,
+            self._max_bow_batch_size,
+            self.feature,
+            self._INPUT_COLLECTION,
+            self._BOW_CACHE_COLLECTION,
+            db_name=self._DB_NAME,
+            mongo_uri=self._mongo_uri,
+        )
+        self._row_processor = RowBatchProcessor(
+            self._candidate_fetcher,
+            self._INPUT_COLLECTION,
+            self._TRAINING_COLLECTION,
+            self.max_training_candidates,
+            self.max_candidates,
+            self._bow_fetcher if self._entity_bow_endpoint else None,
+            db_name=self._DB_NAME,
+            mongo_uri=self._mongo_uri,
+        )
 
         # Create indexes
         self.mongo_wrapper.create_indexes()
 
     def get_db(self):
         """Get MongoDB database connection for current process"""
+        from crocodile.mongo import MongoConnectionManager
+
         client = MongoConnectionManager.get_client(self._mongo_uri)
         return client[self._DB_NAME]
 
     def close_mongo_connection(self):
         """Cleanup when instance is destroyed"""
+        from crocodile.mongo import MongoConnectionManager
+
         try:
             MongoConnectionManager.close_connection()
         except Exception:
             pass
-
-    def get_candidate_cache(self):
-        db = self.get_db()
-        return MongoCache(db, self._CACHE_COLLECTION)
-
-    def get_bow_cache(self):
-        db = self.get_db()
-        return MongoCache(db, self._BOW_CACHE_COLLECTION)
-
-    def fetch_candidates_batch(self, entities, row_texts, fuzzies, qids):
-        return asyncio.run(
-            self._candidate_fetcher.fetch_candidates_batch_async(
-                entities, row_texts, fuzzies, qids
-            )
-        )
-
-    def fetch_bow_vectors_batch(self, row_hash, row_text, qids):
-        async def runner():
-            return await self._bow_fetcher.fetch_bow_vectors_batch_async(row_hash, row_text, qids)
-
-        return asyncio.run(runner())
 
     def process_rows_batch(self, docs, dataset_name, table_name):
         self._row_processor.process_rows_batch(docs, dataset_name, table_name)
@@ -300,8 +310,6 @@ class Crocodile:
         processes = []
         for _ in range(self.ml_ranking_workers):
             p = MLWorker(
-                db_uri=self._mongo_uri,
-                db_name=self._DB_NAME,
                 table_name=self.table_name,
                 dataset_name=self.dataset_name,
                 training_collection_name=self._TRAINING_COLLECTION,
@@ -312,6 +320,8 @@ class Crocodile:
                 max_candidates=self.max_candidates,
                 top_n_for_type_freq=self.top_n_for_type_freq,
                 features=self.feature.selected_features,
+                mongo_uri=self._mongo_uri,
+                db_name=self._DB_NAME,
             )
             p.start()
             processes.append(p)

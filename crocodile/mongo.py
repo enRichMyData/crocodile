@@ -72,7 +72,7 @@ class MongoWrapper:
         self,
         mongo_uri: str,
         db_name: str,
-        error_log_collection_name: str = "error_log",
+        error_log_collection_name: str = "error_logs",
     ) -> None:
         self.mongo_uri: str = mongo_uri
         self.db_name: str = db_name

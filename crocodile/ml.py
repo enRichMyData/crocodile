@@ -18,8 +18,6 @@ if TYPE_CHECKING:
 class MLWorker(Process):
     def __init__(
         self,
-        db_uri: str,
-        db_name: str,
         table_name: str,
         dataset_name: str,
         training_collection_name: str,
@@ -30,10 +28,9 @@ class MLWorker(Process):
         max_candidates: int = 5,
         top_n_for_type_freq: int = 3,
         features: List[str] | None = None,
+        **kwargs,
     ) -> None:
         super(MLWorker, self).__init__()
-        self.db_uri: str = db_uri
-        self.db_name: str = db_name
         self.table_name = table_name
         self.dataset_name = dataset_name
         self.training_collection_name: str = training_collection_name
@@ -45,14 +42,18 @@ class MLWorker(Process):
         self.batch_size: int = batch_size
         self.max_candidates: int = max_candidates
         self.top_n_for_type_freq: int = top_n_for_type_freq
-        self.mongo_wrapper: MongoWrapper = MongoWrapper(
-            db_uri, db_name, error_log_collection_name=self.error_log_collection_name
-        )
         self.selected_features = features or DEFAULT_FEATURES
+        self._db_name = kwargs.pop("db_name", "crocodile_db")
+        self._mongo_uri = kwargs.pop("mongo_uri", "mongodb://mongodb:27017/")
+        self.mongo_wrapper: MongoWrapper = MongoWrapper(
+            self._mongo_uri,
+            self._db_name,
+            error_log_collection_name=self.error_log_collection_name,
+        )
 
     def get_db(self) -> Database:
-        client = MongoConnectionManager.get_client(self.db_uri)
-        return client[self.db_name]
+        client = MongoConnectionManager.get_client(self._mongo_uri)
+        return client[self._db_name]
 
     def load_ml_model(self) -> "Model":
         from tensorflow.keras.models import load_model  # Local import as in original code
@@ -64,16 +65,17 @@ class MLWorker(Process):
         model: "Model" = self.load_ml_model()
         input_collection: Collection = db[self.input_collection]
         training_collection: Collection = db[self.training_collection_name]
-        to_process = self.mongo_wrapper.count_documents(
+
+        # Count total rows that need processing for this dataset/table
+        total_docs = self.mongo_wrapper.count_documents(
             input_collection,
-            {
-                "dataset_name": self.dataset_name,
-                "table_name": self.table_name,
-            },
+            {"dataset_name": self.dataset_name, "table_name": self.table_name, "status": "DONE"},
         )
-        print(f"Total unprocessed documents (for ML ranking): {to_process}")
+        print(f"Total documents to process for ML ranking: {total_docs}")
+
         while True:
-            processed_rows = self.mongo_wrapper.count_documents(
+            # Count how many rows have been ML-ranked already
+            processed_count = self.mongo_wrapper.count_documents(
                 training_collection,
                 {
                     "dataset_name": self.dataset_name,
@@ -81,11 +83,36 @@ class MLWorker(Process):
                     "ml_ranked": True,
                 },
             )
-            if processed_rows >= to_process:
-                return
-            self.apply_ml_ranking(self.dataset_name, self.table_name, model)
 
-    def apply_ml_ranking(self, dataset_name: str, table_name: str, model: "Model") -> None:
+            # Log progress
+            print(f"ML ranking progress: {processed_count}/{total_docs} documents")
+
+            # Check if we've processed all documents
+            if processed_count >= total_docs:
+                print(f"ML ranking complete: {processed_count}/{total_docs} documents processed")
+                return
+
+            # Process a batch of documents
+            batch_result = self.apply_ml_ranking(self.dataset_name, self.table_name, model)
+
+            # If no documents were processed in this batch, there might be none left
+            if not batch_result:
+                # Double-check if there are any unranked documents left
+                remaining = self.mongo_wrapper.count_documents(
+                    training_collection,
+                    {
+                        "dataset_name": self.dataset_name,
+                        "table_name": self.table_name,
+                        "ml_ranked": False,
+                    },
+                )
+
+                if remaining == 0:
+                    print(f"No unranked documents left. Processed {processed_count}/{total_docs}.")
+                    return
+
+    def apply_ml_ranking(self, dataset_name: str, table_name: str, model: "Model") -> bool:
+        """Apply ML ranking to a batch of documents. Returns True if documents were processed."""
         db: Database = self.get_db()
         training_collection: Collection = db[self.training_collection_name]
         input_collection: Collection = db[self.input_collection]
@@ -102,8 +129,9 @@ class MLWorker(Process):
             if doc is None:
                 break
             batch_docs.append(doc)
+
         if not batch_docs:
-            return
+            return False
 
         # Map documents by _id so we can update them later
         doc_map: Dict[Any, Dict[str, Any]] = {doc["_id"]: doc for doc in batch_docs}
@@ -235,8 +263,7 @@ class MLWorker(Process):
                 {"dataset_name": dataset_name, "table_name": table_name, "row_id": row_index},
                 {"$set": {"el_results": updated_candidates_by_column}},
             )
-
-        print("ML ranking completed.")
+        return True
 
     def extract_features(self, candidate: Dict[str, Any]) -> List[float]:
         return [candidate["features"].get(feature, 0.0) for feature in self.selected_features]

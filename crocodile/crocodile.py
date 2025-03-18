@@ -65,7 +65,6 @@ class Crocodile:
         self.dataset_name = dataset_name
         self.table_name = table_name
         self.columns_type = columns_type
-        # Use the provided mongo_uri or fallback to the default
         self.max_workers = max_workers or mp.cpu_count()
         self.max_candidates = max_candidates
         self.max_training_candidates = max_training_candidates

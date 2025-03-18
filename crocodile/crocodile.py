@@ -143,7 +143,12 @@ class Crocodile:
         docs = []
         for _ in range(batch_size):
             doc = input_collection.find_one_and_update(
-                {"status": "TODO"}, {"$set": {"status": "DOING"}}
+                {
+                    "dataset_name": self.dataset_name,
+                    "table_name": self.table_name,
+                    "status": "TODO",
+                },
+                {"$set": {"status": "DOING"}},
             )
             if doc is None:
                 break
@@ -157,34 +162,37 @@ class Crocodile:
         columns_type: ColType | None = None,
     ):
         """Efficiently load data into MongoDB using batched inserts."""
-        # Load data from CSV if needed
-        if not isinstance(self.input_csv, pd.DataFrame):
-            df = pd.read_csv(self.input_csv)
-        else:
-            df = self.input_csv
+        start_time = time.perf_counter()
 
-        total_rows = len(df)
+        # Get database connection
+        db = self.get_db()
+        input_collection = db["input_data"]
+
+        # Step 1: Determine data source and extract sample for classification
+        if isinstance(self.input_csv, pd.DataFrame):
+            df = self.input_csv
+            sample = df
+            total_rows = len(df)
+            is_csv_path = False
+        else:
+            sample = pd.read_csv(self.input_csv, nrows=1024)
+            total_rows = "unknown"
+            is_csv_path = True
+
         print(f"Onboarding {total_rows} rows for dataset '{dataset_name}', table '{table_name}'")
 
-        # Perform column classification
+        # Step 2: Perform column classification
         if columns_type is None:
             classifier = ColumnClassifier(model_type="fast")
-            classification_results = classifier.classify_multiple_tables([df])
+            classification_results = classifier.classify_multiple_tables([sample])
             table_classification = classification_results[0].get("table_1", {})
 
-            # Create dictionaries for column types
-            ne_cols = {}
-            lit_cols = {}
-            ignored_cols = []
-
-            # Define NE classification types
+            ne_cols, lit_cols, ignored_cols = {}, {}, []
             NE_classifications = {"PERSON", "OTHER", "ORGANIZATION", "LOCATION"}
 
-            # Classify columns
-            for idx, col in enumerate(df.columns):
+            for idx, col in enumerate(sample.columns):
                 col_result = table_classification.get(col, {})
                 classification = col_result.get("classification", "UNKNOWN")
-
                 if classification in NE_classifications:
                     ne_cols[str(idx)] = classification
                 else:
@@ -194,44 +202,43 @@ class Crocodile:
             lit_cols = columns_type.get("LIT", {})
             ignored_cols = columns_type.get("IGNORED", [])
 
-        # Determine ignored columns
         all_recognized_cols = set(ne_cols.keys()) | set(lit_cols.keys())
-        all_cols = set([str(i) for i in range(len(df.columns))])
+        all_cols = set([str(i) for i in range(len(sample.columns))])
         if len(all_recognized_cols) != len(all_cols):
             ignored_cols.extend(list(all_cols - all_recognized_cols))
         ignored_cols = list(set(ignored_cols))
-        context_cols = list(set([str(i) for i in range(len(df.columns))]) - set(ignored_cols))
+        context_cols = list(set([str(i) for i in range(len(sample.columns))]) - set(ignored_cols))
 
-        # Get database connection
-        db = self.get_db()
-        input_collection = db["input_data"]
+        # Step 3: Define a chunk generator function
+        def get_chunks():
+            """Generator that yields chunks of rows, handling both DF and CSV."""
+            if is_csv_path:
+                chunk_size = 2048
+                row_count = 0
+                for chunk in pd.read_csv(self.input_csv, chunksize=chunk_size):
+                    yield chunk, row_count
+                    row_count += len(chunk)
+            else:
+                chunk_size = 1024 if total_rows > 100000 else 2048 if total_rows > 10000 else 4096
+                total_chunks = (total_rows + chunk_size - 1) // chunk_size
+                for chunk_idx in range(total_chunks):
+                    chunk_start = chunk_idx * chunk_size
+                    chunk_end = min(chunk_start + chunk_size, total_rows)
+                    yield df.iloc[chunk_start:chunk_end], chunk_start
 
-        # Determine optimal chunk size based on dataframe size
-        if total_rows > 100000:
-            chunk_size = 1024
-        elif total_rows > 10000:
-            chunk_size = 2048
-        else:
-            chunk_size = 4096
+        # Step 4: Process all chunks using the generator
+        processed_rows = 0
+        chunk_idx = 0
 
-        # Process in batches
-        total_chunks = (total_rows + chunk_size - 1) // chunk_size  # Ceiling division
-        start_time = time.perf_counter()
-
-        for chunk_idx in range(total_chunks):
-            chunk_start = chunk_idx * chunk_size
-            chunk_end = min(chunk_start + chunk_size, total_rows)
-
-            # Extract chunk
-            chunk = df.iloc[chunk_start:chunk_end]
-
-            # Prepare documents for batch insertion
+        for chunk, start_idx in get_chunks():
+            chunk_idx += 1
             documents = []
-            for index, row in chunk.iterrows():
+            for i, (_, row) in enumerate(chunk.iterrows()):
+                row_id = start_idx + i
                 document = {
                     "dataset_name": dataset_name,
                     "table_name": table_name,
-                    "row_id": index,
+                    "row_id": row_id,
                     "data": row.tolist(),
                     "classified_columns": {
                         "NE": ne_cols,
@@ -244,33 +251,39 @@ class Crocodile:
                 }
                 documents.append(document)
 
-            # Insert batch
             if documents:
                 try:
                     input_collection.insert_many(documents, ordered=False)
+                    chunk_size = len(documents)
+                    processed_rows += chunk_size
+                    elapsed = time.perf_counter() - start_time
+                    rows_per_second = processed_rows / elapsed if elapsed > 0 else 0
 
-                    # Report progress
-                    elapsed = time.time() - start_time
-                    rows_processed = chunk_end
-                    rows_per_second = rows_processed / elapsed if elapsed > 0 else 0
-
-                    print(
-                        f"Chunk {chunk_idx+1}/{total_chunks}: "
-                        f"Onboarded rows {chunk_start+1}-{chunk_end} "
-                        f"({rows_per_second:.1f} rows/sec)"
-                    )
-
+                    if is_csv_path:
+                        print(
+                            f"Chunk {chunk_idx}: "
+                            f"Processed {chunk_size} rows (total: {processed_rows}) "
+                            f"({rows_per_second:.1f} rows/sec)"
+                        )
+                    else:
+                        chunk_start = start_idx + 1
+                        chunk_end = start_idx + chunk_size
+                        total_chunks = (total_rows + chunk_size - 1) // chunk_size
+                        print(
+                            f"Chunk {chunk_idx}/{total_chunks}: "
+                            f"Onboarded rows {chunk_start}-{chunk_end} "
+                            f"({rows_per_second:.1f} rows/sec)"
+                        )
                 except Exception as e:
-                    print(f"Error inserting batch {chunk_idx+1}: {str(e)}")
-                    # If error is not a duplicate key error, re-raise it
+                    print(f"Error inserting batch {chunk_idx}: {str(e)}")
                     if "duplicate key" not in str(e).lower():
                         raise
 
         total_time = time.perf_counter() - start_time
         print(f"Data onboarding complete for dataset '{dataset_name}' and table '{table_name}'")
         print(
-            f"Onboarded {total_rows} rows in {total_time:.2f} seconds "
-            f"({total_rows/total_time:.1f} rows/sec)"
+            f"Onboarded {processed_rows} rows in {total_time:.2f} seconds "
+            f"({processed_rows/total_time:.1f} rows/sec)"
         )
 
     def fetch_results(self):

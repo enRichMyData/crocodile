@@ -304,6 +304,7 @@ class Crocodile:
             header = self.input_csv.columns.tolist()
         elif isinstance(self.input_csv, str):
             header = pd.read_csv(self.input_csv, nrows=0).columns.tolist()
+        num_cols = len(header)
 
         # Get first document to determine column count if header is still None
         sample_doc = input_collection.find_one(
@@ -315,25 +316,7 @@ class Crocodile:
 
         if header is None:
             print("Could not extract header from input table, using generic column names.")
-            header = [f"col_{i}" for i in range(len(sample_doc["data"]))]
-
-        # Create extended header with entity columns
-        extended_header = header.copy()
-        for col_idx in sample_doc["classified_columns"].get("NE", {}).keys():
-            try:
-                col_index = int(col_idx)
-                col_header = header[col_index]
-            except (ValueError, IndexError):
-                col_header = f"col_{col_idx}"
-
-            extended_header.extend(
-                [
-                    f"{col_header}_id",
-                    f"{col_header}_name",
-                    f"{col_header}_desc",
-                    f"{col_header}_score",
-                ]
-            )
+            header = [f"col_{i}" for i in range(num_cols)]
 
         # Process in batches with cursor
         batch_size = 1024  # Process 1024 documents at a time
@@ -345,106 +328,35 @@ class Crocodile:
             projection=projection,
         ).batch_size(batch_size)
 
-        # Determine whether to stream to CSV or collect results
+        # Count documents if streaming to CSV for progress reporting
         if stream_to_csv:
             total_docs = input_collection.count_documents(
                 {"dataset_name": self.dataset_name, "table_name": self.table_name}
             )
             print(f"Streaming {total_docs} documents to CSV...")
 
-            # Process in chunks to maintain memory efficiency
-            chunk_size = 256  # Write to CSV in chunks of 256 rows
-            current_chunk = []
-            processed_count = 0
+        # Setup for handling results
+        all_rows = [] if not stream_to_csv else None
+        current_chunk = []
+        processed_count = 0
+        chunk_size = 256  # Size for chunked CSV writing
 
-            for doc in cursor:
-                # Create base row data with original values
-                row_data = dict(zip(header, doc["data"]))
-                el_results = doc.get("el_results", {})
+        # Process all documents
+        for doc in cursor:
+            # Process each document - this is the common code between both paths
+            row_data = self._extract_row_data(doc, header)
 
-                # Add entity linking results
-                for col_idx, col_type in doc["classified_columns"].get("NE", {}).items():
-                    try:
-                        col_index = int(col_idx)
-                        col_header = header[col_index]
-                    except (ValueError, IndexError):
-                        col_header = f"col_{col_idx}"
-
-                    id_field = f"{col_header}_id"
-                    name_field = f"{col_header}_name"
-                    desc_field = f"{col_header}_desc"
-                    score_field = f"{col_header}_score"
-
-                    # Get first candidate or empty placeholder
-                    candidate = el_results.get(col_idx, [{}])[0]
-
-                    row_data[id_field] = candidate.get("id", "")
-                    row_data[name_field] = candidate.get("name", "")
-                    row_data[desc_field] = candidate.get("description", "")
-                    row_data[score_field] = candidate.get("score", 0)
-
-                # Add row to current chunk
+            if stream_to_csv:
+                # For CSV streaming, collect into chunk
                 current_chunk.append(row_data)
                 processed_count += 1
 
-                # When chunk reaches desired size, write to CSV
+                # Write chunk when it reaches desired size
                 if len(current_chunk) >= chunk_size:
-                    # Create DataFrame and append to CSV
-                    chunk_df = pd.DataFrame(current_chunk)
-
-                    # Use mode='a' (append) for all chunks after the first
-                    mode = "w" if processed_count <= chunk_size else "a"
-                    # Only include header for the first chunk
-                    header_option = True if processed_count <= chunk_size else False
-
-                    # Write chunk to CSV
-                    chunk_df.to_csv(self.output_csv, index=False, mode=mode, header=header_option)
-
-                    # Clear chunk and report progress
+                    self._write_csv_chunk(current_chunk, processed_count, chunk_size, total_docs)
                     current_chunk = []
-                    print(f"Processed {processed_count}/{total_docs} rows...")
-
-            # Write any remaining rows
-            if current_chunk:
-                chunk_df = pd.DataFrame(current_chunk)
-                # Append mode if this isn't the first (and only) chunk
-                mode = "w" if processed_count == len(current_chunk) else "a"
-                header_option = True if processed_count == len(current_chunk) else False
-
-                chunk_df.to_csv(self.output_csv, index=False, mode=mode, header=header_option)
-
-            print(f"Results saved to '{self.output_csv}'. Total rows: {processed_count}")
-            return []
-        else:
-            # If not streaming to CSV, collect all results in memory
-            all_rows = []
-            processed_count = 0
-
-            for doc in cursor:
-                # Create base row data with original values
-                row_data = dict(zip(header, doc["data"]))
-                el_results = doc.get("el_results", {})
-
-                # Add entity linking results (same as above)
-                for col_idx, col_type in doc["classified_columns"].get("NE", {}).items():
-                    try:
-                        col_index = int(col_idx)
-                        col_header = header[col_index]
-                    except (ValueError, IndexError):
-                        col_header = f"col_{col_idx}"
-
-                    id_field = f"{col_header}_id"
-                    name_field = f"{col_header}_name"
-                    desc_field = f"{col_header}_desc"
-                    score_field = f"{col_header}_score"
-
-                    candidate = el_results.get(col_idx, [{}])[0]
-
-                    row_data[id_field] = candidate.get("id", "")
-                    row_data[name_field] = candidate.get("name", "")
-                    row_data[desc_field] = candidate.get("description", "")
-                    row_data[score_field] = candidate.get("score", 0)
-
+            else:
+                # For memory collection, just append to results
                 all_rows.append(row_data)
                 processed_count += 1
 
@@ -452,8 +364,64 @@ class Crocodile:
                 if processed_count % batch_size == 0:
                     print(f"Processed {processed_count} rows...")
 
+        # Handle any remaining rows for CSV streaming
+        if stream_to_csv and current_chunk:
+            self._write_csv_chunk(current_chunk, processed_count, chunk_size, total_docs)
+            print(f"Results saved to '{self.output_csv}'. Total rows: {processed_count}")
+            return []
+        elif not stream_to_csv:
             print(f"Retrieved {processed_count} rows total")
             return all_rows
+        else:
+            return []
+
+    def _extract_row_data(self, doc, header):
+        """Extract row data from a MongoDB document.
+
+        Encapsulates the common logic for formatting a row from a document.
+        """
+        # Create base row data with original values
+        row_data = dict(zip(header, doc["data"]))
+        el_results = doc.get("el_results", {})
+
+        # Add entity linking results
+        for col_idx, col_type in doc["classified_columns"].get("NE", {}).items():
+            col_index = int(col_idx)
+            col_header = header[col_index]
+
+            id_field = f"{col_header}_id"
+            name_field = f"{col_header}_name"
+            desc_field = f"{col_header}_desc"
+            score_field = f"{col_header}_score"
+
+            # Get first candidate or empty placeholder
+            candidate = el_results.get(col_idx, [{}])[0]
+
+            row_data[id_field] = candidate.get("id", "")
+            row_data[name_field] = candidate.get("name", "")
+            row_data[desc_field] = candidate.get("description", "")
+            row_data[score_field] = candidate.get("score", 0)
+
+        return row_data
+
+    def _write_csv_chunk(self, chunk, processed_count, chunk_size, total_docs):
+        """Write a chunk of data to CSV.
+
+        Encapsulates the CSV writing logic.
+        """
+        # Create DataFrame and append to CSV
+        chunk_df = pd.DataFrame(chunk)
+
+        # Use mode='a' (append) for all chunks after the first
+        mode = "w" if processed_count <= len(chunk) else "a"
+        # Only include header for the first chunk
+        header_option = True if processed_count <= len(chunk) else False
+
+        # Write chunk to CSV
+        chunk_df.to_csv(self.output_csv, index=False, mode=mode, header=header_option)
+
+        # Report progress
+        print(f"Processed {processed_count}/{total_docs} rows...")
 
     def ml_worker(self, rank: int):
         """Wrapper function to create and run an MLWorker with the correct parameters"""

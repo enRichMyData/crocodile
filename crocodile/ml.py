@@ -1,11 +1,11 @@
 import os
 from collections import Counter, defaultdict
-from multiprocessing import Process
 from typing import TYPE_CHECKING, Any, DefaultDict, Dict, List, Tuple
 
 import numpy as np
 from pymongo.collection import Collection
 from pymongo.database import Database
+from pymongo.operations import UpdateOne
 
 from crocodile import PROJECT_ROOT
 from crocodile.feature import DEFAULT_FEATURES
@@ -15,9 +15,10 @@ if TYPE_CHECKING:
     from tensorflow.keras.models import Model
 
 
-class MLWorker(Process):
+class MLWorker:
     def __init__(
         self,
+        worker_id: int,
         table_name: str,
         dataset_name: str,
         training_collection_name: str,
@@ -66,25 +67,21 @@ class MLWorker(Process):
         input_collection: Collection = db[self.input_collection]
         training_collection: Collection = db[self.training_collection_name]
 
-        # Count total rows that need processing for this dataset/table
         total_docs = self.mongo_wrapper.count_documents(
             input_collection,
-            {"dataset_name": self.dataset_name, "table_name": self.table_name, "status": "DONE"},
+            {"dataset_name": self.dataset_name, "table_name": self.table_name},
         )
-        print(f"Total documents to process for ML ranking: {total_docs}")
 
+        # Count how many rows have been ML-ranked already
+        processed_count = self.mongo_wrapper.count_documents(
+            training_collection,
+            {
+                "dataset_name": self.dataset_name,
+                "table_name": self.table_name,
+                "ml_ranked": True,
+            },
+        )
         while True:
-            # Count how many rows have been ML-ranked already
-            processed_count = self.mongo_wrapper.count_documents(
-                training_collection,
-                {
-                    "dataset_name": self.dataset_name,
-                    "table_name": self.table_name,
-                    "ml_ranked": True,
-                },
-            )
-
-            # Log progress
             print(f"ML ranking progress: {processed_count}/{total_docs} documents")
 
             # Check if we've processed all documents
@@ -93,10 +90,11 @@ class MLWorker(Process):
                 return
 
             # Process a batch of documents
-            batch_result = self.apply_ml_ranking(self.dataset_name, self.table_name, model)
+            docs_processed = self.apply_ml_ranking(self.dataset_name, self.table_name, model)
+            processed_count += docs_processed
 
             # If no documents were processed in this batch, there might be none left
-            if not batch_result:
+            if docs_processed == 0:
                 # Double-check if there are any unranked documents left
                 remaining = self.mongo_wrapper.count_documents(
                     training_collection,
@@ -106,7 +104,6 @@ class MLWorker(Process):
                         "ml_ranked": False,
                     },
                 )
-
                 if remaining == 0:
                     print(f"No unranked documents left. Processed {processed_count}/{total_docs}.")
                     return
@@ -247,23 +244,33 @@ class MLWorker(Process):
             candidate["score"] = float(ml_scores[i])
 
         # --------------------------------------------------------------------------
-        # 5) Sort by final 'score' and trim to max_candidates; update DB
+        # 5) Batch update the final results
         # --------------------------------------------------------------------------
-        for doc_id, doc in doc_map.items():
-            row_index: int = doc["row_id"]
-            updated_candidates_by_column: Dict[Any, List[Dict[str, Any]]] = {}
-            for col_index, candidates in doc["candidates"].items():
-                ranked_candidates: List[Dict[str, Any]] = sorted(
-                    candidates, key=lambda x: x["score"], reverse=True
-                )
-                updated_candidates_by_column[col_index] = ranked_candidates[: self.max_candidates]
 
-            # Update final results in input_collection
-            input_collection.update_one(
-                {"dataset_name": dataset_name, "table_name": table_name, "row_id": row_index},
-                {"$set": {"el_results": updated_candidates_by_column}},
+        bulk_updates = []
+        for doc_id, doc in doc_map.items():
+            row_index = doc["row_id"]
+            updated_candidates_by_column = {}
+
+            for col_index, candidates in doc["candidates"].items():
+                ranked_candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)[
+                    : self.max_candidates
+                ]
+                updated_candidates_by_column[col_index] = ranked_candidates
+
+            # Create update operation
+            bulk_updates.append(
+                UpdateOne(
+                    {"dataset_name": dataset_name, "table_name": table_name, "row_id": row_index},
+                    {"$set": {"el_results": updated_candidates_by_column}},
+                )
             )
-        return True
+
+        # Execute all updates in a single batch operation
+        if bulk_updates:
+            input_collection.bulk_write(bulk_updates)
+
+        return len(batch_docs)  # Return count of processed documents
 
     def extract_features(self, candidate: Dict[str, Any]) -> List[float]:
         return [candidate["features"].get(feature, 0.0) for feature in self.selected_features]

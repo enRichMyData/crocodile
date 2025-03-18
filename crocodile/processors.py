@@ -17,21 +17,19 @@ class RowBatchProcessor:
     def __init__(
         self,
         candidate_fetcher: CandidateFetcher,
-        input_collection: str,
-        training_collection: str,
         max_training_candidates: int = 16,
         max_candidates: int = 5,
         bow_fetcher: BowFetcher | None = None,
         **kwargs,
     ):
         self.candidate_fetcher = candidate_fetcher
-        self.input_collection = input_collection
-        self.training_collection = training_collection
         self.max_training_candidates = max_training_candidates
         self.max_candidates = max_candidates
         self.bow_fetcher = bow_fetcher
         self._db_name = kwargs.get("db_name", "crocodile_db")
         self._mongo_uri = kwargs.get("mongo_uri", "mongodb://mongodb:27017")
+        self.input_collection = kwargs.get("input_collection", "input_data")
+        self.training_collection = kwargs.get("training_collection", "training_data")
         self.mongo_wrapper = MongoWrapper(self._mongo_uri, self._db_name)
 
     def get_db(self):

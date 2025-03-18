@@ -149,25 +149,6 @@ class Crocodile:
             docs.append(doc)
         return docs
 
-    def worker(self):
-        db = self.get_db()
-        input_collection = db[self._INPUT_COLLECTION]
-
-        while True:
-            todo_docs = self.claim_todo_batch(input_collection)
-            if not todo_docs:
-                print("No more tasks to process.")
-                break
-
-            tasks_by_table = {}
-            for doc in todo_docs:
-                dataset_name = doc["dataset_name"]
-                table_name = doc["table_name"]
-                tasks_by_table.setdefault((dataset_name, table_name), []).append(doc)
-
-            for (dataset_name, table_name), docs in tasks_by_table.items():
-                self.process_rows_batch(docs, dataset_name, table_name)
-
     def onboard_data(
         self,
         dataset_name: str = None,
@@ -238,54 +219,204 @@ class Crocodile:
         )
 
     def fetch_results(self):
-        """Retrieves processed documents from MongoDB including `el_results`.
+        """Retrieves processed documents from MongoDB using memory-efficient streaming.
 
-        Extracts the first candidate per NE column (if available).
-        Uses a **streaming approach** to avoid memory overload on large tables.
+        For large tables, this avoids loading all results into memory at once.
+        Instead, it processes documents in batches and writes directly to CSV.
         """
         db = self.get_db()
-        input_collection = db["input_data"]
-        cursor = input_collection.find(
-            {"dataset_name": self.dataset_name, "table_name": self.table_name}
-        )
+        input_collection = db[self._INPUT_COLLECTION]
 
-        extracted_rows = []
+        # Determine if we need to write to CSV or return full results
+        stream_to_csv = self._save_output_to_csv and isinstance(self.output_csv, (str, Path))
+
+        # Get header information
         header = None
         if isinstance(self.input_csv, pd.DataFrame):
             header = self.input_csv.columns.tolist()
         elif isinstance(self.input_csv, str):
             header = pd.read_csv(self.input_csv, nrows=0).columns.tolist()
+
+        # Get first document to determine column count if header is still None
+        sample_doc = input_collection.find_one(
+            {"dataset_name": self.dataset_name, "table_name": self.table_name}
+        )
+        if not sample_doc:
+            print("No documents found for the specified dataset and table.")
+            return []
+
         if header is None:
-            print("Could not extract header from input table.")
-            header = [f"col_{i}" for i in range(1, 1 + len(cursor[0]["data"]))]
-        for doc in cursor:
-            row_data = dict(zip(header, doc["data"]))  # Original row data as dict
-            el_results = doc.get("el_results", {})
+            print("Could not extract header from input table, using generic column names.")
+            header = [f"col_{i}" for i in range(len(sample_doc["data"]))]
 
-            # Extract first candidate for each NE column
-            for col_idx, col_type in doc["classified_columns"].get("NE", {}).items():
-                try:
-                    col_index = int(col_idx)
-                    col_header = header[col_index]
-                except (ValueError, IndexError):
-                    col_header = f"col_{col_idx}"
+        # Create extended header with entity columns
+        extended_header = header.copy()
+        for col_idx in sample_doc["classified_columns"].get("NE", {}).keys():
+            try:
+                col_index = int(col_idx)
+                col_header = header[col_index]
+            except (ValueError, IndexError):
+                col_header = f"col_{col_idx}"
 
-                id_field = f"{col_header}_id"
-                name_field = f"{col_header}_name"
-                desc_field = f"{col_header}_desc"
-                score_field = f"{col_header}_score"
+            extended_header.extend(
+                [
+                    f"{col_header}_id",
+                    f"{col_header}_name",
+                    f"{col_header}_desc",
+                    f"{col_header}_score",
+                ]
+            )
 
-                # Extract first candidate from el_results (if available)
-                candidate = el_results.get(col_idx, [{}])[0]
+        # Process in batches with cursor
+        batch_size = 1024  # Process 1024 documents at a time
+        cursor = input_collection.find(
+            {"dataset_name": self.dataset_name, "table_name": self.table_name}
+        ).batch_size(batch_size)
 
-                row_data[id_field] = candidate.get("id", "")
-                row_data[name_field] = candidate.get("name", "")
-                row_data[desc_field] = candidate.get("description", "")
-                row_data[score_field] = candidate.get("score", "")
+        # Determine whether to stream to CSV or collect results
+        if stream_to_csv:
+            total_docs = input_collection.count_documents(
+                {"dataset_name": self.dataset_name, "table_name": self.table_name}
+            )
+            print(f"Streaming {total_docs} documents to CSV...")
 
-            extracted_rows.append(row_data)
+            # Process in chunks to maintain memory efficiency
+            chunk_size = 256  # Write to CSV in chunks of 256 rows
+            current_chunk = []
+            processed_count = 0
 
-        return extracted_rows
+            for doc in cursor:
+                # Create base row data with original values
+                row_data = dict(zip(header, doc["data"]))
+                el_results = doc.get("el_results", {})
+
+                # Add entity linking results
+                for col_idx, col_type in doc["classified_columns"].get("NE", {}).items():
+                    try:
+                        col_index = int(col_idx)
+                        col_header = header[col_index]
+                    except (ValueError, IndexError):
+                        col_header = f"col_{col_idx}"
+
+                    id_field = f"{col_header}_id"
+                    name_field = f"{col_header}_name"
+                    desc_field = f"{col_header}_desc"
+                    score_field = f"{col_header}_score"
+
+                    # Get first candidate or empty placeholder
+                    candidate = el_results.get(col_idx, [{}])[0]
+
+                    row_data[id_field] = candidate.get("id", "")
+                    row_data[name_field] = candidate.get("name", "")
+                    row_data[desc_field] = candidate.get("description", "")
+                    row_data[score_field] = candidate.get("score", 0)
+
+                # Add row to current chunk
+                current_chunk.append(row_data)
+                processed_count += 1
+
+                # When chunk reaches desired size, write to CSV
+                if len(current_chunk) >= chunk_size:
+                    # Create DataFrame and append to CSV
+                    chunk_df = pd.DataFrame(current_chunk)
+
+                    # Use mode='a' (append) for all chunks after the first
+                    mode = "w" if processed_count <= chunk_size else "a"
+                    # Only include header for the first chunk
+                    header_option = True if processed_count <= chunk_size else False
+
+                    # Write chunk to CSV
+                    chunk_df.to_csv(self.output_csv, index=False, mode=mode, header=header_option)
+
+                    # Clear chunk and report progress
+                    current_chunk = []
+                    print(f"Processed {processed_count}/{total_docs} rows...")
+
+            # Write any remaining rows
+            if current_chunk:
+                chunk_df = pd.DataFrame(current_chunk)
+                # Append mode if this isn't the first (and only) chunk
+                mode = "w" if processed_count == len(current_chunk) else "a"
+                header_option = True if processed_count == len(current_chunk) else False
+
+                chunk_df.to_csv(self.output_csv, index=False, mode=mode, header=header_option)
+
+            print(f"Results saved to '{self.output_csv}'. Total rows: {processed_count}")
+            return []
+        else:
+            # If not streaming to CSV, collect all results in memory
+            all_rows = []
+            processed_count = 0
+
+            for doc in cursor:
+                # Create base row data with original values
+                row_data = dict(zip(header, doc["data"]))
+                el_results = doc.get("el_results", {})
+
+                # Add entity linking results (same as above)
+                for col_idx, col_type in doc["classified_columns"].get("NE", {}).items():
+                    try:
+                        col_index = int(col_idx)
+                        col_header = header[col_index]
+                    except (ValueError, IndexError):
+                        col_header = f"col_{col_idx}"
+
+                    id_field = f"{col_header}_id"
+                    name_field = f"{col_header}_name"
+                    desc_field = f"{col_header}_desc"
+                    score_field = f"{col_header}_score"
+
+                    candidate = el_results.get(col_idx, [{}])[0]
+
+                    row_data[id_field] = candidate.get("id", "")
+                    row_data[name_field] = candidate.get("name", "")
+                    row_data[desc_field] = candidate.get("description", "")
+                    row_data[score_field] = candidate.get("score", 0)
+
+                all_rows.append(row_data)
+                processed_count += 1
+
+                # Report progress periodically
+                if processed_count % batch_size == 0:
+                    print(f"Processed {processed_count} rows...")
+
+            print(f"Retrieved {processed_count} rows total")
+            return all_rows
+
+    def ml_worker(self, rank: int):
+        """Wrapper function to create and run an MLWorker with the correct parameters"""
+        worker = MLWorker(
+            rank,
+            table_name=self.table_name,
+            dataset_name=self.dataset_name,
+            training_collection_name=self._TRAINING_COLLECTION,
+            error_log_collection_name=self._ERROR_LOG_COLLECTION,
+            input_collection=self._INPUT_COLLECTION,
+            model_path=self.model_path,
+            batch_size=self.batch_size,
+            max_candidates=self.max_candidates,
+            top_n_for_type_freq=self.top_n_for_type_freq,
+            features=self.feature.selected_features,
+            mongo_uri=self._mongo_uri,
+            db_name=self._DB_NAME,
+        )
+        return worker.run()  # Call run directly
+
+    def worker(self, rank: int):
+        db = self.get_db()
+        input_collection = db[self._INPUT_COLLECTION]
+        while True:
+            todo_docs = self.claim_todo_batch(input_collection)
+            if not todo_docs:
+                print("No more tasks to process.")
+                break
+            tasks_by_table = {}
+            for doc in todo_docs:
+                dataset_name = doc["dataset_name"]
+                table_name = doc["table_name"]
+                tasks_by_table.setdefault((dataset_name, table_name), []).append(doc)
+            for (dataset_name, table_name), docs in tasks_by_table.items():
+                self.process_rows_batch(docs, dataset_name, table_name)
 
     def run(self):
         self.onboard_data(self.dataset_name, self.table_name, columns_type=self.columns_type)
@@ -294,44 +425,16 @@ class Crocodile:
         input_collection = db[self._INPUT_COLLECTION]
 
         total_rows = self.mongo_wrapper.count_documents(input_collection, {"status": "TODO"})
-        if total_rows == 0:
-            print("No more tasks to process.")
-        else:
-            print(f"Found {total_rows} tasks to process.")
+        print(f"Found {total_rows} tasks to process.")
 
-        processes = []
-        for _ in range(self.max_workers):
-            p = mp.Process(target=self.worker)
-            p.start()
-            processes.append(p)
-        for p in processes:
-            p.join()
+        with mp.Pool(processes=self.max_workers) as pool:
+            pool.map(self.worker, range(self.max_workers))
 
-        processes = []
-        for _ in range(self.ml_ranking_workers):
-            p = MLWorker(
-                table_name=self.table_name,
-                dataset_name=self.dataset_name,
-                training_collection_name=self._TRAINING_COLLECTION,
-                error_log_collection_name=self._ERROR_LOG_COLLECTION,
-                input_collection=self._INPUT_COLLECTION,
-                model_path=self.model_path,
-                batch_size=self.batch_size,
-                max_candidates=self.max_candidates,
-                top_n_for_type_freq=self.top_n_for_type_freq,
-                features=self.feature.selected_features,
-                mongo_uri=self._mongo_uri,
-                db_name=self._DB_NAME,
-            )
-            p.start()
-            processes.append(p)
-        for p in processes:
-            p.join()
+        with mp.Pool(processes=self.ml_ranking_workers) as pool:
+            pool.map(self.ml_worker, range(self.ml_ranking_workers))
 
         self.close_mongo_connection()
         print("All tasks have been processed.")
 
-        if self._save_output_to_csv:
-            extracted_rows = self.fetch_results()
-            pd.DataFrame(extracted_rows).to_csv(self.output_csv, index=False)
-            print(f"Results saved to '{self.output_csv}'.")
+        extracted_rows = self.fetch_results()
+        return extracted_rows

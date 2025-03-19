@@ -11,6 +11,9 @@ from pydantic import BaseModel
 from pymongo.database import Database
 from bson import ObjectId
 import json
+from pymongo.errors import DuplicateKeyError  # added import
+from crocodile import Crocodile
+from column_classifier import ColumnClassifier  # added global import
 
 router = APIRouter()
 
@@ -21,6 +24,23 @@ class TableUpload(BaseModel):
     total_rows: int
     classified_columns: Optional[Dict[str, Dict[str, str]]] = {}
     data: List[dict]
+
+
+# Add helper function to format classification results
+def format_classification(raw_classification: dict, header: list) -> dict:
+    ne_types = {"PERSON", "OTHER", "ORGANIZATION", "LOCATION"}
+    ne, lit = {}, {}
+    for i, col_name in enumerate(header):
+        col_result = raw_classification.get(col_name, {})
+        classification = col_result.get("classification", "UNKNOWN")
+        if classification in ne_types:
+            ne[str(i)] = classification
+        else:
+            lit[str(i)] = classification
+    all_indexes = set(str(i) for i in range(len(header)))
+    recognized = set(ne.keys()).union(lit.keys())
+    ignored = list(all_indexes - recognized)
+    return {"NE": ne, "LIT": lit, "IGNORED": ignored}
 
 
 @router.post("/dataset/{datasetName}/table/json", status_code=status.HTTP_201_CREATED)
@@ -34,27 +54,41 @@ def add_table(
     Add a new table to an existing dataset and trigger Crocodile processing in the background.
     """
     # Check if dataset exists; if not, create it
-    dataset = db.datasets.find_one({"name": datasetName})
+    dataset = db.datasets.find_one({"dataset_name": datasetName})  # updated query key
     if not dataset:
-        dataset_id = db.datasets.insert_one({
-            "name": datasetName,
-            "created_at": datetime.now(),
-            "total_tables": 0,
-            "total_rows": 0
-        }).inserted_id
+        try:
+            dataset_id = db.datasets.insert_one({
+                "dataset_name": datasetName,  # updated field key
+                "created_at": datetime.now(),
+                "total_tables": 0,
+                "total_rows": 0
+            }).inserted_id
+        except DuplicateKeyError:
+            raise HTTPException(status_code=400, detail="Duplicate dataset insertion")
     else:
         dataset_id = dataset["_id"]
     
-    # Create table metadata
+    if not table_upload.classified_columns:
+        df = pd.DataFrame(table_upload.data)
+        raw_classification = ColumnClassifier(model_type="fast").classify_multiple_tables([df.head(1024)])[0].get("table_1", {})
+        classification = format_classification(raw_classification, table_upload.header)
+    else:
+        classification = table_upload.classified_columns
+    
+    # Create table metadata including classified_columns
     table_metadata = {
         "dataset_name": datasetName,
         "table_name": table_upload.table_name,
         "header": table_upload.header,
         "total_rows": table_upload.total_rows,
         "created_at": datetime.now(),
-        "status": "processing"
+        "status": "processing",
+        "classified_columns": classification  # added classification field
     }
-    db.tables.insert_one(table_metadata)
+    try:
+        db.tables.insert_one(table_metadata)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=400, detail="Table with this name already exists in the dataset")
     
     # Update dataset metadata
     db.datasets.update_one(
@@ -62,10 +96,8 @@ def add_table(
         {"$inc": {"total_tables": 1, "total_rows": table_upload.total_rows}}
     )
     
-    # Trigger background task
+    # Trigger background task with classification passed to Crocodile
     def run_crocodile_task():
-        from crocodile import Crocodile
-
         croco = Crocodile(
             input_csv=pd.DataFrame(table_upload.data),
             dataset_name=datasetName,
@@ -77,15 +109,10 @@ def add_table(
             candidate_retrieval_limit=10,
             model_path="./crocodile/models/default.h5",
             save_output_to_csv=False,
+            columns_type=classification  
         )
         croco.run()
         
-        # Update table status to completed
-        db.tables.update_one(
-            {"dataset_name": datasetName, "table_name": table_upload.table_name},
-            {"$set": {"status": "completed", "completed_at": datetime.now()}}
-        )
-
     background_tasks.add_task(run_crocodile_task)
 
     return {
@@ -95,12 +122,19 @@ def add_table(
     }
 
 
+def parse_json_column_classification(column_classification: str = Form("")) -> Optional[dict]:
+    # Parse the form field; return None if empty
+    if not column_classification:
+        return None
+    return json.loads(column_classification)
+
+
 @router.post("/dataset/{datasetName}/table/csv", status_code=status.HTTP_201_CREATED)
 def add_table_csv(
     datasetName: str,
+    table_name: str,
     file: UploadFile = File(...),
-    table_name: str = Form(...),
-    column_classification: Optional[str] = Form(None),
+    column_classification: Optional[dict] = Depends(parse_json_column_classification),  # updated: now JSON/dict
     background_tasks: BackgroundTasks = None,
     db: Database = Depends(get_db)
 ):
@@ -111,18 +145,27 @@ def add_table_csv(
     header = df.columns.tolist()
     total_rows = len(df)
     
-    # Parse column_classification if provided
-    classification = json.loads(column_classification) if column_classification else {}
+    # Use the provided classification; if empty, call ColumnClassifier on a sample
+    classification = column_classification if column_classification else {}
+    if not classification:
+        from column_classifier import ColumnClassifier
+        classifier = ColumnClassifier(model_type="fast")
+        classification_result = classifier.classify_multiple_tables([df.head(1024)])
+        raw_classification = classification_result[0].get("table_1", {})
+        classification = format_classification(raw_classification, header)
     
     # Check if dataset exists; if not, create it
-    dataset = db.datasets.find_one({"name": datasetName})
+    dataset = db.datasets.find_one({"dataset_name": datasetName})  # updated query key
     if not dataset:
-        dataset_id = db.datasets.insert_one({
-            "name": datasetName,
-            "created_at": datetime.now(),
-            "total_tables": 0,
-            "total_rows": 0
-        }).inserted_id
+        try:
+            dataset_id = db.datasets.insert_one({
+                "dataset_name": datasetName,  # updated field key
+                "created_at": datetime.now(),
+                "total_tables": 0,
+                "total_rows": 0
+            }).inserted_id
+        except DuplicateKeyError:
+            raise HTTPException(status_code=400, detail="Duplicate dataset insertion")
     else:
         dataset_id = dataset["_id"]
     
@@ -133,10 +176,12 @@ def add_table_csv(
         "header": header,
         "total_rows": total_rows,
         "created_at": datetime.now(),
-        "status": "processing",
         "classified_columns": classification  # updated field for CSV input
     }
-    db.tables.insert_one(table_metadata)
+    try:
+        db.tables.insert_one(table_metadata)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=400, detail="Table with this name already exists in the dataset")
     
     # Update dataset metadata
     db.datasets.update_one(
@@ -144,10 +189,8 @@ def add_table_csv(
         {"$inc": {"total_tables": 1, "total_rows": total_rows}}
     )
     
-    # Trigger background task
+    # Trigger background task with columns_type passed to Crocodile
     def run_crocodile_task():
-        from crocodile import Crocodile
-
         croco = Crocodile(
             input_csv=df,
             dataset_name=datasetName,
@@ -159,14 +202,9 @@ def add_table_csv(
             candidate_retrieval_limit=10,
             model_path="./crocodile/models/default.h5",
             save_output_to_csv=False,
+            columns_type=classification 
         )
         croco.run()
-        
-        # Update table status to completed
-        db.tables.update_one(
-            {"dataset_name": datasetName, "table_name": table_name},
-            {"$set": {"status": "completed", "completed_at": datetime.now()}}
-        )
 
     background_tasks.add_task(run_crocodile_task)
     
@@ -205,8 +243,7 @@ def get_datasets(
     return {
         "data": datasets,
         "pagination": {
-            "next_cursor": str(next_cursor) if next_cursor else None,
-            "limit": limit
+            "next_cursor": str(next_cursor) if next_cursor else None  # removed limit from pagination output
         }
     }
 
@@ -222,7 +259,7 @@ def get_tables(
     Get tables for a dataset with keyset pagination, using ObjectId as the cursor.
     """
     # Ensure dataset exists
-    if not db.datasets.find_one({"name": dataset_name}):
+    if not db.datasets.find_one({"dataset_name": dataset_name}):  # updated query key
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
     
     query_filter = {"dataset_name": dataset_name}
@@ -247,8 +284,7 @@ def get_tables(
         "dataset": dataset_name,
         "data": tables,
         "pagination": {
-            "next_cursor": str(next_cursor) if next_cursor else None,
-            "limit": limit
+            "next_cursor": str(next_cursor) if next_cursor else None  # removed limit from pagination output
         }
     }
 
@@ -267,7 +303,7 @@ def get_table(
     Returns *all* candidate entities for each column that has any.
     """
     # Check dataset
-    if not db.datasets.find_one({"name": dataset_name}):
+    if not db.datasets.find_one({"dataset_name": dataset_name}):  # updated query key
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 
     # Check table
@@ -327,24 +363,32 @@ def get_table(
 
 @router.post("/datasets", status_code=status.HTTP_201_CREATED)
 def create_dataset(
-    dataset_data: dict = Body(..., example={"name": "test"}),
+    dataset_data: dict = Body(..., example={"dataset_name": "test"}),  # updated example key
     db: Database = Depends(get_db)
 ):
     """
     Create a new dataset.
     """
-    existing = db.datasets.find_one({"name": dataset_data.get("name")})
+    existing = db.datasets.find_one({"dataset_name": dataset_data.get("dataset_name")})  # updated query key
     if existing:
         raise HTTPException(
             status_code=400,
-            detail=f"Dataset with name {dataset_data.get('name')} already exists"
+            detail=f"Dataset with dataset_name {dataset_data.get('dataset_name')} already exists"  # updated field in message
         )
+
+    # Ensure uniform dataset field
+    # If client provided "name", rename it to "dataset_name"
+    if "name" in dataset_data:
+        dataset_data["dataset_name"] = dataset_data.pop("name")
 
     dataset_data["created_at"] = datetime.now()
     dataset_data["total_tables"] = 0
     dataset_data["total_rows"] = 0
 
-    result = db.datasets.insert_one(dataset_data)
+    try:
+        result = db.datasets.insert_one(dataset_data)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=400, detail="Dataset already exists")
     dataset_data["_id"] = str(result.inserted_id)
 
     return {"message": "Dataset created successfully", "dataset": dataset_data}
@@ -359,7 +403,8 @@ def delete_dataset(
     """
     Delete a dataset by name.
     """
-    existing = db.datasets.find_one({"name": dataset_name})
+    # Check existence using uniform dataset key
+    existing = db.datasets.find_one({"dataset_name": dataset_name})  # updated query key
     if not existing:
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 
@@ -367,7 +412,7 @@ def delete_dataset(
     db.tables.delete_many({"dataset_name": dataset_name})
 
     # Delete dataset
-    db.datasets.delete_one({"name": dataset_name})
+    db.datasets.delete_one({"dataset_name": dataset_name})  # updated query key
 
     # Optionally delete data from crocodile_db if needed
     return None
@@ -382,7 +427,8 @@ def delete_table(
     """
     Delete a table by name within a dataset.
     """
-    dataset = db.datasets.find_one({"name": dataset_name})
+    # Ensure dataset exists using uniform dataset key
+    dataset = db.datasets.find_one({"dataset_name": dataset_name})  # updated query key
     if not dataset:
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 

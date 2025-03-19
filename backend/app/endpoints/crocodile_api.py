@@ -310,7 +310,6 @@ def get_table(
             "linked_entities": linked_entities
         })
     
-    print(rows_formatted)
     # Determine next cursor
     next_cursor = str(raw_rows[-1]["_id"]) if raw_rows else None
     return {

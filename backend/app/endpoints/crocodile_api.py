@@ -3,6 +3,7 @@ from typing import Dict, List, Optional
 from datetime import datetime
 
 import pandas as pd
+import numpy as np
 from dependencies import get_db, get_crocodile_db
 from endpoints.imdb_example import IMDB_EXAMPLE  # Example input
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status, UploadFile, File, Form
@@ -103,8 +104,10 @@ def add_table_csv(
     background_tasks: BackgroundTasks = None,
     db: Database = Depends(get_db)
 ):
-    # Read CSV file
+    # Read CSV file and convert NaN values to None
     df = pd.read_csv(file.file)
+    df = df.replace({np.nan: None})  # permanent fix for JSON serialization
+    
     header = df.columns.tolist()
     total_rows = len(df)
     
@@ -200,8 +203,11 @@ def get_datasets(
             dataset["created_at"] = dataset["created_at"].isoformat()
 
     return {
-        "datasets": datasets,
-        "cursor": str(next_cursor) if next_cursor else None
+        "data": datasets,
+        "pagination": {
+            "next_cursor": str(next_cursor) if next_cursor else None,
+            "limit": limit
+        }
     }
 
 
@@ -239,8 +245,11 @@ def get_tables(
 
     return {
         "dataset": dataset_name,
-        "tables": tables,
-        "cursor": str(next_cursor) if next_cursor else None
+        "data": tables,
+        "pagination": {
+            "next_cursor": str(next_cursor) if next_cursor else None,
+            "limit": limit
+        }
     }
 
 
@@ -300,16 +309,20 @@ def get_table(
             "data": row.get("data", []),
             "linked_entities": linked_entities
         })
-
+    
+    print(rows_formatted)
     # Determine next cursor
     next_cursor = str(raw_rows[-1]["_id"]) if raw_rows else None
-
     return {
-        "datasetName": dataset_name,
-        "tableName": table.get("table_name"),
-        "header": header,
-        "rows": rows_formatted,
-        "cursor": next_cursor
+        "data": {
+            "datasetName": dataset_name,
+            "tableName": table.get("table_name"),
+            "header": header,
+            "rows": rows_formatted
+        },
+        "pagination": {
+            "next_cursor": next_cursor
+        }
     }
 
 

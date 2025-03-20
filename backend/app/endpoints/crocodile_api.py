@@ -134,7 +134,7 @@ def add_table_csv(
     datasetName: str,
     table_name: str,
     file: UploadFile = File(...),
-    column_classification: Optional[dict] = Depends(parse_json_column_classification),  # updated: now JSON/dict
+    column_classification: Optional[dict] = Depends(parse_json_column_classification),  # SON/dict
     background_tasks: BackgroundTasks = None,
     db: Database = Depends(get_db)
 ):

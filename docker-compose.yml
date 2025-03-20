@@ -24,12 +24,10 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     env_file:
       - .env  # Load environment variables from .env file
-    depends_on:
-      - mongodb  # Ensure FastAPI starts after MongoDB
     restart: always  # Restart policy to always restart the container
 
   jupyter:
-    image: roby944/jupyter-minimal-extended:latest
+    build: .
     container_name: crocodile_jupyter
     ports:
       - "${JUPYTER_SERVER_PORT}:8888"
@@ -43,6 +41,4 @@ services:
       - JUPYTER_ENABLE_LAB=yes
     env_file:
       - .env  # Load environment variables from .env file
-    depends_on:
-      - mongodb
     restart: always  # Restart policy to always restart the container

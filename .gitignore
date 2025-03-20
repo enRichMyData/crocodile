@@ -171,3 +171,4 @@ mongo_data/
 *.zip
 training/datasets/
 notebooks/
+tables/

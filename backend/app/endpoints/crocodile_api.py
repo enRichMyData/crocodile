@@ -1,19 +1,31 @@
+import json
 import os
-from typing import Dict, List, Optional
 from datetime import datetime
+from typing import Dict, List, Optional
 
-import pandas as pd
 import numpy as np
-from dependencies import get_db, get_crocodile_db
+import pandas as pd
+from bson import ObjectId
+from column_classifier import ColumnClassifier  # added global import
+from dependencies import get_crocodile_db, get_db
 from endpoints.imdb_example import IMDB_EXAMPLE  # Example input
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status, UploadFile, File, Form
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Body,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel
 from pymongo.database import Database
-from bson import ObjectId
-import json
 from pymongo.errors import DuplicateKeyError  # added import
+
 from crocodile import Crocodile
-from column_classifier import ColumnClassifier  # added global import
 
 router = APIRouter()
 
@@ -57,24 +69,30 @@ def add_table(
     dataset = db.datasets.find_one({"dataset_name": datasetName})  # updated query key
     if not dataset:
         try:
-            dataset_id = db.datasets.insert_one({
-                "dataset_name": datasetName,  # updated field key
-                "created_at": datetime.now(),
-                "total_tables": 0,
-                "total_rows": 0
-            }).inserted_id
+            dataset_id = db.datasets.insert_one(
+                {
+                    "dataset_name": datasetName,  # updated field key
+                    "created_at": datetime.now(),
+                    "total_tables": 0,
+                    "total_rows": 0,
+                }
+            ).inserted_id
         except DuplicateKeyError:
             raise HTTPException(status_code=400, detail="Duplicate dataset insertion")
     else:
         dataset_id = dataset["_id"]
-    
+
     if not table_upload.classified_columns:
         df = pd.DataFrame(table_upload.data)
-        raw_classification = ColumnClassifier(model_type="fast").classify_multiple_tables([df.head(1024)])[0].get("table_1", {})
+        raw_classification = (
+            ColumnClassifier(model_type="fast")
+            .classify_multiple_tables([df.head(1024)])[0]
+            .get("table_1", {})
+        )
         classification = format_classification(raw_classification, table_upload.header)
     else:
         classification = table_upload.classified_columns
-    
+
     # Create table metadata including classified_columns
     table_metadata = {
         "dataset_name": datasetName,
@@ -83,19 +101,20 @@ def add_table(
         "total_rows": table_upload.total_rows,
         "created_at": datetime.now(),
         "status": "processing",
-        "classified_columns": classification  # added classification field
+        "classified_columns": classification,  # added classification field
     }
     try:
         db.tables.insert_one(table_metadata)
     except DuplicateKeyError:
-        raise HTTPException(status_code=400, detail="Table with this name already exists in the dataset")
-    
+        raise HTTPException(
+            status_code=400, detail="Table with this name already exists in the dataset"
+        )
+
     # Update dataset metadata
     db.datasets.update_one(
-        {"_id": dataset_id},
-        {"$inc": {"total_tables": 1, "total_rows": table_upload.total_rows}}
+        {"_id": dataset_id}, {"$inc": {"total_tables": 1, "total_rows": table_upload.total_rows}}
     )
-    
+
     # Trigger background task with classification passed to Crocodile
     def run_crocodile_task():
         croco = Crocodile(
@@ -109,10 +128,10 @@ def add_table(
             candidate_retrieval_limit=10,
             model_path="./crocodile/models/default.h5",
             save_output_to_csv=False,
-            columns_type=classification  
+            columns_type=classification,
         )
         croco.run()
-        
+
     background_tasks.add_task(run_crocodile_task)
 
     return {
@@ -136,39 +155,42 @@ def add_table_csv(
     file: UploadFile = File(...),
     column_classification: Optional[dict] = Depends(parse_json_column_classification),  # SON/dict
     background_tasks: BackgroundTasks = None,
-    db: Database = Depends(get_db)
+    db: Database = Depends(get_db),
 ):
     # Read CSV file and convert NaN values to None
     df = pd.read_csv(file.file)
     df = df.replace({np.nan: None})  # permanent fix for JSON serialization
-    
+
     header = df.columns.tolist()
     total_rows = len(df)
-    
+
     # Use the provided classification; if empty, call ColumnClassifier on a sample
     classification = column_classification if column_classification else {}
     if not classification:
         from column_classifier import ColumnClassifier
+
         classifier = ColumnClassifier(model_type="fast")
         classification_result = classifier.classify_multiple_tables([df.head(1024)])
         raw_classification = classification_result[0].get("table_1", {})
         classification = format_classification(raw_classification, header)
-    
+
     # Check if dataset exists; if not, create it
     dataset = db.datasets.find_one({"dataset_name": datasetName})  # updated query key
     if not dataset:
         try:
-            dataset_id = db.datasets.insert_one({
-                "dataset_name": datasetName,  # updated field key
-                "created_at": datetime.now(),
-                "total_tables": 0,
-                "total_rows": 0
-            }).inserted_id
+            dataset_id = db.datasets.insert_one(
+                {
+                    "dataset_name": datasetName,  # updated field key
+                    "created_at": datetime.now(),
+                    "total_tables": 0,
+                    "total_rows": 0,
+                }
+            ).inserted_id
         except DuplicateKeyError:
             raise HTTPException(status_code=400, detail="Duplicate dataset insertion")
     else:
         dataset_id = dataset["_id"]
-    
+
     # Create table metadata
     table_metadata = {
         "dataset_name": datasetName,
@@ -176,19 +198,20 @@ def add_table_csv(
         "header": header,
         "total_rows": total_rows,
         "created_at": datetime.now(),
-        "classified_columns": classification  # updated field for CSV input
+        "classified_columns": classification,  # updated field for CSV input
     }
     try:
         db.tables.insert_one(table_metadata)
     except DuplicateKeyError:
-        raise HTTPException(status_code=400, detail="Table with this name already exists in the dataset")
-    
+        raise HTTPException(
+            status_code=400, detail="Table with this name already exists in the dataset"
+        )
+
     # Update dataset metadata
     db.datasets.update_one(
-        {"_id": dataset_id},
-        {"$inc": {"total_tables": 1, "total_rows": total_rows}}
+        {"_id": dataset_id}, {"$inc": {"total_tables": 1, "total_rows": total_rows}}
     )
-    
+
     # Trigger background task with columns_type passed to Crocodile
     def run_crocodile_task():
         croco = Crocodile(
@@ -202,12 +225,12 @@ def add_table_csv(
             candidate_retrieval_limit=10,
             model_path="./crocodile/models/default.h5",
             save_output_to_csv=False,
-            columns_type=classification 
+            columns_type=classification,
         )
         croco.run()
 
     background_tasks.add_task(run_crocodile_task)
-    
+
     return {
         "message": "CSV table added successfully.",
         "tableName": table_name,
@@ -217,9 +240,7 @@ def add_table_csv(
 
 @router.get("/datasets")
 def get_datasets(
-    limit: int = Query(10),
-    cursor: Optional[str] = Query(None),
-    db: Database = Depends(get_db)
+    limit: int = Query(10), cursor: Optional[str] = Query(None), db: Database = Depends(get_db)
 ):
     """
     Get datasets with keyset pagination, using ObjectId as the cursor.
@@ -243,8 +264,10 @@ def get_datasets(
     return {
         "data": datasets,
         "pagination": {
-            "next_cursor": str(next_cursor) if next_cursor else None  # removed limit from pagination output
-        }
+            "next_cursor": str(next_cursor)
+            if next_cursor
+            else None  # removed limit from pagination output
+        },
     }
 
 
@@ -253,7 +276,7 @@ def get_tables(
     dataset_name: str,
     limit: int = Query(10),
     cursor: Optional[str] = Query(None),
-    db: Database = Depends(get_db)
+    db: Database = Depends(get_db),
 ):
     """
     Get tables for a dataset with keyset pagination, using ObjectId as the cursor.
@@ -261,7 +284,7 @@ def get_tables(
     # Ensure dataset exists
     if not db.datasets.find_one({"dataset_name": dataset_name}):  # updated query key
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
-    
+
     query_filter = {"dataset_name": dataset_name}
     if cursor:
         try:
@@ -284,8 +307,10 @@ def get_tables(
         "dataset": dataset_name,
         "data": tables,
         "pagination": {
-            "next_cursor": str(next_cursor) if next_cursor else None  # removed limit from pagination output
-        }
+            "next_cursor": str(next_cursor)
+            if next_cursor
+            else None  # removed limit from pagination output
+        },
     }
 
 
@@ -296,7 +321,7 @@ def get_table(
     limit: int = Query(10),
     cursor: Optional[str] = Query(None),
     db: Database = Depends(get_db),
-    crocodile_db: Database = Depends(get_crocodile_db)
+    crocodile_db: Database = Depends(get_crocodile_db),
 ):
     """
     Get table data with keyset pagination, using ObjectId as the cursor.
@@ -309,7 +334,9 @@ def get_table(
     # Check table
     table = db.tables.find_one({"dataset_name": dataset_name, "table_name": table_name})
     if not table:
-        raise HTTPException(status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}")
+        raise HTTPException(
+            status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
+        )
 
     header = table.get("header", [])
 
@@ -335,17 +362,16 @@ def get_table(
         for col_index in range(len(header)):
             candidates = el_results.get(str(col_index), [])
             if candidates:
-                linked_entities.append({
-                    "idColumn": col_index,
-                    "candidates": candidates
-                })
+                linked_entities.append({"idColumn": col_index, "candidates": candidates})
 
-        rows_formatted.append({
-            "idRow": row.get("row_id"),
-            "data": row.get("data", []),
-            "linked_entities": linked_entities
-        })
-    
+        rows_formatted.append(
+            {
+                "idRow": row.get("row_id"),
+                "data": row.get("data", []),
+                "linked_entities": linked_entities,
+            }
+        )
+
     # Determine next cursor
     next_cursor = str(raw_rows[-1]["_id"]) if raw_rows else None
     return {
@@ -353,33 +379,28 @@ def get_table(
             "datasetName": dataset_name,
             "tableName": table.get("table_name"),
             "header": header,
-            "rows": rows_formatted
+            "rows": rows_formatted,
         },
-        "pagination": {
-            "next_cursor": next_cursor
-        }
+        "pagination": {"next_cursor": next_cursor},
     }
 
 
 @router.post("/datasets", status_code=status.HTTP_201_CREATED)
 def create_dataset(
     dataset_data: dict = Body(..., example={"dataset_name": "test"}),  # updated example key
-    db: Database = Depends(get_db)
+    db: Database = Depends(get_db),
 ):
     """
     Create a new dataset.
     """
-    existing = db.datasets.find_one({"dataset_name": dataset_data.get("dataset_name")})  # updated query key
+    existing = db.datasets.find_one(
+        {"dataset_name": dataset_data.get("dataset_name")}
+    )  # updated query key
     if existing:
         raise HTTPException(
             status_code=400,
-            detail=f"Dataset with dataset_name {dataset_data.get('dataset_name')} already exists"  # updated field in message
+            detail=f"Dataset with dataset_name {dataset_data.get('dataset_name')} already exists",
         )
-
-    # Ensure uniform dataset field
-    # If client provided "name", rename it to "dataset_name"
-    if "name" in dataset_data:
-        dataset_data["dataset_name"] = dataset_data.pop("name")
 
     dataset_data["created_at"] = datetime.now()
     dataset_data["total_tables"] = 0
@@ -398,7 +419,7 @@ def create_dataset(
 def delete_dataset(
     dataset_name: str,
     db: Database = Depends(get_db),
-    crocodile_db: Database = Depends(get_crocodile_db)
+    crocodile_db: Database = Depends(get_crocodile_db),
 ):
     """
     Delete a dataset by name.
@@ -418,12 +439,10 @@ def delete_dataset(
     return None
 
 
-@router.delete("/datasets/{dataset_name}/tables/{table_name}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_table(
-    dataset_name: str,
-    table_name: str,
-    db: Database = Depends(get_db)
-):
+@router.delete(
+    "/datasets/{dataset_name}/tables/{table_name}", status_code=status.HTTP_204_NO_CONTENT
+)
+def delete_table(dataset_name: str, table_name: str, db: Database = Depends(get_db)):
     """
     Delete a table by name within a dataset.
     """
@@ -434,7 +453,9 @@ def delete_table(
 
     table = db.tables.find_one({"dataset_name": dataset_name, "table_name": table_name})
     if not table:
-        raise HTTPException(status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}")
+        raise HTTPException(
+            status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
+        )
 
     row_count = table.get("total_rows", 0)
 
@@ -443,8 +464,7 @@ def delete_table(
 
     # Update dataset metadata
     db.datasets.update_one(
-        {"name": dataset_name},
-        {"$inc": {"total_tables": -1, "total_rows": -row_count}}
+        {"name": dataset_name}, {"$inc": {"total_tables": -1, "total_rows": -row_count}}
     )
 
     # Optionally delete data from crocodile_db if needed

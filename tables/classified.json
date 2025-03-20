@@ -1,0 +1,17 @@
+{
+    "NE": {
+        "0": "OTHER",
+        "7": "PERSON",
+        "8": "PERSON"
+    },
+    "LIT": {
+        "1": "NUMBER",
+        "2": "NUMBER",
+        "3": "STRING",
+        "4": "NUMBER",
+        "5": "STRING",
+        "6": "NUMBER",
+        "9": "NUMBER",
+        "10": "NUMBER"
+    }
+}

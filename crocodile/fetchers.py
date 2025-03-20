@@ -1,12 +1,12 @@
 import asyncio
-import time
 import traceback
-from datetime import datetime
 from urllib.parse import quote
 
 import aiohttp
 
 from crocodile import MY_TIMEOUT
+from crocodile.feature import Feature
+from crocodile.mongo import MongoCache, MongoWrapper
 from crocodile.utils import tokenize_text
 
 
@@ -17,34 +17,60 @@ class CandidateFetcher:
     DB, feature, caching, etc.
     """
 
-    def __init__(self, crocodile):
-        self.crocodile = crocodile
+    def __init__(
+        self,
+        endpoint: str,
+        token: str,
+        num_candidates: int,
+        feature: Feature,
+        **kwargs,
+    ):
+        self.endpoint = endpoint
+        self.token = token
+        self.num_candidates = num_candidates
+        self.feature = feature
+        self._db_name = kwargs.get("db_name", "crocodile_db")
+        self._mongo_uri = kwargs.get("mongo_uri", "mongodb://mongodb:27017")
+        self.input_collection = kwargs.get("input_collection", "input_data")
+        self.cache_collection = kwargs.get("cache_collection", "candidate_cache")
+        self.mongo_wrapper = MongoWrapper(self._mongo_uri, self._db_name)
 
-    async def _fetch_candidates(self, entity_name, row_text, fuzzy, qid, session):
+    def get_db(self):
+        """Get MongoDB database connection for current process"""
+        from crocodile.mongo import MongoConnectionManager
+
+        client = MongoConnectionManager.get_client(self._mongo_uri)
+        return client[self._db_name]
+
+    def get_candidate_cache(self):
+        return MongoCache(self.get_db(), self.cache_collection)
+
+    def fetch_candidates_batch(self, entities, row_texts, fuzzies, qids):
+        return asyncio.run(self.fetch_candidates_batch_async(entities, row_texts, fuzzies, qids))
+
+    async def _fetch_candidates(
+        self, entity_name, row_text, fuzzy, qid, session, cache: bool = True
+    ):
         """
         This used to be Crocodile._fetch_candidates. Logic unchanged.
         """
-        db = self.crocodile.get_db()
-        timing_trace_collection = db[self.crocodile.timing_collection_name]
-
         encoded_entity_name = quote(entity_name)
         url = (
-            f"{self.crocodile.entity_retrieval_endpoint}?name={encoded_entity_name}"
-            f"&limit={self.crocodile.candidate_retrieval_limit}&fuzzy={fuzzy}"
-            f"&token={self.crocodile.entity_retrieval_token}"
+            f"{self.endpoint}?name={encoded_entity_name}"
+            f"&limit={self.num_candidates}&fuzzy={fuzzy}"
+            f"&token={self.token}"
         )
         if qid:
             url += f"&ids={qid}"
 
         backoff = 1
         for attempts in range(5):
-            start_time = time.time()
             try:
                 async with session.get(url) as response:
                     response.raise_for_status()
                     candidates = await response.json()
                     row_tokens = set(tokenize_text(row_text))
-                    fetched_candidates = self.crocodile.feature.process_candidates(
+                    fetched_candidates = self.feature.process_candidates(
                         candidates, entity_name, row_tokens
                     )
                     # Ensure all QIDs are included by adding placeholders for missing ones
@@ -64,7 +90,7 @@ class CandidateFetcher:
                         )
 
                     # Merge with existing cache if present
-                    cache = self.crocodile.get_candidate_cache()
+                    cache = self.get_candidate_cache()
                     cache_key = f"{entity_name}_{fuzzy}"
                     cached_result = cache.get(cache_key)
 
@@ -78,25 +104,11 @@ class CandidateFetcher:
                         merged_candidates = fetched_candidates
 
                     cache.put(cache_key, merged_candidates)
-
-                    end_time = time.time()
-                    timing_trace_collection.insert_one(
-                        {
-                            "operation_name": "_fetch_candidate",
-                            "url": url,
-                            "start_time": datetime.fromtimestamp(start_time),
-                            "end_time": datetime.fromtimestamp(end_time),
-                            "duration_seconds": end_time - start_time,
-                            "status": "SUCCESS",
-                            "attempt": attempts + 1,
-                        }
-                    )
                     return entity_name, merged_candidates
 
             except Exception:
-                end_time = time.time()
                 if attempts == 4:
-                    self.crocodile.mongo_wrapper.log_to_db(
+                    self.mongo_wrapper.log_to_db(
                         "FETCH_CANDIDATES_ERROR",
                         f"Error fetching candidates for {entity_name}",
                         traceback.format_exc(),
@@ -113,7 +125,7 @@ class CandidateFetcher:
         This used to be Crocodile.fetch_candidates_batch_async.
         """
         results = {}
-        cache = self.crocodile.get_candidate_cache()
+        cache = self.get_candidate_cache()
         to_fetch = []
 
         # Decide which entities need to be fetched
@@ -159,19 +171,47 @@ class CandidateFetcher:
 
 
 class BowFetcher:
-    """
-    Extracted logic for BoW fetching.
-    Similar approach: we take a reference to the Crocodile instance.
-    """
+    """Extracted logic for BoW fetching."""
 
-    def __init__(self, crocodile):
-        self.crocodile = crocodile
+    def __init__(
+        self,
+        endpoint: str,
+        token: str,
+        max_bow_batch_size: int,
+        feature: Feature,
+        **kwargs,
+    ):
+        self.endpoint = endpoint
+        self.token = token
+        self.max_bow_batch_size = max_bow_batch_size
+        self.feature = feature
+        self._db_name = kwargs.get("db_name", "crocodile_db")
+        self._mongo_uri = kwargs.get("mongo_uri", "mongodb://mongodb:27017")
+        self.input_collection = kwargs.get("input_collection", "input_data")
+        self.bow_cache_collection = kwargs.get("bow_cache_collection", "bow_cache")
+        self.mongo_wrapper = MongoWrapper(self._mongo_uri, self._db_name)
+
+    def get_db(self):
+        """Get MongoDB database connection for current process"""
+        from crocodile.mongo import MongoConnectionManager
+
+        client = MongoConnectionManager.get_client(self._mongo_uri)
+        return client[self._db_name]
+
+    def get_bow_cache(self):
+        return MongoCache(self.get_db(), self.bow_cache_collection)
+
+    def fetch_bow_vectors_batch(self, row_hash, row_text, qids):
+        async def runner():
+            return await self.fetch_bow_vectors_batch_async(row_hash, row_text, qids)
+
+        return asyncio.run(runner())
 
     async def _fetch_bow_for_multiple_qids(self, row_hash, row_text, qids, session):
         """
         This used to be Crocodile._fetch_bow_for_multiple_qids.
         """
-        bow_cache = self.crocodile.get_bow_cache()
+        bow_cache = self.get_bow_cache()
 
         to_fetch = []
         bow_results = {}
@@ -188,8 +228,8 @@ class BowFetcher:
             return bow_results
 
         chunked_qids = [
-            to_fetch[i : i + self.crocodile.MAX_BOW_BATCH_SIZE]
-            for i in range(0, len(to_fetch), self.crocodile.MAX_BOW_BATCH_SIZE)
+            to_fetch[i : i + self.max_bow_batch_size]
+            for i in range(0, len(to_fetch), self.max_bow_batch_size)
         ]
 
         for chunk in chunked_qids:
@@ -203,20 +243,17 @@ class BowFetcher:
         """
         This used to be Crocodile._fetch_bow_for_chunk.
         """
-        db = self.crocodile.get_db()
-        timing_trace_collection = db[self.crocodile.timing_collection_name]
-        bow_cache = self.crocodile.get_bow_cache()
+        bow_cache = self.get_bow_cache()
 
         chunk_bow_results = {}
         if not chunk_qids:
             return chunk_bow_results
 
-        url = f"{self.crocodile.entity_bow_endpoint}?token={self.crocodile.entity_retrieval_token}"
+        url = f"{self.endpoint}?token={self.token}"
         payload = {"json": {"text": row_text, "qids": chunk_qids}}
 
         backoff = 1
         for attempts in range(5):
-            start_time = time.time()
             try:
                 async with session.post(url, json=payload) as response:
                     response.raise_for_status()
@@ -230,24 +267,11 @@ class BowFetcher:
                         bow_cache.put(cache_key, qid_data)
                         chunk_bow_results[qid] = qid_data
 
-                    end_time = time.time()
-                    timing_trace_collection.insert_one(
-                        {
-                            "operation_name": "_fetch_bow_for_multiple_qids:CHUNK",
-                            "url": url,
-                            "start_time": start_time,
-                            "end_time": end_time,
-                            "duration_seconds": end_time - start_time,
-                            "status": "SUCCESS",
-                            "attempt": attempts + 1,
-                        }
-                    )
                     return chunk_bow_results
 
             except Exception:
-                end_time = time.time()
                 if attempts == 4:
-                    self.crocodile.mongo_wrapper.log_to_db(
+                    self.mongo_wrapper.log_to_db(
                         "FETCH_BOW_ERROR",
                         f"Error fetching BoW for row_hash={row_hash}, chunk_qids={chunk_qids}",
                         traceback.format_exc(),

@@ -472,7 +472,7 @@ class Crocodile:
         with mp.Pool(processes=self.ml_ranking_workers) as pool:
             pool.map(self.ml_worker, range(self.ml_ranking_workers))
 
-        self.close_mongo_connection()
+        # self.close_mongo_connection()
         print("All tasks have been processed.")
 
         extracted_rows = self.fetch_results()

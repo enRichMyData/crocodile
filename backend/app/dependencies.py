@@ -1,20 +1,27 @@
 import os
 
-from pymongo import MongoClient
+from pymongo import ASCENDING, MongoClient  # added ASCENDING import
 
 
 def get_db():
     client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
-    db = client[os.getenv("DB_NAME", "crocodile_db")]
+    db = client["crocodile_backend_db"]
+
+    # Ensure indexes are created
+    db.datasets.create_index([("dataset_name", ASCENDING)], unique=True)  # updated index field
+    db.tables.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)], unique=True)
+
     try:
         yield db
     finally:
         client.close()
 
 
-def get_config():
-    return {
-        "entity_retrieval_endpoint": os.getenv("ENTITY_RETRIEVAL_ENDPOINT"),
-        "entity_bow_endpoint": os.getenv("ENTITY_BOW_ENDPOINT"),
-        "api_token": os.getenv("API_TOKEN"),
-    }
+def get_crocodile_db():
+    client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
+    db = client["crocodile_db"]
+    try:
+        yield db
+    finally:
+        pass
+        # client.close()

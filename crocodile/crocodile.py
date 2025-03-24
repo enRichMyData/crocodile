@@ -473,7 +473,9 @@ class Crocodile:
         with mp.Pool(processes=self.max_workers) as pool:
             pool.map(self.worker, range(self.max_workers))
 
-        global_type_counts = self.feature.compute_global_type_frequencies()
+        global_type_counts = self.feature.compute_global_type_frequencies(
+            docs_to_process=0.7, random_sample=True
+        )
 
         with mp.Pool(processes=self.ml_ranking_workers) as pool:
             ml_worker = partial(self.ml_worker, global_type_counts=global_type_counts)

@@ -154,26 +154,67 @@ class Feature:
         client = MongoConnectionManager.get_client(self._mongo_uri)
         return client[self._db_name]
 
-    def compute_global_type_frequencies(self) -> Dict[Any, Counter]:
-        """
-        Compute type frequencies across all candidate documents at once
-        by looking at the top N candidates in each column.
-        Returns a Counter keyed by type ID, summing frequencies from all columns.
+    def compute_global_type_frequencies(
+        self,
+        docs_to_process: Optional[float] = None,
+        random_sample: bool = False,
+        doc_range: Optional[tuple] = None,
+    ) -> Dict[Any, Counter]:
+        """Compute type frequencies across candidate documents.
+
+        Args:
+            docs_to_process: Percentage of documents to process. If None, processes all documents.
+                Use this to limit computation time for very large datasets.
+            random_sample: If True and docs_to_process is specified, samples documents randomly.
+            doc_range: Optional tuple (start, end) to process a specific document range.
+                Takes precedence over random_sample.
+
+        Returns:
+            Dictionary mapping column indexes to type frequency counters.
         """
         col: Collection = self.get_db()[self.input_collection]
         type_freq_by_column = defaultdict(Counter)
         rows_count_by_column = Counter()
 
-        cursor = col.find(
-            {
-                "dataset_name": self.dataset_name,
-                "table_name": self.table_name,
-                "status": "DONE",
-                "candidates": {"$exists": True},
-            },
-            projection={"candidates": 1},
-        )
+        # Base query to find documents with candidates
+        match_query = {
+            "dataset_name": self.dataset_name,
+            "table_name": self.table_name,
+            "status": "DONE",
+            "candidates": {"$exists": True},
+        }
+        projection = {"candidates": 1}
 
+        # Choose sampling strategy
+        if doc_range:
+            start, end = doc_range
+            print(f"Processing documents in range {start} to {end}")
+            cursor = col.find(match_query, projection).skip(start).limit(end - start)
+        elif docs_to_process and random_sample:
+            # Use aggregation pipeline with $sample for random sampling
+            total_docs = col.count_documents(match_query)
+            max_docs = max(1, int(total_docs * docs_to_process))
+            print(f"Computing type-frequency features by randomly sampling {max_docs} documents")
+            pipeline = [
+                {"$match": match_query},
+                {"$sample": {"size": max_docs}},
+                {"$project": projection},
+            ]
+            cursor = col.aggregate(pipeline)
+        else:
+            # Simple limit if specified
+            cursor = col.find(match_query, projection)
+            if docs_to_process:
+                total_docs = col.count_documents(match_query)
+                max_docs = max(1, int(total_docs * docs_to_process))
+                print(
+                    f"Computing type-frequency features by processing first {max_docs} documents"
+                )
+                cursor = cursor.limit(max_docs)
+            else:
+                print("Computing type-frequency features by processing all matching documents")
+
+        # Process documents to calculate type frequencies
         doc_count = 0
         for doc in cursor:
             doc_count += 1
@@ -194,6 +235,7 @@ class Feature:
 
                 rows_count_by_column[col_index] += 1
 
+        # Normalize frequencies
         for col_index, freq_counter in type_freq_by_column.items():
             row_count: int = rows_count_by_column[col_index]
             if row_count == 0:

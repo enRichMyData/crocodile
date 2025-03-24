@@ -57,7 +57,7 @@ class MLWorker:
 
         return load_model(self.model_path)
 
-    def run(self, global_type_counts: Counter) -> None:
+    def run(self, global_type_counts: Dict[Any, Counter]) -> None:
         """Process candidates directly from input_collection"""
         db: Database = self.get_db()
         model: "Model" = self.load_ml_model()
@@ -114,6 +114,7 @@ class MLWorker:
                     "candidates": {"$exists": True},
                 },
                 {"$set": {"status": "ML_PROCESSING"}},
+                projection={"_id": 1, "row_id": 1, "candidates": 1},
             )
             if doc is None:
                 break

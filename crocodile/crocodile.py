@@ -2,6 +2,8 @@ import multiprocessing as mp
 import os
 import time
 import uuid
+from collections import Counter
+from functools import partial
 from pathlib import Path
 from typing import List, Optional
 
@@ -23,7 +25,6 @@ class Crocodile:
     _DEFAULT_MONGO_URI = "mongodb://mongodb:27017/"  # Change this to a class-level default
     _DB_NAME = "crocodile_db"
     _INPUT_COLLECTION = "input_data"
-    _TRAINING_COLLECTION = "training_data"
     _ERROR_LOG_COLLECTION = "error_logs"
     _CACHE_COLLECTION = "candidate_cache"
     _BOW_CACHE_COLLECTION = "bow_cache"
@@ -36,8 +37,7 @@ class Crocodile:
         table_name: str = None,
         columns_type: ColType | None = None,
         max_workers: Optional[int] = None,
-        max_candidates: int = 5,
-        max_training_candidates: int = 10,
+        max_candidates_in_result: int = 5,
         entity_retrieval_endpoint: Optional[str] = None,
         entity_retrieval_token: Optional[str] = None,
         selected_features: Optional[List[str]] = None,
@@ -66,8 +66,7 @@ class Crocodile:
         self.table_name = table_name
         self.columns_type = columns_type
         self.max_workers = max_workers or mp.cpu_count()
-        self.max_candidates = max_candidates
-        self.max_training_candidates = max_training_candidates
+        self.max_candidates_in_result = max_candidates_in_result
         self.entity_retrieval_endpoint = entity_retrieval_endpoint
         self.entity_retrieval_token = entity_retrieval_token
         self.candidate_retrieval_limit = candidate_retrieval_limit
@@ -82,7 +81,15 @@ class Crocodile:
         self.mongo_wrapper = MongoWrapper(
             self._mongo_uri, self._DB_NAME, self._ERROR_LOG_COLLECTION
         )
-        self.feature = Feature(selected_features)
+        self.feature = Feature(
+            dataset_name,
+            table_name,
+            top_n_for_type_freq=top_n_for_type_freq,
+            features=selected_features,
+            db_name=self._DB_NAME,
+            mongo_uri=self._mongo_uri,
+            input_collection=self._INPUT_COLLECTION,
+        )
 
         # Instantiate our helper objects
         self._candidate_fetcher = CandidateFetcher(
@@ -107,13 +114,11 @@ class Crocodile:
         )
         self._row_processor = RowBatchProcessor(
             self._candidate_fetcher,
-            self.max_training_candidates,
-            self.max_candidates,
+            self.max_candidates_in_result,
             self._bow_fetcher if self._entity_bow_endpoint else None,
             db_name=self._DB_NAME,
             mongo_uri=self._mongo_uri,
             input_collection=self._INPUT_COLLECTION,
-            training_collection=self._TRAINING_COLLECTION,
         )
 
         # Create indexes
@@ -422,24 +427,23 @@ class Crocodile:
         # Report progress
         print(f"Processed {processed_count}/{total_docs} rows...")
 
-    def ml_worker(self, rank: int):
+    def ml_worker(self, rank: int, global_type_counts: Counter):
         """Wrapper function to create and run an MLWorker with the correct parameters"""
         worker = MLWorker(
             rank,
             table_name=self.table_name,
             dataset_name=self.dataset_name,
-            training_collection_name=self._TRAINING_COLLECTION,
             error_log_collection_name=self._ERROR_LOG_COLLECTION,
             input_collection=self._INPUT_COLLECTION,
             model_path=self.model_path,
             batch_size=self.batch_size,
-            max_candidates=self.max_candidates,
+            max_candidates_in_result=self.max_candidates_in_result,
             top_n_for_type_freq=self.top_n_for_type_freq,
             features=self.feature.selected_features,
             mongo_uri=self._mongo_uri,
             db_name=self._DB_NAME,
         )
-        return worker.run()  # Call run directly
+        return worker.run(global_type_counts=global_type_counts)  # Call run directly
 
     def worker(self, rank: int):
         db = self.get_db()
@@ -469,8 +473,11 @@ class Crocodile:
         with mp.Pool(processes=self.max_workers) as pool:
             pool.map(self.worker, range(self.max_workers))
 
+        global_type_counts = self.feature.compute_global_type_frequencies()
+
         with mp.Pool(processes=self.ml_ranking_workers) as pool:
-            pool.map(self.ml_worker, range(self.ml_ranking_workers))
+            ml_worker = partial(self.ml_worker, global_type_counts=global_type_counts)
+            pool.map(ml_worker, range(self.ml_ranking_workers))
 
         # self.close_mongo_connection()
         print("All tasks have been processed.")

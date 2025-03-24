@@ -169,7 +169,6 @@ class MongoWrapper:
     def create_indexes(self):
         db: Database = self.get_db()
         input_collection: Collection = db["input_data"]
-        training_data_collection: Collection = db["training_data"]
 
         input_collection.create_index(
             [("dataset_name", ASCENDING), ("table_name", ASCENDING)]
@@ -184,18 +183,11 @@ class MongoWrapper:
         input_collection.create_index(
             [("status", ASCENDING)]
         )  # Ensure fast retrieval of items by status
-        training_data_collection.create_index(
-            [("dataset_name", ASCENDING)]
-        )  # Ensure fast retrieval of items by dataset
-        training_data_collection.create_index(
-            [("table_name", ASCENDING)]
-        )  # Ensure fast retrieval of items by table
-        training_data_collection.create_index(
-            [("ml_ranked", ASCENDING)]
-        )  # Ensure fast retrieval of items by ml_ranked
-        training_data_collection.create_index(
-            [("dataset_name", ASCENDING), ("table_name", ASCENDING)]
-        )  # Ensure fast retrieval of items by dataset and table
-        training_data_collection.create_index(
-            [("dataset_name", ASCENDING), ("table_name", ASCENDING), ("ml_ranked", ASCENDING)]
-        )  # Ensure fast retrieval of items by dataset, table, and ml_ranked
+        input_collection.create_index(
+            [
+                ("dataset_name", ASCENDING),
+                ("table_name", ASCENDING),
+                ("status", ASCENDING),
+                ("candidates", ASCENDING),
+            ]
+        )

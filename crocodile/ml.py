@@ -1,6 +1,6 @@
 import os
-from collections import Counter, defaultdict
-from typing import TYPE_CHECKING, Any, DefaultDict, Dict, List, Tuple
+from collections import Counter
+from typing import TYPE_CHECKING, Any, Dict, List
 
 import numpy as np
 from pymongo.collection import Collection
@@ -21,12 +21,9 @@ class MLWorker:
         worker_id: int,
         table_name: str,
         dataset_name: str,
-        training_collection_name: str,
-        error_log_collection_name: str,
-        input_collection: str,
         model_path: str | None = None,
         batch_size: int = 100,
-        max_candidates: int = 5,
+        max_candidates_in_result: int = 5,
         top_n_for_type_freq: int = 3,
         features: List[str] | None = None,
         **kwargs,
@@ -34,22 +31,21 @@ class MLWorker:
         super(MLWorker, self).__init__()
         self.table_name = table_name
         self.dataset_name = dataset_name
-        self.training_collection_name: str = training_collection_name
-        self.error_log_collection_name: str = error_log_collection_name
-        self.input_collection: str = input_collection
         self.model_path: str = model_path or os.path.join(
             PROJECT_ROOT, "crocodile", "models", "default.h5"
         )
         self.batch_size: int = batch_size
-        self.max_candidates: int = max_candidates
+        self.max_candidates_in_result: int = max_candidates_in_result
         self.top_n_for_type_freq: int = top_n_for_type_freq
         self.selected_features = features or DEFAULT_FEATURES
         self._db_name = kwargs.pop("db_name", "crocodile_db")
         self._mongo_uri = kwargs.pop("mongo_uri", "mongodb://mongodb:27017/")
+        self.input_collection = kwargs.get("input_collection", "input_data")
+        self.error_logs_collection = kwargs.get("error_collection", "error_logs")
         self.mongo_wrapper: MongoWrapper = MongoWrapper(
             self._mongo_uri,
             self._db_name,
-            error_log_collection_name=self.error_log_collection_name,
+            error_log_collection_name=self.error_logs_collection,
         )
 
     def get_db(self) -> Database:
@@ -61,216 +57,148 @@ class MLWorker:
 
         return load_model(self.model_path)
 
-    def run(self) -> None:
+    def run(self, global_type_counts: Dict[Any, Counter]) -> None:
+        """Process candidates directly from input_collection"""
         db: Database = self.get_db()
         model: "Model" = self.load_ml_model()
         input_collection: Collection = db[self.input_collection]
-        training_collection: Collection = db[self.training_collection_name]
 
+        # Now proceed with processing documents in batches
         total_docs = self.mongo_wrapper.count_documents(
             input_collection,
-            {"dataset_name": self.dataset_name, "table_name": self.table_name},
-        )
-
-        # Count how many rows have been ML-ranked already
-        processed_count = self.mongo_wrapper.count_documents(
-            training_collection,
             {
                 "dataset_name": self.dataset_name,
                 "table_name": self.table_name,
-                "ml_ranked": True,
+                "status": "DONE",
+                "ml_status": "TODO",
+                "candidates": {"$exists": True},
             },
         )
-        while True:
+
+        processed_count = 0
+        while processed_count < total_docs:
             print(f"ML ranking progress: {processed_count}/{total_docs} documents")
 
-            # Check if we've processed all documents
-            if processed_count >= total_docs:
-                print(f"ML ranking complete: {processed_count}/{total_docs} documents processed")
-                return
-
-            # Process a batch of documents
-            docs_processed = self.apply_ml_ranking(self.dataset_name, self.table_name, model)
+            # Process a batch using the pre-computed global type frequencies
+            docs_processed = self.apply_ml_ranking(model, global_type_counts)
             processed_count += docs_processed
 
-            # If no documents were processed in this batch, there might be none left
+            # If no documents processed, check if there are any left
             if docs_processed == 0:
-                # Double-check if there are any unranked documents left
                 remaining = self.mongo_wrapper.count_documents(
-                    training_collection,
+                    input_collection,
                     {
                         "dataset_name": self.dataset_name,
                         "table_name": self.table_name,
-                        "ml_ranked": False,
+                        "status": "DONE",
+                        "ml_status": "TODO",
+                        "candidates": {"$exists": True},
                     },
                 )
                 if remaining == 0:
-                    print(f"No unranked documents left. Processed {processed_count}/{total_docs}.")
-                    return
+                    break
 
-    def apply_ml_ranking(self, dataset_name: str, table_name: str, model: "Model") -> bool:
-        """Apply ML ranking to a batch of documents. Returns True if documents were processed."""
+        print(f"ML ranking complete: {processed_count}/{total_docs} documents")
+
+    def apply_ml_ranking(self, model: "Model", global_type_counts: Dict[Any, Counter]) -> int:
+        """Apply ML ranking using pre-computed global type frequencies"""
         db: Database = self.get_db()
-        training_collection: Collection = db[self.training_collection_name]
         input_collection: Collection = db[self.input_collection]
 
-        # We'll restrict type-freq counting to the top N candidates in each row/col
-        top_n_for_type_freq: int = self.top_n_for_type_freq  # e.g., 3
-
+        # 1) Claim a batch of documents to process
         batch_docs = []
         for _ in range(self.batch_size):
-            doc = training_collection.find_one_and_update(
-                {"dataset_name": dataset_name, "table_name": table_name, "ml_ranked": False},
-                {"$set": {"ml_ranked": True}},
+            doc = input_collection.find_one_and_update(
+                {
+                    "dataset_name": self.dataset_name,
+                    "table_name": self.table_name,
+                    "status": "DONE",
+                    "ml_status": "TODO",
+                    "candidates": {"$exists": True},
+                },
+                {"$set": {"ml_status": "DOING"}},
+                projection={"_id": 1, "row_id": 1, "candidates": 1},
             )
             if doc is None:
                 break
             batch_docs.append(doc)
 
         if not batch_docs:
-            return False
+            return 0
 
-        # Map documents by _id so we can update them later
-        doc_map: Dict[Any, Dict[str, Any]] = {doc["_id"]: doc for doc in batch_docs}
-
-        # For each column, we'll store a Counter of type_id -> how many rows had that type
-        type_freq_by_column: DefaultDict[Any, Counter] = defaultdict(Counter)
-
-        # Also track how many rows in the batch actually
-        # had that column so we can normalize frequencies
-        rows_count_by_column: Counter = Counter()
-
-        # --------------------------------------------------------------------------
-        # 1) Collect "top N" type IDs per column, ignoring duplicates in same row
-        # --------------------------------------------------------------------------
+        # 2) Assign global type frequencies to each candidate, extract features, etc.
+        all_candidates = []
+        doc_info = []
         for doc in batch_docs:
+            row_id = doc["row_id"]
             candidates_by_column: Dict[Any, List[Dict[str, Any]]] = doc["candidates"]
             for col_index, candidates in candidates_by_column.items():
-                top_candidates_for_freq: List[Dict[str, Any]] = candidates[:top_n_for_type_freq]
-
-                # Collect distinct type IDs from those top candidates
-                row_qids: set = set()
-                for cand in top_candidates_for_freq:
-                    for t_dict in cand.get("types", []):
-                        qid: Any = t_dict.get("id")
-                        if qid:
-                            row_qids.add(qid)
-
-                # Increase counts for each distinct type in this row
-                for qid in row_qids:
-                    type_freq_by_column[col_index][qid] += 1
-
-                # Mark that this row had that column (for normalization)
-                rows_count_by_column[col_index] += 1
-
-        # --------------------------------------------------------------------------
-        # 2) Convert raw counts to frequencies in [0..1].
-        # --------------------------------------------------------------------------
-        for col_index, freq_counter in type_freq_by_column.items():
-            row_count: int = rows_count_by_column[col_index]
-            if row_count == 0:
-                continue
-            # Convert each type's raw count to a ratio in [0..1]
-            for qid in freq_counter:
-                freq_counter[qid] = freq_counter[qid] / row_count
-
-        # --------------------------------------------------------------------------
-        # 3) Assign new features (typeFreq1..typeFreq5) for each candidate
-        # --------------------------------------------------------------------------
-        for doc in batch_docs:
-            candidates_by_column: Dict[Any, List[Dict[str, Any]]] = doc["candidates"]
-            for col_index, candidates in candidates_by_column.items():
-                # If no frequency data was built for this column, default to empty
-                freq_counter: Dict[Any, float] = type_freq_by_column.get(col_index, {})
-
-                for cand in candidates:
-                    # Ensure the candidate has a features dict
-                    if "features" not in cand:
-                        cand["features"] = {}
-
-                    # Gather candidate's type IDs
-                    cand_qids: List[Any] = [
-                        t_obj.get("id") for t_obj in cand.get("types", []) if t_obj.get("id")
-                    ]
-
-                    # Get the frequency for each type
-                    cand_type_freqs: List[float] = [
-                        freq_counter.get(qid, 0.0) for qid in cand_qids
-                    ]
-
-                    # Sort in descending order
-                    cand_type_freqs.sort(reverse=True)
+                freq_counter: Dict[Any, float] = global_type_counts.get(col_index, {})
+                for idx, cand in enumerate(candidates):
+                    cand_feats = cand.setdefault("features", {})
+                    qids = [t.get("id") for t in cand.get("types", []) if t.get("id")]
+                    freq_list = sorted([freq_counter.get(qid, 0.0) for qid in qids], reverse=True)
 
                     # Assign typeFreq1..typeFreq5
                     for i in range(1, 6):
-                        # If the candidate has fewer than i types, default to 0
-                        freq_val: float = (
-                            cand_type_freqs[i - 1] if (i - 1) < len(cand_type_freqs) else 0.0
+                        cand_feats[f"typeFreq{i}"] = (
+                            freq_list[i - 1] if (i - 1) < len(freq_list) else 0.0
                         )
-                        cand["features"][f"typeFreq{i}"] = round(freq_val, 3)
 
-        # --------------------------------------------------------------------------
-        # 4) Build final feature matrix & do ML predictions
-        # --------------------------------------------------------------------------
-        all_candidates: List[List[float]] = []
-        doc_info: List[Tuple[Any, int, Any, int]] = []
-        for doc in batch_docs:
-            row_index: int = doc["row_id"]
-            candidates_by_column: Dict[Any, List[Dict[str, Any]]] = doc["candidates"]
-            for col_index, candidates in candidates_by_column.items():
-                features_list: List[List[float]] = [self.extract_features(c) for c in candidates]
-                all_candidates.extend(features_list)
+                    # Build feature vector for ML model
+                    feat_vec = self.extract_features(cand)
+                    all_candidates.append(feat_vec)
+                    doc_info.append((doc["_id"], row_id, col_index, idx))
 
-                # Track the location of each candidate
-                doc_info.extend(
-                    [(doc["_id"], row_index, col_index, idx) for idx in range(len(candidates))]
-                )
-
-        if len(all_candidates) == 0:
-            print(
-                f"No candidates to predict for dataset={dataset_name}, table={table_name}. "
-                "Skipping..."
+        # 3) If no candidates, mark these docs as 'ML_DONE'
+        if not all_candidates:
+            input_collection.update_many(
+                {"_id": {"$in": [d["_id"] for d in batch_docs]}}, {"$set": {"status": "ML_DONE"}}
             )
-            return
+            return len(batch_docs)
 
-        candidate_features: np.ndarray = np.array(all_candidates)
-        print(f"Predicting scores for {len(candidate_features)} candidates...")
-        ml_scores: np.ndarray = model.predict(candidate_features, batch_size=128)[:, 1]
-        print("Scores predicted.")
+        # 4) ML predictions
+        features_array = np.array(all_candidates)
+        ml_scores = model.predict(features_array, batch_size=128)[:, 1]
 
-        # Assign new ML scores back to candidates
-        for i, (doc_id, row_index, col_index, cand_idx) in enumerate(doc_info):
-            candidate: Dict[str, Any] = doc_map[doc_id]["candidates"][col_index][cand_idx]
-            candidate["score"] = float(ml_scores[i])
-
-        # --------------------------------------------------------------------------
-        # 5) Batch update the final results
-        # --------------------------------------------------------------------------
+        # 5) Assign scores and prepare updates
+        docs_by_id = {doc["_id"]: doc for doc in batch_docs}
+        score_map: Dict[Any, Dict[Any, Dict[int, float]]] = {}
+        for i, (doc_id, row_id, col_index, cand_idx) in enumerate(doc_info):
+            score_map.setdefault(doc_id, {}).setdefault(col_index, {})[cand_idx] = float(
+                ml_scores[i]
+            )
 
         bulk_updates = []
-        for doc_id, doc in doc_map.items():
-            row_index = doc["row_id"]
-            updated_candidates_by_column = {}
+        for doc_id, doc in docs_by_id.items():
+            el_results = {}
+            candidates_by_column = doc["candidates"]
 
-            for col_index, candidates in doc["candidates"].items():
-                ranked_candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)[
-                    : self.max_candidates
+            for col_idx, cdict in score_map.get(doc_id, {}).items():
+                col_cands = candidates_by_column[col_idx]
+                # Update candidate scores
+                for c_idx, scr in cdict.items():
+                    col_cands[c_idx]["score"] = scr
+
+                # Sort + slice top N
+                sorted_cands = sorted(col_cands, key=lambda x: x.get("score", 0.0), reverse=True)[
+                    : self.max_candidates_in_result
                 ]
-                updated_candidates_by_column[col_index] = ranked_candidates
+                el_results[col_idx] = sorted_cands
 
-            # Create update operation
             bulk_updates.append(
                 UpdateOne(
-                    {"dataset_name": dataset_name, "table_name": table_name, "row_id": row_index},
-                    {"$set": {"el_results": updated_candidates_by_column}},
+                    {"_id": doc_id},
+                    {"$set": {"el_results": el_results, "ml_status": "DONE"}},
                 )
             )
 
-        # Execute all updates in a single batch operation
+        # 6) Bulk commit final results
         if bulk_updates:
             input_collection.bulk_write(bulk_updates)
 
-        return len(batch_docs)  # Return count of processed documents
+        return len(batch_docs)
 
     def extract_features(self, candidate: Dict[str, Any]) -> List[float]:
+        """Extract features as in the original system"""
         return [candidate["features"].get(feature, 0.0) for feature in self.selected_features]

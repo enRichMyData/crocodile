@@ -17,19 +17,16 @@ class RowBatchProcessor:
     def __init__(
         self,
         candidate_fetcher: CandidateFetcher,
-        max_training_candidates: int = 16,
-        max_candidates: int = 5,
+        max_candidates_in_result: int = 5,
         bow_fetcher: BowFetcher | None = None,
         **kwargs,
     ):
         self.candidate_fetcher = candidate_fetcher
-        self.max_training_candidates = max_training_candidates
-        self.max_candidates = max_candidates
+        self.max_candidates_in_result = max_candidates_in_result
         self.bow_fetcher = bow_fetcher
         self._db_name = kwargs.get("db_name", "crocodile_db")
         self._mongo_uri = kwargs.get("mongo_uri", "mongodb://mongodb:27017")
         self.input_collection = kwargs.get("input_collection", "input_data")
-        self.training_collection = kwargs.get("training_collection", "training_data")
         self.mongo_wrapper = MongoWrapper(self._mongo_uri, self._db_name)
 
     def get_db(self):
@@ -74,9 +71,7 @@ class RowBatchProcessor:
             )
 
             # 3) Process each row (BoW fetch, final ranking, DB update)
-            self._process_rows_individually(
-                row_data_list, candidates_results, dataset_name, table_name, db
-            )
+            self._process_rows_individually(row_data_list, candidates_results, db)
 
         except Exception:
             self.mongo_wrapper.log_to_db(
@@ -209,16 +204,9 @@ class RowBatchProcessor:
     # --------------------------------------------------------------------------
     # 3) PROCESS EACH ROW INDIVIDUALLY
     # --------------------------------------------------------------------------
-    def _process_rows_individually(
-        self, row_data_list, candidates_results, dataset_name, table_name, db
-    ):
-        """
-        For each row:
-          - Gather QIDs
-          - Fetch BoW vectors
-          - Rank candidates
-          - Save final results + training candidates
-        """
+    def _process_rows_individually(self, row_data_list, candidates_results, db):
+        """Process rows and store both linked entities and
+        training candidates in input_collection"""
         for (
             doc_id,
             row,
@@ -239,20 +227,22 @@ class RowBatchProcessor:
                     row_hash, raw_context_text, row_qids
                 )
 
-            # Rank and build final results
-            (
-                linked_entities,
-                training_candidates_by_ne_column,
-            ) = self._build_linked_entities_and_training(
+            # Build results
+            linked_entities, training_candidates = self._build_linked_entities_and_training(
                 ne_columns, row, correct_qids, row_index, candidates_results, bow_data
             )
 
-            # Save to DB - Ensure status is explicitly set to "DONE"
-            self.save_candidates_for_training(
-                training_candidates_by_ne_column, dataset_name, table_name, row_index
-            )
+            # Store everything in the input collection
             db[self.input_collection].update_one(
-                {"_id": doc_id}, {"$set": {"el_results": linked_entities, "status": "DONE"}}
+                {"_id": doc_id},
+                {
+                    "$set": {
+                        "el_results": linked_entities,
+                        "candidates": training_candidates,  # Store training candidates here
+                        "status": "DONE",
+                        "ml_status": "TODO",
+                    }
+                },
             )
 
     def _collect_row_qids(self, ne_columns, row, candidates_results):
@@ -302,26 +292,27 @@ class RowBatchProcessor:
                             cand["features"]["column_NERtype"] = map_nertype_to_numeric(ner_type)
 
                     # Rank
+                    max_training_candidates = len(candidates)
                     ranked_candidates = self.rank_with_feature_scoring(candidates)
                     ranked_candidates.sort(key=lambda x: x.get("score", 0.0), reverse=True)
 
                     # If correct QID is missing in top training slice, insert it
                     correct_qid = correct_qids.get(f"{row_index}-{c}", None)
                     if correct_qid and correct_qid not in [
-                        rc["id"] for rc in ranked_candidates[: self.max_training_candidates]
+                        rc["id"] for rc in ranked_candidates[:max_training_candidates]
                     ]:
                         correct_candidate = next(
                             (x for x in ranked_candidates if x["id"] == correct_qid), None
                         )
                         if correct_candidate:
-                            top_slice = ranked_candidates[: self.max_training_candidates - 1]
+                            top_slice = ranked_candidates[: max_training_candidates - 1]
                             top_slice.append(correct_candidate)
                             ranked_candidates = top_slice
                             ranked_candidates.sort(key=lambda x: x.get("score", 0.0), reverse=True)
 
                     # Slice final results
-                    el_results_candidates = ranked_candidates[: self.max_candidates]
-                    training_candidates = ranked_candidates[: self.max_training_candidates]
+                    el_results_candidates = ranked_candidates[: self.max_candidates_in_result]
+                    training_candidates = ranked_candidates[:max_training_candidates]
 
                     linked_entities[c] = el_results_candidates
                     training_candidates_by_ne_column[c] = training_candidates
@@ -357,20 +348,3 @@ class RowBatchProcessor:
         """
         scored_candidates = [self.score_candidate(c) for c in candidates]
         return sorted(scored_candidates, key=lambda x: x["score"], reverse=True)
-
-    def save_candidates_for_training(
-        self, candidates_by_ne_column, dataset_name, table_name, row_index
-    ):
-        """
-        This used to be Crocodile.save_candidates_for_training.
-        """
-        db = self.get_db()
-        training_collection = db[self.training_collection]
-        training_document = {
-            "dataset_name": dataset_name,
-            "table_name": table_name,
-            "row_id": row_index,
-            "candidates": candidates_by_ne_column,
-            "ml_ranked": False,
-        }
-        training_collection.insert_one(training_document)

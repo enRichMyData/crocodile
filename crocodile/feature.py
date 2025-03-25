@@ -1,5 +1,10 @@
+from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Set
 
+from pymongo.collection import Collection
+from pymongo.database import Database
+
+from crocodile.mongo import MongoConnectionManager
 from crocodile.utils import ngrams, tokenize_text
 
 DEFAULT_FEATURES = [
@@ -40,8 +45,21 @@ def map_nertype_to_numeric(nertype: str) -> int:
 
 
 class Feature:
-    def __init__(self, features: Optional[List[str]] = None):
+    def __init__(
+        self,
+        dataset_name: str,
+        table_name: str,
+        top_n_for_type_freq: int = 5,
+        features: Optional[List[str]] = None,
+        **kwargs,
+    ):
+        self.dataset_name = dataset_name
+        self.table_name = table_name
+        self.top_n_for_type_freq = top_n_for_type_freq
         self.selected_features = features or DEFAULT_FEATURES
+        self._db_name = kwargs.pop("db_name", "crocodile_db")
+        self._mongo_uri = kwargs.pop("mongo_uri", "mongodb://mongodb:27017/")
+        self.input_collection = kwargs.get("input_collection", "input_data")
 
     def map_kind_to_numeric(self, kind: str) -> int:
         mapping: Dict[str, int] = {
@@ -131,3 +149,100 @@ class Feature:
                 }
             )
         return processed_candidates
+
+    def get_db(self) -> Database:
+        client = MongoConnectionManager.get_client(self._mongo_uri)
+        return client[self._db_name]
+
+    def compute_global_type_frequencies(
+        self,
+        docs_to_process: Optional[float] = None,
+        random_sample: bool = False,
+        doc_range: Optional[tuple] = None,
+    ) -> Dict[Any, Counter]:
+        """Compute type frequencies across candidate documents.
+
+        Args:
+            docs_to_process: Percentage of documents to process. If None, processes all documents.
+                Use this to limit computation time for very large datasets.
+            random_sample: If True and docs_to_process is specified, samples documents randomly.
+            doc_range: Optional tuple (start, end) to process a specific document range.
+                Takes precedence over random_sample.
+
+        Returns:
+            Dictionary mapping column indexes to type frequency counters.
+        """
+        col: Collection = self.get_db()[self.input_collection]
+        type_freq_by_column = defaultdict(Counter)
+        rows_count_by_column = Counter()
+
+        # Base query to find documents with candidates
+        match_query = {
+            "dataset_name": self.dataset_name,
+            "table_name": self.table_name,
+            "status": "DONE",
+            "candidates": {"$exists": True},
+        }
+        projection = {"candidates": 1}
+
+        # Choose sampling strategy
+        if doc_range:
+            start, end = doc_range
+            print(f"Processing documents in range {start} to {end}")
+            cursor = col.find(match_query, projection).skip(start).limit(end - start)
+        elif docs_to_process and random_sample:
+            # Use aggregation pipeline with $sample for random sampling
+            total_docs = col.count_documents(match_query)
+            max_docs = max(1, int(total_docs * docs_to_process))
+            print(f"Computing type-frequency features by randomly sampling {max_docs} documents")
+            pipeline = [
+                {"$match": match_query},
+                {"$sample": {"size": max_docs}},
+                {"$project": projection},
+            ]
+            cursor = col.aggregate(pipeline)
+        else:
+            # Simple limit if specified
+            cursor = col.find(match_query, projection)
+            if docs_to_process:
+                total_docs = col.count_documents(match_query)
+                max_docs = max(1, int(total_docs * docs_to_process))
+                print(
+                    f"Computing type-frequency features by processing first {max_docs} documents"
+                )
+                cursor = cursor.limit(max_docs)
+            else:
+                print("Computing type-frequency features by processing all matching documents")
+
+        # Process documents to calculate type frequencies
+        doc_count = 0
+        for doc in cursor:
+            doc_count += 1
+            candidates_by_column: Dict[Any, List[Dict[str, Any]]] = doc["candidates"]
+
+            for col_index, candidates in candidates_by_column.items():
+                top_candidates = candidates[: self.top_n_for_type_freq]
+                row_qids = set()
+
+                for cand in top_candidates:
+                    for t_dict in cand.get("types", []):
+                        qid = t_dict.get("id")
+                        if qid:
+                            row_qids.add(qid)
+
+                for qid in row_qids:
+                    type_freq_by_column[col_index][qid] += 1
+
+                rows_count_by_column[col_index] += 1
+
+        # Normalize frequencies
+        for col_index, freq_counter in type_freq_by_column.items():
+            row_count: int = rows_count_by_column[col_index]
+            if row_count == 0:
+                continue
+            # Convert each type's raw count to a ratio in [0..1]
+            for qid in freq_counter:
+                freq_counter[qid] = freq_counter[qid] / row_count
+
+        print(f"Computed type frequencies from {doc_count} documents")
+        return type_freq_by_column

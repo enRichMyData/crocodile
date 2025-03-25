@@ -12,7 +12,7 @@ COPY pyproject.toml .
 COPY ./crocodile ./crocodile
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -e ".[dependencies]"
+RUN pip install --no-cache-dir -e "."
 
 # Expose Jupyter Notebook port
 EXPOSE 8888

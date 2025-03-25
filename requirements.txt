@@ -1,7 +1,0 @@
-tensorflow==2.18.0
-nltk==3.9.1
-aiohttp==3.11.12
-pymongo==4.11.1
-pandas==2.2.3
-column-classifier==0.1.7
-python-dotenv==1.0.1

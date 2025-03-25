@@ -14,7 +14,7 @@ def main():
         "--croco.mongo-uri",
         type=str,
         help="MongoDB connection URI",
-        default="mongodb://localhost:27017",
+        default="mongodb://mongodb:27017",
     )
     args = parser.parse_args()
 

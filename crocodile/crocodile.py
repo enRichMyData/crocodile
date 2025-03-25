@@ -5,7 +5,7 @@ import uuid
 from collections import Counter
 from functools import partial
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from column_classifier import ColumnClassifier
@@ -427,7 +427,7 @@ class Crocodile:
         # Report progress
         print(f"Processed {processed_count}/{total_docs} rows...")
 
-    def ml_worker(self, rank: int, global_type_counts: Counter):
+    def ml_worker(self, rank: int, global_type_counts: Dict[Any, Counter]):
         """Wrapper function to create and run an MLWorker with the correct parameters"""
         worker = MLWorker(
             rank,

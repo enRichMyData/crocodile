@@ -70,6 +70,7 @@ class MLWorker:
                 "dataset_name": self.dataset_name,
                 "table_name": self.table_name,
                 "status": "DONE",
+                "ml_status": "TODO",
                 "candidates": {"$exists": True},
             },
         )
@@ -90,6 +91,7 @@ class MLWorker:
                         "dataset_name": self.dataset_name,
                         "table_name": self.table_name,
                         "status": "DONE",
+                        "ml_status": "TODO",
                         "candidates": {"$exists": True},
                     },
                 )
@@ -111,9 +113,10 @@ class MLWorker:
                     "dataset_name": self.dataset_name,
                     "table_name": self.table_name,
                     "status": "DONE",
+                    "ml_status": "TODO",
                     "candidates": {"$exists": True},
                 },
-                {"$set": {"status": "ML_PROCESSING"}},
+                {"$set": {"ml_status": "DOING"}},
                 projection={"_id": 1, "row_id": 1, "candidates": 1},
             )
             if doc is None:
@@ -186,7 +189,7 @@ class MLWorker:
             bulk_updates.append(
                 UpdateOne(
                     {"_id": doc_id},
-                    {"$set": {"el_results": el_results, "status": "ML_DONE"}},
+                    {"$set": {"el_results": el_results, "ml_status": "DONE"}},
                 )
             )
 

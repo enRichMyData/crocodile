@@ -240,6 +240,7 @@ class RowBatchProcessor:
                         "el_results": linked_entities,
                         "candidates": training_candidates,  # Store training candidates here
                         "status": "DONE",
+                        "ml_status": "TODO",
                     }
                 },
             )

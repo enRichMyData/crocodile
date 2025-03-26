@@ -71,7 +71,6 @@ class MLWorker:
                 "table_name": self.table_name,
                 "status": "DONE",
                 "ml_status": "TODO",
-                "candidates": {"$exists": True},
             },
         )
 
@@ -92,7 +91,6 @@ class MLWorker:
                         "table_name": self.table_name,
                         "status": "DONE",
                         "ml_status": "TODO",
-                        "candidates": {"$exists": True},
                     },
                 )
                 if remaining == 0:
@@ -114,7 +112,6 @@ class MLWorker:
                     "table_name": self.table_name,
                     "status": "DONE",
                     "ml_status": "TODO",
-                    "candidates": {"$exists": True},
                 },
                 {"$set": {"ml_status": "DOING"}},
                 projection={"_id": 1, "row_id": 1, "candidates": 1},

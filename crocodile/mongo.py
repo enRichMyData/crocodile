@@ -170,24 +170,18 @@ class MongoWrapper:
         db: Database = self.get_db()
         input_collection: Collection = db["input_data"]
 
-        input_collection.create_index(
-            [("dataset_name", ASCENDING), ("table_name", ASCENDING)]
-        )  # Ensure fast retrieval of items by dataset and table
+        input_collection.create_index([("dataset_name", ASCENDING), ("table_name", ASCENDING)])
         input_collection.create_index(
             [("dataset_name", ASCENDING), ("table_name", ASCENDING), ("row_id", ASCENDING)],
             unique=True,
         )
-        input_collection.create_index(
-            [("dataset_name", ASCENDING), ("table_name", ASCENDING), ("status", ASCENDING)]
-        )  # Ensure fast retrieval of items by status
-        input_collection.create_index(
-            [("status", ASCENDING)]
-        )  # Ensure fast retrieval of items by status
+        input_collection.create_index([("status", ASCENDING)])
+        input_collection.create_index([("ml_status", ASCENDING)])
         input_collection.create_index(
             [
                 ("dataset_name", ASCENDING),
                 ("table_name", ASCENDING),
                 ("status", ASCENDING),
-                ("candidates", ASCENDING),
+                ("ml_status", ASCENDING),
             ]
         )

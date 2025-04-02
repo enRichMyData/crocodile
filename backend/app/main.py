@@ -1,8 +1,18 @@
 from config import settings
 from endpoints.crocodile_api import router
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware  # Import CORS middleware
 
 app = FastAPI(title=settings.FASTAPI_APP_NAME, debug=settings.DEBUG)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins, modify this in production
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
 # Include the crocodile router
 app.include_router(router)

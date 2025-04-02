@@ -123,12 +123,14 @@ def add_table(
             table_name=table_upload.table_name,
             max_candidates=3,
             entity_retrieval_endpoint=os.environ.get("ENTITY_RETRIEVAL_ENDPOINT"),
+            entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT"),
             entity_retrieval_token=os.environ.get("ENTITY_RETRIEVAL_TOKEN"),
             max_workers=8,
             candidate_retrieval_limit=10,
             model_path="./crocodile/models/default.h5",
             save_output_to_csv=False,
             columns_type=classification,
+           
         )
         croco.run()
 
@@ -218,7 +220,6 @@ def add_table_csv(
             input_csv=df,
             dataset_name=datasetName,
             table_name=table_name,
-            max_candidates=3,
             entity_retrieval_endpoint=os.environ.get("ENTITY_RETRIEVAL_ENDPOINT"),
             entity_retrieval_token=os.environ.get("ENTITY_RETRIEVAL_TOKEN"),
             max_workers=8,
@@ -226,6 +227,8 @@ def add_table_csv(
             model_path="./crocodile/models/default.h5",
             save_output_to_csv=False,
             columns_type=classification,
+            entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT")
+            
         )
         croco.run()
 
@@ -352,6 +355,13 @@ def get_table(
     results = crocodile_db.input_data.find(query_filter).sort("_id", 1).limit(limit)
     raw_rows = list(results)
 
+    # Check if there are documents with ML_STATUS = TODO or DOING
+    table_status_filter = {"dataset_name": dataset_name, "table_name": table_name, "ml_status": {"$in": ["TODO", "DOING"]}}
+    pending_docs_count = crocodile_db.input_data.count_documents(table_status_filter)
+    status = "DOING"
+    if pending_docs_count == 0:
+        status = "DONE"
+                                            
     # Build a cleaned-up response with *all* candidates
     rows_formatted = []
     for row in raw_rows:
@@ -378,6 +388,7 @@ def get_table(
         "data": {
             "datasetName": dataset_name,
             "tableName": table.get("table_name"),
+            "status": status,
             "header": header,
             "rows": rows_formatted,
         },

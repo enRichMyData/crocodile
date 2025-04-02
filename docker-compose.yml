@@ -8,7 +8,6 @@ services:
       - ./mongo_data:/data/db  # Local directory for MongoDB data
       - ./mongod.conf:/etc/mongod.conf  # Custom MongoDB config
     command: mongod --config /etc/mongod.conf
-    restart: always  # Restart policy to always restart the container
 
   fastapi:
     build:
@@ -24,21 +23,19 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     env_file:
       - .env  # Load environment variables from .env file
-    restart: always  # Restart policy to always restart the container
 
-  jupyter:
-    build: .
-    container_name: crocodile_jupyter
-    ports:
-      - "${JUPYTER_SERVER_PORT}:8888"
-    volumes:
-      - ./notebooks:/home/jovyan/work
-      - ./crocodile:/home/jovyan/work/crocodile
-      - ./tables:/home/jovyan/work/tables
-      - ./training/:/home/jovyan/work/training
-    command: start-notebook.sh --NotebookApp.token='' --NotebookApp.password=''
-    environment:
-      - JUPYTER_ENABLE_LAB=yes
-    env_file:
-      - .env  # Load environment variables from .env file
-    restart: always  # Restart policy to always restart the container
+  # jupyter:
+  #   build: .
+  #   container_name: crocodile_jupyter
+  #   ports:
+  #     - "${JUPYTER_SERVER_PORT}:8888"
+  #   volumes:
+  #     - ./notebooks:/home/jovyan/work
+  #     - ./crocodile:/home/jovyan/work/crocodile
+  #     - ./tables:/home/jovyan/work/tables
+  #     - ./training/:/home/jovyan/work/training
+  #   command: start-notebook.sh --NotebookApp.token='' --NotebookApp.password=''
+  #   environment:
+  #     - JUPYTER_ENABLE_LAB=yes
+  #   env_file:
+  #     - .env  # Load environment variables from .env file

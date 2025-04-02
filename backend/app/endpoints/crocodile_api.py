@@ -55,7 +55,7 @@ def format_classification(raw_classification: dict, header: list) -> dict:
     return {"NE": ne, "LIT": lit, "IGNORED": ignored}
 
 
-@router.post("/dataset/{datasetName}/table/json", status_code=status.HTTP_201_CREATED)
+@router.post("/datasets/{datasetName}/tables/json", status_code=status.HTTP_201_CREATED)
 def add_table(
     datasetName: str,
     table_upload: TableUpload = Body(..., example=IMDB_EXAMPLE),
@@ -150,7 +150,7 @@ def parse_json_column_classification(column_classification: str = Form("")) -> O
     return json.loads(column_classification)
 
 
-@router.post("/dataset/{datasetName}/table/csv", status_code=status.HTTP_201_CREATED)
+@router.post("/datasets/{datasetName}/tables/csv", status_code=status.HTTP_201_CREATED)
 def add_table_csv(
     datasetName: str,
     table_name: str,

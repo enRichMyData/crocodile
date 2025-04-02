@@ -113,10 +113,9 @@ POST /dataset/{datasetName}/table/csv
 
 **Example Request:**
 ```bash
-curl -X POST "http://localhost:8000/dataset/movies_2023/table/csv" \
-  -F "table_name=movies" \
+curl -X POST "http://localhost:8000/dataset/movies_2023/table/csv?table_name=movies_test" \
   -F "file=@movies.csv" \
-  -F "column_classification={\"NE\":{\"0\":\"PERSON\",\"1\":\"PERSON\"},\"LIT\":{\"2\":\"DATE\"},\"IGNORED\":[]}"
+  -F 'column_classification={"NE":{"0":"PERSON"},"LIT":{},"IGNORED":[]}'
 ```
 
 **Response:**

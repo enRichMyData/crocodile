@@ -243,22 +243,81 @@ def add_table_csv(
 
 @router.get("/datasets")
 def get_datasets(
-    limit: int = Query(10), cursor: Optional[str] = Query(None), db: Database = Depends(get_db)
+    limit: int = Query(10), 
+    next_cursor: Optional[str] = Query(None),
+    prev_cursor: Optional[str] = Query(None),
+    db: Database = Depends(get_db)
 ):
     """
-    Get datasets with keyset pagination, using ObjectId as the cursor.
+    Get datasets with bi-directional keyset pagination, using ObjectId as the cursor.
+    Supports both forward (next_cursor) and backward (prev_cursor) navigation.
     """
+    # Determine pagination direction and set up query
     query_filter = {}
-    if cursor:
+    sort_direction = 1  # Default ascending (forward)
+    
+    if next_cursor and prev_cursor:
+        raise HTTPException(
+            status_code=400, 
+            detail="Only one of next_cursor or prev_cursor should be provided"
+        )
+    
+    if next_cursor:
+        # Forward pagination (get items after the cursor)
         try:
-            query_filter["_id"] = {"$gt": ObjectId(cursor)}
+            query_filter["_id"] = {"$gt": ObjectId(next_cursor)}
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid cursor value")
+    elif prev_cursor:
+        # Backward pagination (get items before the cursor)
+        try:
+            query_filter["_id"] = {"$lt": ObjectId(prev_cursor)}
+            sort_direction = -1  # Sort descending for backward pagination
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid cursor value")
 
-    results = db.datasets.find(query_filter).sort("_id", 1).limit(limit)
+    # Execute query with proper sorting
+    results = db.datasets.find(query_filter).sort("_id", sort_direction).limit(limit + 1)
     datasets = list(results)
-    next_cursor = datasets[-1]["_id"] if datasets else None
-
+    
+    # Handle pagination metadata
+    has_more = len(datasets) > limit
+    if has_more:
+        datasets = datasets[:limit]  # Remove the extra item
+    
+    # If we did backward pagination, reverse the results to maintain consistent order
+    if prev_cursor:
+        datasets.reverse()
+    
+    # Get cursors for next and previous pages
+    next_cursor = None
+    prev_cursor = None
+    
+    if datasets:
+        # For previous cursor, we need the ID of the first item
+        # But only if we're not on the first page
+        if not query_filter.get("_id", {}).get("$gt"):  # No forward pagination filter
+            # Check if there are documents before the current page
+            if prev_cursor:  # We came backwards, so there are previous items
+                prev_cursor = str(datasets[0]["_id"])
+            else:
+                # We're on first page - check if this is a fresh query or already paginated
+                first_id = datasets[0]["_id"]
+                if db.datasets.count_documents({"_id": {"$lt": first_id}}) > 0:
+                    prev_cursor = str(first_id)
+                # Otherwise prev_cursor remains None (we're truly on first page)
+        else:
+            # We came from a next_cursor, there are previous items
+            prev_cursor = str(datasets[0]["_id"])
+            
+        # For next cursor, we need the ID of the last item
+        # But only if we have more items or we came backwards
+        if has_more:
+            next_cursor = str(datasets[-1]["_id"])
+        elif query_filter.get("_id", {}).get("$lt"):  # We came backwards
+            next_cursor = str(datasets[-1]["_id"])
+    
+    # Format the response
     for dataset in datasets:
         dataset["_id"] = str(dataset["_id"])
         if "created_at" in dataset:
@@ -267,9 +326,8 @@ def get_datasets(
     return {
         "data": datasets,
         "pagination": {
-            "next_cursor": str(next_cursor)
-            if next_cursor
-            else None  # removed limit from pagination output
+            "next_cursor": next_cursor,
+            "prev_cursor": prev_cursor
         },
     }
 
@@ -278,27 +336,81 @@ def get_datasets(
 def get_tables(
     dataset_name: str,
     limit: int = Query(10),
-    cursor: Optional[str] = Query(None),
+    next_cursor: Optional[str] = Query(None),
+    prev_cursor: Optional[str] = Query(None),
     db: Database = Depends(get_db),
 ):
     """
-    Get tables for a dataset with keyset pagination, using ObjectId as the cursor.
+    Get tables for a dataset with bi-directional keyset pagination.
     """
     # Ensure dataset exists
-    if not db.datasets.find_one({"dataset_name": dataset_name}):  # updated query key
+    if not db.datasets.find_one({"dataset_name": dataset_name}):
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 
+    # Determine pagination direction
     query_filter = {"dataset_name": dataset_name}
-    if cursor:
+    sort_direction = 1  # Default ascending (forward)
+    
+    if next_cursor and prev_cursor:
+        raise HTTPException(
+            status_code=400, 
+            detail="Only one of next_cursor or prev_cursor should be provided"
+        )
+    
+    if next_cursor:
         try:
-            query_filter["_id"] = {"$gt": ObjectId(cursor)}
+            query_filter["_id"] = {"$gt": ObjectId(next_cursor)}
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid cursor value")
+    elif prev_cursor:
+        try:
+            query_filter["_id"] = {"$lt": ObjectId(prev_cursor)}
+            sort_direction = -1  # Sort descending for backward pagination
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid cursor value")
 
-    results = db.tables.find(query_filter).sort("_id", 1).limit(limit)
+    # Execute query with proper sorting
+    results = db.tables.find(query_filter).sort("_id", sort_direction).limit(limit + 1)
     tables = list(results)
-    next_cursor = tables[-1]["_id"] if tables else None
+    
+    # Handle pagination metadata
+    has_more = len(tables) > limit
+    if has_more:
+        tables = tables[:limit]  # Remove the extra item
+    
+    # If we did backward pagination, reverse the results
+    if prev_cursor:
+        tables.reverse()
+    
+    # Get cursors for next and previous pages
+    next_cursor = None
+    prev_cursor = None
+    
+    if tables:
+        # For previous cursor, we need the ID of the first item
+        # But only if we're not on the first page
+        if not query_filter.get("_id", {}).get("$gt"):  # No forward pagination filter
+            # Check if there are documents before the current page
+            if prev_cursor:  # We came backwards, so there are previous items
+                prev_cursor = str(tables[0]["_id"])
+            else:
+                # We're on first page - check if this is a fresh query or already paginated
+                first_id = tables[0]["_id"]
+                if db.tables.count_documents({"dataset_name": dataset_name, "_id": {"$lt": first_id}}) > 0:
+                    prev_cursor = str(first_id)
+                # Otherwise prev_cursor remains None (we're truly on first page)
+        else:
+            # We came from a next_cursor, there are previous items
+            prev_cursor = str(tables[0]["_id"])
+            
+        # For next cursor, we need the ID of the last item
+        # But only if we have more items or we came backwards
+        if has_more:
+            next_cursor = str(tables[-1]["_id"])
+        elif query_filter.get("_id", {}).get("$lt"):  # We came backwards
+            next_cursor = str(tables[-1]["_id"])
 
+    # Format the response
     for table in tables:
         table["_id"] = str(table["_id"])
         if "created_at" in table:
@@ -310,9 +422,8 @@ def get_tables(
         "dataset": dataset_name,
         "data": tables,
         "pagination": {
-            "next_cursor": str(next_cursor)
-            if next_cursor
-            else None  # removed limit from pagination output
+            "next_cursor": next_cursor,
+            "prev_cursor": prev_cursor
         },
     }
 
@@ -322,16 +433,16 @@ def get_table(
     dataset_name: str,
     table_name: str,
     limit: int = Query(10),
-    cursor: Optional[str] = Query(None),
+    next_cursor: Optional[str] = Query(None),
+    prev_cursor: Optional[str] = Query(None),
     db: Database = Depends(get_db),
     crocodile_db: Database = Depends(get_crocodile_db),
 ):
     """
-    Get table data with keyset pagination, using ObjectId as the cursor.
-    Returns *all* candidate entities for each column that has any.
+    Get table data with bi-directional keyset pagination.
     """
     # Check dataset
-    if not db.datasets.find_one({"dataset_name": dataset_name}):  # updated query key
+    if not db.datasets.find_one({"dataset_name": dataset_name}):
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 
     # Check table
@@ -343,17 +454,72 @@ def get_table(
 
     header = table.get("header", [])
 
-    # Pagination filter
+    # Determine pagination direction
     query_filter = {"dataset_name": dataset_name, "table_name": table_name}
-    if cursor:
+    sort_direction = 1  # Default ascending (forward)
+    
+    if next_cursor and prev_cursor:
+        raise HTTPException(
+            status_code=400, 
+            detail="Only one of next_cursor or prev_cursor should be provided"
+        )
+    
+    if next_cursor:
         try:
-            query_filter["_id"] = {"$gt": ObjectId(cursor)}
+            query_filter["_id"] = {"$gt": ObjectId(next_cursor)}
+        except Exception: 
+            raise HTTPException(status_code=400, detail="Invalid cursor value")
+    elif prev_cursor:
+        try:
+            query_filter["_id"] = {"$lt": ObjectId(prev_cursor)}
+            sort_direction = -1  # Sort descending for backward pagination
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid cursor value")
 
-    # Fetch rows from the Crocodile-processed data
-    results = crocodile_db.input_data.find(query_filter).sort("_id", 1).limit(limit)
+    # Execute query with proper sorting
+    results = crocodile_db.input_data.find(query_filter).sort("_id", sort_direction).limit(limit + 1)
     raw_rows = list(results)
+    
+    # Handle pagination metadata
+    has_more = len(raw_rows) > limit
+    if has_more:
+        raw_rows = raw_rows[:limit]  # Remove the extra item
+    
+    # If we did backward pagination, reverse the results
+    if prev_cursor:
+        raw_rows.reverse()
+    
+    # Get cursors for next and previous pages
+    next_cursor = None
+    prev_cursor = None
+    
+    if raw_rows:
+        # For previous cursor, we need the ID of the first item
+        # But only if we're not on the first page
+        if not query_filter.get("_id", {}).get("$gt"):  # No forward pagination filter
+            # Check if there are documents before the current page
+            if prev_cursor:  # We came backwards, so there are previous items
+                prev_cursor = str(raw_rows[0]["_id"])
+            else:
+                # We're on first page - check if this is a fresh query or already paginated
+                first_id = raw_rows[0]["_id"]
+                if crocodile_db.input_data.count_documents({
+                    "dataset_name": dataset_name, 
+                    "table_name": table_name, 
+                    "_id": {"$lt": first_id}
+                }) > 0:
+                    prev_cursor = str(first_id)
+                # Otherwise prev_cursor remains None (we're truly on first page)
+        else:
+            # We came from a next_cursor, there are previous items
+            prev_cursor = str(raw_rows[0]["_id"])
+            
+        # For next cursor, we need the ID of the last item
+        # But only if we have more items or we came backwards
+        if has_more:
+            next_cursor = str(raw_rows[-1]["_id"])
+        elif query_filter.get("_id", {}).get("$lt"):  # We came backwards
+            next_cursor = str(raw_rows[-1]["_id"])
 
     # Check if there are documents with ML_STATUS = TODO or DOING
     table_status_filter = {"dataset_name": dataset_name, "table_name": table_name, "ml_status": {"$in": ["TODO", "DOING"]}}
@@ -382,8 +548,6 @@ def get_table(
             }
         )
 
-    # Determine next cursor
-    next_cursor = str(raw_rows[-1]["_id"]) if raw_rows else None
     return {
         "data": {
             "datasetName": dataset_name,
@@ -392,7 +556,10 @@ def get_table(
             "header": header,
             "rows": rows_formatted,
         },
-        "pagination": {"next_cursor": next_cursor},
+        "pagination": {
+            "next_cursor": next_cursor,
+            "prev_cursor": prev_cursor
+        },
     }
 
 
@@ -480,3 +647,272 @@ def delete_table(dataset_name: str, table_name: str, db: Database = Depends(get_
 
     # Optionally delete data from crocodile_db if needed
     return None
+
+
+class EntityType(BaseModel):
+    """Type information for an entity"""
+    id: str
+    name: str
+
+class EntityCandidate(BaseModel):
+    """Complete entity candidate information without matching status"""
+    id: str
+    name: str
+    description: str
+    types: List[EntityType]
+    # Note: score and match are handled at the annotation level
+
+class AnnotationUpdate(BaseModel):
+    """Request model for updating an annotation."""
+    entity_id: str
+    match: bool = True  # Whether this is the correct entity
+    score: Optional[float] = 1.0  # Default to 1.0 for user selections
+    notes: Optional[str] = None
+    # If providing a new candidate not in the existing list
+    candidate_info: Optional[EntityCandidate] = None
+
+
+@router.put("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}")
+def update_annotation(
+    dataset_name: str,
+    table_name: str,
+    row_id: int,
+    column_id: int,
+    annotation: AnnotationUpdate,
+    crocodile_db: Database = Depends(get_crocodile_db),
+    db: Database = Depends(get_db),
+):
+    """
+    Update the annotation for a specific cell by marking a candidate as matching.
+    This allows users to manually correct or validate entity linking results.
+    
+    The annotation can either reference an existing candidate by ID or provide
+    a completely new candidate that doesn't exist in the current list.
+    """
+    # Check if dataset and table exist
+    if not db.datasets.find_one({"dataset_name": dataset_name}):
+        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
+    
+    if not db.tables.find_one({"dataset_name": dataset_name, "table_name": table_name}):
+        raise HTTPException(
+            status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
+        )
+    
+    # Find the row in the database
+    row = crocodile_db.input_data.find_one({
+        "dataset_name": dataset_name,
+        "table_name": table_name,
+        "row_id": row_id
+    })
+    
+    if not row:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Row {row_id} not found in table {table_name}"
+        )
+    
+    # Get the current EL results
+    el_results = row.get("el_results", {})
+    column_candidates = el_results.get(str(column_id), [])
+    
+    # Find if the candidate already exists
+    entity_found = False
+    target_candidate = None
+    
+    for candidate in column_candidates:
+        if candidate.get("id") == annotation.entity_id:
+            entity_found = True
+            target_candidate = candidate
+            break
+    
+    # Create the updated candidates list
+    updated_candidates = []
+    
+    # If we have a new candidate to add (not in existing list)
+    if not entity_found:
+        if not annotation.candidate_info:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Entity with ID {annotation.entity_id} not found in candidates. Please provide 'candidate_info' to add a new candidate."
+            )
+        
+        # Convert Pydantic model to dict for MongoDB storage and add annotation data
+        new_candidate = annotation.candidate_info.dict()
+        new_candidate["match"] = annotation.match
+        new_candidate["score"] = annotation.score if annotation.match else None
+        if annotation.notes:
+            new_candidate["notes"] = annotation.notes
+            
+        target_candidate = new_candidate
+        
+        # Add all other candidates with match=False and score=null
+        for candidate in column_candidates:
+            # Skip if we already have this id (prevent duplicates)
+            if candidate.get("id") == annotation.entity_id:
+                continue
+                
+            candidate_copy = dict(candidate)
+            candidate_copy["match"] = False
+            candidate_copy["score"] = None
+            updated_candidates.append(candidate_copy)
+        
+        # Add the new candidate
+        updated_candidates.append(new_candidate)
+    
+    else:
+        # Update existing candidates
+        for candidate in column_candidates:
+            # Skip if we already have this id (prevent duplicates)
+            if candidate.get("id") in [c.get("id") for c in updated_candidates]:
+                continue
+                
+            candidate_copy = dict(candidate)
+            
+            # If this is the target entity, update it
+            if candidate_copy.get("id") == annotation.entity_id:
+                candidate_copy["match"] = annotation.match
+                candidate_copy["score"] = annotation.score if annotation.match else None
+                if annotation.notes:
+                    candidate_copy["notes"] = annotation.notes
+            else:
+                # Ensure other candidates are not matched
+                candidate_copy["match"] = False
+                candidate_copy["score"] = None
+            
+            updated_candidates.append(candidate_copy)
+    
+    # Sort candidates - matched candidate first
+    updated_candidates.sort(key=lambda x: (0 if x.get("match") else 1))
+    
+    # Update the database with the modified candidates
+    el_results[str(column_id)] = updated_candidates
+    
+    # Perform the update - set manually_annotated at cell level
+    result = crocodile_db.input_data.update_one(
+        {
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "row_id": row_id
+        },
+        {"$set": {
+            "el_results": el_results,
+            "manually_annotated": True
+        }}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=500, 
+            detail="Failed to update annotation"
+        )
+    
+    # Return the updated entity with all its information
+    matched_candidate = next((c for c in updated_candidates if c["id"] == annotation.entity_id), None)
+    
+    return {
+        "message": "Annotation updated successfully",
+        "dataset_name": dataset_name,
+        "table_name": table_name,
+        "row_id": row_id,
+        "column_id": column_id,
+        "entity": matched_candidate,
+        "manually_annotated": True
+    }
+
+
+@router.delete("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}")
+def delete_candidate(
+    dataset_name: str,
+    table_name: str,
+    row_id: int,
+    column_id: int,
+    entity_id: str,
+    crocodile_db: Database = Depends(get_crocodile_db),
+    db: Database = Depends(get_db),
+):
+    """
+    Delete a specific candidate from the entity linking results for a cell.
+    This allows users to remove unwanted or incorrect candidate entities.
+    """
+    # Check if dataset and table exist
+    if not db.datasets.find_one({"dataset_name": dataset_name}):
+        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
+    
+    if not db.tables.find_one({"dataset_name": dataset_name, "table_name": table_name}):
+        raise HTTPException(
+            status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
+        )
+    
+    # Find the row in the database
+    row = crocodile_db.input_data.find_one({
+        "dataset_name": dataset_name,
+        "table_name": table_name,
+        "row_id": row_id
+    })
+    
+    if not row:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Row {row_id} not found in table {table_name}"
+        )
+    
+    # Get the current EL results
+    el_results = row.get("el_results", {})
+    column_candidates = el_results.get(str(column_id), [])
+    
+    if not column_candidates:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"No entity linking candidates found for column {column_id} in row {row_id}"
+        )
+    
+    # Check if the entity exists in the candidates
+    entity_exists = any(candidate.get("id") == entity_id for candidate in column_candidates)
+    
+    if not entity_exists:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Entity with ID {entity_id} not found in candidates for column {column_id}"
+        )
+    
+    # Create updated candidates list without the specified entity
+    updated_candidates = [c for c in column_candidates if c.get("id") != entity_id]
+    
+    # Check if we're removing a matched candidate, reorder if needed
+    if updated_candidates and not any(c.get("match", False) for c in updated_candidates):
+        # No matched candidates remain, potentially select the first one
+        if updated_candidates:
+            updated_candidates[0]["match"] = True
+            updated_candidates[0]["score"] = 1.0  # Default score for manually selected
+    
+    # Update the database with the modified candidates
+    el_results[str(column_id)] = updated_candidates
+    
+    # Perform the update
+    result = crocodile_db.input_data.update_one(
+        {
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "row_id": row_id
+        },
+        {"$set": {
+            "el_results": el_results,
+            "manually_annotated": True  # Mark as manually annotated since we're modifying the candidates
+        }}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=500, 
+            detail="Failed to delete candidate"
+        )
+    
+    return {
+        "message": "Candidate deleted successfully",
+        "dataset_name": dataset_name,
+        "table_name": table_name,
+        "row_id": row_id,
+        "column_id": column_id,
+        "entity_id": entity_id,
+        "remaining_candidates": len(updated_candidates)
+    }

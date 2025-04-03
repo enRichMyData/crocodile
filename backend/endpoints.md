@@ -82,7 +82,7 @@ POST /dataset/{datasetName}/table/json
 
 **Example Request:**
 ```bash
-curl -X POST "http://localhost:8000/dataset/movies_2023/table/json" \
+curl -X POST "http://localhost:8000/datasets/movies_2023/tables/json" \
   -H "Content-Type: application/json" \
   -d '{
     "table_name": "directors",
@@ -113,7 +113,7 @@ POST /dataset/{datasetName}/table/csv
 
 **Example Request:**
 ```bash
-curl -X POST "http://localhost:8000/dataset/movies_2023/table/csv?table_name=movies_test" \
+curl -X POST "http://localhost:8000/datasets/movies_2023/tables/csv?table_name=movies_test" \
   -F "file=@movies.csv" \
   -F 'column_classification={"NE":{"0":"PERSON"},"LIT":{},"IGNORED":[]}'
 ```

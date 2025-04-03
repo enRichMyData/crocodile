@@ -450,9 +450,7 @@ def delete_dataset(
     return None
 
 
-@router.delete(
-    "/datasets/{dataset_name}/tables/{table_name}", status_code=status.HTTP_204_NO_CONTENT
-)
+@router.delete("/datasets/{dataset_name}/tables/{table_name}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_table(dataset_name: str, table_name: str, db: Database = Depends(get_db)):
     """
     Delete a table by name within a dataset.

@@ -1,7 +1,8 @@
 import json
 import os
+import math  # Add import for handling special float values
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import numpy as np
 import pandas as pd
@@ -53,6 +54,24 @@ def format_classification(raw_classification: dict, header: list) -> dict:
     recognized = set(ne.keys()).union(lit.keys())
     ignored = list(all_indexes - recognized)
     return {"NE": ne, "LIT": lit, "IGNORED": ignored}
+
+
+# Add helper function to sanitize JSON data with potentially invalid numeric values
+def sanitize_for_json(obj: Any) -> Any:
+    """
+    Recursively sanitize a Python object for JSON serialization,
+    replacing any float infinity or NaN values with None.
+    """
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_for_json(item) for item in obj]
+    elif isinstance(obj, float):
+        # Handle special float values that are not JSON compliant
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    return obj
 
 
 @router.post("/datasets/{datasetName}/tables/json", status_code=status.HTTP_201_CREATED)
@@ -130,7 +149,6 @@ def add_table(
             model_path="./crocodile/models/default.h5",
             save_output_to_csv=False,
             columns_type=classification,
-           
         )
         croco.run()
 
@@ -227,8 +245,7 @@ def add_table_csv(
             model_path="./crocodile/models/default.h5",
             save_output_to_csv=False,
             columns_type=classification,
-            entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT")
-            
+            entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT"),
         )
         croco.run()
 
@@ -243,10 +260,10 @@ def add_table_csv(
 
 @router.get("/datasets")
 def get_datasets(
-    limit: int = Query(10), 
+    limit: int = Query(10),
     next_cursor: Optional[str] = Query(None),
     prev_cursor: Optional[str] = Query(None),
-    db: Database = Depends(get_db)
+    db: Database = Depends(get_db),
 ):
     """
     Get datasets with bi-directional keyset pagination, using ObjectId as the cursor.
@@ -255,13 +272,13 @@ def get_datasets(
     # Determine pagination direction and set up query
     query_filter = {}
     sort_direction = 1  # Default ascending (forward)
-    
+
     if next_cursor and prev_cursor:
         raise HTTPException(
-            status_code=400, 
-            detail="Only one of next_cursor or prev_cursor should be provided"
+            status_code=400,
+            detail="Only one of next_cursor or prev_cursor should be provided",
         )
-    
+
     if next_cursor:
         # Forward pagination (get items after the cursor)
         try:
@@ -279,20 +296,20 @@ def get_datasets(
     # Execute query with proper sorting
     results = db.datasets.find(query_filter).sort("_id", sort_direction).limit(limit + 1)
     datasets = list(results)
-    
+
     # Handle pagination metadata
     has_more = len(datasets) > limit
     if has_more:
         datasets = datasets[:limit]  # Remove the extra item
-    
+
     # If we did backward pagination, reverse the results to maintain consistent order
     if prev_cursor:
         datasets.reverse()
-    
+
     # Get cursors for next and previous pages
     next_cursor = None
     prev_cursor = None
-    
+
     if datasets:
         # For previous cursor, we need the ID of the first item
         # But only if we're not on the first page
@@ -309,14 +326,14 @@ def get_datasets(
         else:
             # We came from a next_cursor, there are previous items
             prev_cursor = str(datasets[0]["_id"])
-            
+
         # For next cursor, we need the ID of the last item
         # But only if we have more items or we came backwards
         if has_more:
             next_cursor = str(datasets[-1]["_id"])
         elif query_filter.get("_id", {}).get("$lt"):  # We came backwards
             next_cursor = str(datasets[-1]["_id"])
-    
+
     # Format the response
     for dataset in datasets:
         dataset["_id"] = str(dataset["_id"])
@@ -325,10 +342,7 @@ def get_datasets(
 
     return {
         "data": datasets,
-        "pagination": {
-            "next_cursor": next_cursor,
-            "prev_cursor": prev_cursor
-        },
+        "pagination": {"next_cursor": next_cursor, "prev_cursor": prev_cursor},
     }
 
 
@@ -350,13 +364,13 @@ def get_tables(
     # Determine pagination direction
     query_filter = {"dataset_name": dataset_name}
     sort_direction = 1  # Default ascending (forward)
-    
+
     if next_cursor and prev_cursor:
         raise HTTPException(
-            status_code=400, 
-            detail="Only one of next_cursor or prev_cursor should be provided"
+            status_code=400,
+            detail="Only one of next_cursor or prev_cursor should be provided",
         )
-    
+
     if next_cursor:
         try:
             query_filter["_id"] = {"$gt": ObjectId(next_cursor)}
@@ -372,20 +386,20 @@ def get_tables(
     # Execute query with proper sorting
     results = db.tables.find(query_filter).sort("_id", sort_direction).limit(limit + 1)
     tables = list(results)
-    
+
     # Handle pagination metadata
     has_more = len(tables) > limit
     if has_more:
         tables = tables[:limit]  # Remove the extra item
-    
+
     # If we did backward pagination, reverse the results
     if prev_cursor:
         tables.reverse()
-    
+
     # Get cursors for next and previous pages
     next_cursor = None
     prev_cursor = None
-    
+
     if tables:
         # For previous cursor, we need the ID of the first item
         # But only if we're not on the first page
@@ -396,13 +410,15 @@ def get_tables(
             else:
                 # We're on first page - check if this is a fresh query or already paginated
                 first_id = tables[0]["_id"]
-                if db.tables.count_documents({"dataset_name": dataset_name, "_id": {"$lt": first_id}}) > 0:
+                if db.tables.count_documents(
+                    {"dataset_name": dataset_name, "_id": {"$lt": first_id}}
+                ) > 0:
                     prev_cursor = str(first_id)
                 # Otherwise prev_cursor remains None (we're truly on first page)
         else:
             # We came from a next_cursor, there are previous items
             prev_cursor = str(tables[0]["_id"])
-            
+
         # For next cursor, we need the ID of the last item
         # But only if we have more items or we came backwards
         if has_more:
@@ -421,10 +437,7 @@ def get_tables(
     return {
         "dataset": dataset_name,
         "data": tables,
-        "pagination": {
-            "next_cursor": next_cursor,
-            "prev_cursor": prev_cursor
-        },
+        "pagination": {"next_cursor": next_cursor, "prev_cursor": prev_cursor},
     }
 
 
@@ -457,17 +470,17 @@ def get_table(
     # Determine pagination direction
     query_filter = {"dataset_name": dataset_name, "table_name": table_name}
     sort_direction = 1  # Default ascending (forward)
-    
+
     if next_cursor and prev_cursor:
         raise HTTPException(
-            status_code=400, 
-            detail="Only one of next_cursor or prev_cursor should be provided"
+            status_code=400,
+            detail="Only one of next_cursor or prev_cursor should be provided",
         )
-    
+
     if next_cursor:
         try:
             query_filter["_id"] = {"$gt": ObjectId(next_cursor)}
-        except Exception: 
+        except Exception:
             raise HTTPException(status_code=400, detail="Invalid cursor value")
     elif prev_cursor:
         try:
@@ -477,22 +490,24 @@ def get_table(
             raise HTTPException(status_code=400, detail="Invalid cursor value")
 
     # Execute query with proper sorting
-    results = crocodile_db.input_data.find(query_filter).sort("_id", sort_direction).limit(limit + 1)
+    results = crocodile_db.input_data.find(query_filter).sort("_id", sort_direction).limit(
+        limit + 1
+    )
     raw_rows = list(results)
-    
+
     # Handle pagination metadata
     has_more = len(raw_rows) > limit
     if has_more:
         raw_rows = raw_rows[:limit]  # Remove the extra item
-    
+
     # If we did backward pagination, reverse the results
     if prev_cursor:
         raw_rows.reverse()
-    
+
     # Get cursors for next and previous pages
     next_cursor = None
     prev_cursor = None
-    
+
     if raw_rows:
         # For previous cursor, we need the ID of the first item
         # But only if we're not on the first page
@@ -503,17 +518,19 @@ def get_table(
             else:
                 # We're on first page - check if this is a fresh query or already paginated
                 first_id = raw_rows[0]["_id"]
-                if crocodile_db.input_data.count_documents({
-                    "dataset_name": dataset_name, 
-                    "table_name": table_name, 
-                    "_id": {"$lt": first_id}
-                }) > 0:
+                if crocodile_db.input_data.count_documents(
+                    {
+                        "dataset_name": dataset_name,
+                        "table_name": table_name,
+                        "_id": {"$lt": first_id},
+                    }
+                ) > 0:
                     prev_cursor = str(first_id)
                 # Otherwise prev_cursor remains None (we're truly on first page)
         else:
             # We came from a next_cursor, there are previous items
             prev_cursor = str(raw_rows[0]["_id"])
-            
+
         # For next cursor, we need the ID of the last item
         # But only if we have more items or we came backwards
         if has_more:
@@ -522,12 +539,16 @@ def get_table(
             next_cursor = str(raw_rows[-1]["_id"])
 
     # Check if there are documents with ML_STATUS = TODO or DOING
-    table_status_filter = {"dataset_name": dataset_name, "table_name": table_name, "ml_status": {"$in": ["TODO", "DOING"]}}
+    table_status_filter = {
+        "dataset_name": dataset_name,
+        "table_name": table_name,
+        "ml_status": {"$in": ["TODO", "DOING"]},
+    }
     pending_docs_count = crocodile_db.input_data.count_documents(table_status_filter)
     status = "DOING"
     if pending_docs_count == 0:
         status = "DONE"
-                                            
+
     # Build a cleaned-up response with *all* candidates
     rows_formatted = []
     for row in raw_rows:
@@ -538,17 +559,19 @@ def get_table(
         for col_index in range(len(header)):
             candidates = el_results.get(str(col_index), [])
             if candidates:
-                linked_entities.append({"idColumn": col_index, "candidates": candidates})
+                # Sanitize candidate data to handle any special float values
+                sanitized_candidates = sanitize_for_json(candidates)
+                linked_entities.append({"idColumn": col_index, "candidates": sanitized_candidates})
 
         rows_formatted.append(
             {
                 "idRow": row.get("row_id"),
-                "data": row.get("data", []),
+                "data": sanitize_for_json(row.get("data", [])),
                 "linked_entities": linked_entities,
             }
         )
 
-    return {
+    response_data = {
         "data": {
             "datasetName": dataset_name,
             "tableName": table.get("table_name"),
@@ -556,11 +579,13 @@ def get_table(
             "header": header,
             "rows": rows_formatted,
         },
-        "pagination": {
-            "next_cursor": next_cursor,
-            "prev_cursor": prev_cursor
-        },
+        "pagination": {"next_cursor": next_cursor, "prev_cursor": prev_cursor},
     }
+
+    # Final sanity check - ensure the entire response is safe for JSON serialization
+    response_data = sanitize_for_json(response_data)
+
+    return response_data
 
 
 @router.post("/datasets", status_code=status.HTTP_201_CREATED)
@@ -654,6 +679,7 @@ class EntityType(BaseModel):
     id: str
     name: str
 
+
 class EntityCandidate(BaseModel):
     """Complete entity candidate information without matching status"""
     id: str
@@ -661,6 +687,7 @@ class EntityCandidate(BaseModel):
     description: str
     types: List[EntityType]
     # Note: score and match are handled at the annotation level
+
 
 class AnnotationUpdate(BaseModel):
     """Request model for updating an annotation."""
@@ -685,89 +712,86 @@ def update_annotation(
     """
     Update the annotation for a specific cell by marking a candidate as matching.
     This allows users to manually correct or validate entity linking results.
-    
+
     The annotation can either reference an existing candidate by ID or provide
     a completely new candidate that doesn't exist in the current list.
     """
     # Check if dataset and table exist
     if not db.datasets.find_one({"dataset_name": dataset_name}):
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
-    
+
     if not db.tables.find_one({"dataset_name": dataset_name, "table_name": table_name}):
         raise HTTPException(
             status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
         )
-    
+
     # Find the row in the database
-    row = crocodile_db.input_data.find_one({
-        "dataset_name": dataset_name,
-        "table_name": table_name,
-        "row_id": row_id
-    })
-    
+    row = crocodile_db.input_data.find_one(
+        {"dataset_name": dataset_name, "table_name": table_name, "row_id": row_id}
+    )
+
     if not row:
         raise HTTPException(
-            status_code=404, 
-            detail=f"Row {row_id} not found in table {table_name}"
+            status_code=404, detail=f"Row {row_id} not found in table {table_name}"
         )
-    
+
     # Get the current EL results
     el_results = row.get("el_results", {})
     column_candidates = el_results.get(str(column_id), [])
-    
+
     # Find if the candidate already exists
     entity_found = False
     target_candidate = None
-    
+
     for candidate in column_candidates:
         if candidate.get("id") == annotation.entity_id:
             entity_found = True
             target_candidate = candidate
             break
-    
+
     # Create the updated candidates list
     updated_candidates = []
-    
+
     # If we have a new candidate to add (not in existing list)
     if not entity_found:
         if not annotation.candidate_info:
             raise HTTPException(
-                status_code=400, 
-                detail=f"Entity with ID {annotation.entity_id} not found in candidates. Please provide 'candidate_info' to add a new candidate."
+                status_code=400,
+                detail=f"Entity with ID {annotation.entity_id} not found in candidates. Please provide 'candidate_info' to add a new candidate.",
             )
-        
+
         # Convert Pydantic model to dict for MongoDB storage and add annotation data
         new_candidate = annotation.candidate_info.dict()
         new_candidate["match"] = annotation.match
         new_candidate["score"] = annotation.score if annotation.match else None
         if annotation.notes:
             new_candidate["notes"] = annotation.notes
-            
+
         target_candidate = new_candidate
-        
+
         # Add all other candidates with match=False and score=null
         for candidate in column_candidates:
             # Skip if we already have this id (prevent duplicates)
             if candidate.get("id") == annotation.entity_id:
                 continue
-                
+
             candidate_copy = dict(candidate)
             candidate_copy["match"] = False
             candidate_copy["score"] = None
             updated_candidates.append(candidate_copy)
-        
+
         # Add the new candidate
         updated_candidates.append(new_candidate)
-    
+
     else:
         # Update existing candidates
         for candidate in column_candidates:
             # Skip if we already have this id (prevent duplicates)
             if candidate.get("id") in [c.get("id") for c in updated_candidates]:
                 continue
-                
+
             candidate_copy = dict(candidate)
-            
+
             # If this is the target entity, update it
             if candidate_copy.get("id") == annotation.entity_id:
                 candidate_copy["match"] = annotation.match
@@ -778,49 +802,44 @@ def update_annotation(
                 # Ensure other candidates are not matched
                 candidate_copy["match"] = False
                 candidate_copy["score"] = None
-            
+
             updated_candidates.append(candidate_copy)
-    
+
     # Sort candidates - matched candidate first
     updated_candidates.sort(key=lambda x: (0 if x.get("match") else 1))
-    
+
     # Update the database with the modified candidates
     el_results[str(column_id)] = updated_candidates
-    
+
     # Perform the update - set manually_annotated at cell level
     result = crocodile_db.input_data.update_one(
-        {
-            "dataset_name": dataset_name,
-            "table_name": table_name,
-            "row_id": row_id
-        },
-        {"$set": {
-            "el_results": el_results,
-            "manually_annotated": True
-        }}
+        {"dataset_name": dataset_name, "table_name": table_name, "row_id": row_id},
+        {"$set": {"el_results": el_results, "manually_annotated": True}},
     )
-    
+
     if result.modified_count == 0:
-        raise HTTPException(
-            status_code=500, 
-            detail="Failed to update annotation"
-        )
-    
+        raise HTTPException(status_code=500, detail="Failed to update annotation")
+
     # Return the updated entity with all its information
-    matched_candidate = next((c for c in updated_candidates if c["id"] == annotation.entity_id), None)
-    
-    return {
+    matched_candidate = next(
+        (c for c in updated_candidates if c["id"] == annotation.entity_id), None
+    )
+
+    # Sanitize the response to handle any JSON-incompatible values
+    return sanitize_for_json({
         "message": "Annotation updated successfully",
         "dataset_name": dataset_name,
         "table_name": table_name,
         "row_id": row_id,
         "column_id": column_id,
         "entity": matched_candidate,
-        "manually_annotated": True
-    }
+        "manually_annotated": True,
+    })
 
 
-@router.delete("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}")
+@router.delete(
+    "/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}"
+)
 def delete_candidate(
     dataset_name: str,
     table_name: str,
@@ -837,82 +856,75 @@ def delete_candidate(
     # Check if dataset and table exist
     if not db.datasets.find_one({"dataset_name": dataset_name}):
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
-    
+
     if not db.tables.find_one({"dataset_name": dataset_name, "table_name": table_name}):
         raise HTTPException(
             status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
         )
-    
+
     # Find the row in the database
-    row = crocodile_db.input_data.find_one({
-        "dataset_name": dataset_name,
-        "table_name": table_name,
-        "row_id": row_id
-    })
-    
+    row = crocodile_db.input_data.find_one(
+        {"dataset_name": dataset_name, "table_name": table_name, "row_id": row_id}
+    )
+
     if not row:
         raise HTTPException(
-            status_code=404, 
-            detail=f"Row {row_id} not found in table {table_name}"
+            status_code=404, detail=f"Row {row_id} not found in table {table_name}"
         )
-    
+
     # Get the current EL results
     el_results = row.get("el_results", {})
     column_candidates = el_results.get(str(column_id), [])
-    
+
     if not column_candidates:
         raise HTTPException(
-            status_code=404, 
-            detail=f"No entity linking candidates found for column {column_id} in row {row_id}"
+            status_code=404,
+            detail=f"No entity linking candidates found for column {column_id} in row {row_id}",
         )
-    
+
     # Check if the entity exists in the candidates
     entity_exists = any(candidate.get("id") == entity_id for candidate in column_candidates)
-    
+
     if not entity_exists:
         raise HTTPException(
-            status_code=404, 
-            detail=f"Entity with ID {entity_id} not found in candidates for column {column_id}"
+            status_code=404,
+            detail=f"Entity with ID {entity_id} not found in candidates for column {column_id}",
         )
-    
+
     # Create updated candidates list without the specified entity
     updated_candidates = [c for c in column_candidates if c.get("id") != entity_id]
-    
+
     # Check if we're removing a matched candidate, reorder if needed
     if updated_candidates and not any(c.get("match", False) for c in updated_candidates):
         # No matched candidates remain, potentially select the first one
         if updated_candidates:
             updated_candidates[0]["match"] = True
             updated_candidates[0]["score"] = 1.0  # Default score for manually selected
-    
+
     # Update the database with the modified candidates
     el_results[str(column_id)] = updated_candidates
-    
+
     # Perform the update
     result = crocodile_db.input_data.update_one(
+        {"dataset_name": dataset_name, "table_name": table_name, "row_id": row_id},
         {
-            "dataset_name": dataset_name,
-            "table_name": table_name,
-            "row_id": row_id
+            "$set": {
+                "el_results": el_results,
+                "manually_annotated": True,  # Mark as manually annotated since we're modifying the candidates
+            }
         },
-        {"$set": {
-            "el_results": el_results,
-            "manually_annotated": True  # Mark as manually annotated since we're modifying the candidates
-        }}
     )
-    
+
     if result.modified_count == 0:
-        raise HTTPException(
-            status_code=500, 
-            detail="Failed to delete candidate"
-        )
-    
-    return {
+        raise HTTPException(status_code=500, detail="Failed to delete candidate")
+
+    # Sanitize the response to handle any JSON-incompatible values
+    return sanitize_for_json({
         "message": "Candidate deleted successfully",
         "dataset_name": dataset_name,
         "table_name": table_name,
         "row_id": row_id,
         "column_id": column_id,
         "entity_id": entity_id,
-        "remaining_candidates": len(updated_candidates)
-    }
+        "remaining_candidates": len(updated_candidates),
+    })

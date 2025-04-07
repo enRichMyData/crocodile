@@ -18,9 +18,10 @@ if TYPE_CHECKING:
 class MLWorker:
     def __init__(
         self,
+        worker_id: int,
+        client_id: str,
         dataset_name: str,
         table_name: str,
-        client_id: str, 
         model_path: str | None = None,
         batch_size: int = 100,
         max_candidates_in_result: int = 5,

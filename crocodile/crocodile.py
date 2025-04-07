@@ -31,7 +31,7 @@ class Crocodile:
 
     def __init__(
         self,
-        input_csv: str | Path | pd.DataFrame,
+        input_csv: str | Path | pd.DataFrame | None = None,
         output_csv: str | Path | None = None,
         client_id: str = None,  
         dataset_name: str = None,
@@ -53,7 +53,7 @@ class Crocodile:
 
         self.input_csv = input_csv
         self.output_csv = output_csv
-        if self.output_csv is None and kwargs.get("save_output_to_csv", True):
+        if self.output_csv is None and kwargs.get("save_output_to_csv", True) and not kwargs.get("fetch_result_mode_only", False):
             if isinstance(self.input_csv, pd.DataFrame):
                 raise ValueError(
                     "An output name must be specified is the input is a `pd.Dataframe`"
@@ -82,6 +82,7 @@ class Crocodile:
         self._entity_bow_endpoint = kwargs.pop("entity_bow_endpoint", None)
         self._mongo_uri = kwargs.pop("mongo_uri", None) or self._DEFAULT_MONGO_URI
         self._save_output_to_csv = kwargs.pop("save_output_to_csv", True)
+        self._fetch_result_mode_only = kwargs.pop("fetch_result_mode_only", False)
         self.mongo_wrapper = MongoWrapper(
             self._mongo_uri, self._DB_NAME, self._ERROR_LOG_COLLECTION
         )
@@ -447,12 +448,12 @@ class Crocodile:
 
     def ml_worker(self, rank: int, global_type_counts: Dict[Any, Counter]):
         """Wrapper function to create and run an MLWorker with the correct parameters"""
-        print(f"MLWorker {rank} started.")
+       
         worker = MLWorker(
             rank,
-            table_name=self.table_name,
-            dataset_name=self.dataset_name,
             client_id=self.client_id,
+            dataset_name=self.dataset_name,
+            table_name=self.table_name,
             error_log_collection_name=self._ERROR_LOG_COLLECTION,
             input_collection=self._INPUT_COLLECTION,
             model_path=self.model_path,
@@ -519,17 +520,15 @@ class Crocodile:
     def fetch_results(self, row_ids=None):
         """Fetch entity linking results by specific row_ids.
         
-        This method efficiently retrieves results for specific row IDs without using
-        skip-based pagination, which is inefficient for large datasets.
+        This method efficiently retrieves raw entity linking results for specific row IDs.
         
         Args:
             row_ids: List of specific row IDs to retrieve or a single row_id. 
                      If None, raises an error (use export_results_to_csv for writing all results to CSV).
             
         Returns:
-            A list of dictionaries containing the entity linking results for the specified row_ids.
-            Each dictionary includes the original row data enhanced with entity linking information
-            and status fields (status and ml_status) for tracking processing state.
+            A list of dictionaries containing the raw entity linking results for the specified row_ids,
+            along with row_id and status fields for tracking processing state.
         
         Raises:
             ValueError: If row_ids is None or empty
@@ -553,51 +552,26 @@ class Crocodile:
         }
         
         # Setup projection to only fetch fields we need
-        # Always include status and ml_status for synchronization tracking
         projection = {
-            "data": 1, 
             "el_results": 1, 
-            "classified_columns.NE": 1, 
             "row_id": 1,
             "status": 1,
             "ml_status": 1
         }
         
-        # Get header information
-        header = self._get_header()
-        
         # Query directly for the specified row_ids
         cursor = input_collection.find(query, projection=projection).sort("row_id", 1)
         
-        # Process results
+        # Process results - just grab the raw el_results and metadata
         results = []
         for doc in cursor:
-            # If header is None, use the first document to determine column count
-            if header is None:
-                header = [f"col_{i}" for i in range(len(doc["data"]))]
-                
-            # Extract row data
-            result = self._extract_row_data(doc, header)
-            
-            # Add row_id and status fields for client synchronization tracking
-            # Include status fields without underscore prefix
-            result["row_id"] = doc["row_id"]
-            result["status"] = doc["status"]
-            result["ml_status"] = doc["ml_status"]
-                
+            result = {
+                "row_id": doc["row_id"],
+                "status": doc["status"],
+                "ml_status": doc["ml_status"],
+                "el_results": doc.get("el_results", {})
+            }
             results.append(result)
         
         # Return results directly as a list
         return results
-    
-    def _get_header(self):
-        """Get column headers from input source."""
-        header = None
-        try:
-            if isinstance(self.input_csv, pd.DataFrame):
-                header = self.input_csv.columns.tolist()
-            elif isinstance(self.input_csv, str):
-                header = pd.read_csv(self.input_csv, nrows=0).columns.tolist()
-        except Exception:
-            pass
-        return header

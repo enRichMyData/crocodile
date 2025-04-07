@@ -538,11 +538,14 @@ def get_table(
         elif query_filter.get("_id", {}).get("$lt"):  # We came backwards
             next_cursor = str(raw_rows[-1]["_id"])
 
-    # Check if there are documents with ML_STATUS = TODO or DOING
+    # Check if there are documents with status or ml_status = TODO or DOING 
     table_status_filter = {
         "dataset_name": dataset_name,
         "table_name": table_name,
-        "ml_status": {"$in": ["TODO", "DOING"]},
+        "$or": [
+            {"status": {"$in": ["TODO", "DOING"]}},
+            {"ml_status": {"$in": ["TODO", "DOING"]}}
+        ]
     }
     pending_docs_count = crocodile_db.input_data.count_documents(table_status_filter)
     status = "DOING"
@@ -638,14 +641,21 @@ def delete_dataset(
     # Delete dataset
     db.datasets.delete_one({"dataset_name": dataset_name})  # updated query key
 
-    # Optionally delete data from crocodile_db if needed
+    # Delete data from crocodile_db
+    deletion_result = crocodile_db.input_data.delete_many({"dataset_name": dataset_name})
+    
     return None
 
 
 @router.delete(
     "/datasets/{dataset_name}/tables/{table_name}", status_code=status.HTTP_204_NO_CONTENT
 )
-def delete_table(dataset_name: str, table_name: str, db: Database = Depends(get_db)):
+def delete_table(
+    dataset_name: str, 
+    table_name: str, 
+    db: Database = Depends(get_db),
+    crocodile_db: Database = Depends(get_crocodile_db)
+):
     """
     Delete a table by name within a dataset.
     """
@@ -670,7 +680,12 @@ def delete_table(dataset_name: str, table_name: str, db: Database = Depends(get_
         {"name": dataset_name}, {"$inc": {"total_tables": -1, "total_rows": -row_count}}
     )
 
-    # Optionally delete data from crocodile_db if needed
+    # Delete data from crocodile_db
+    deletion_result = crocodile_db.input_data.delete_many({
+        "dataset_name": dataset_name, 
+        "table_name": table_name
+    })
+    
     return None
 
 

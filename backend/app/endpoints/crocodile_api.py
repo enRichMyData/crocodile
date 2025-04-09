@@ -1,16 +1,12 @@
 import json
 import os
-import math  # Add import for handling special float values
-import time  # Add import for time functions
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 import numpy as np
 import pandas as pd
 from bson import ObjectId
-from column_classifier import ColumnClassifier  # added global import
-from dependencies import get_crocodile_db, get_db
-from endpoints.imdb_example import IMDB_EXAMPLE  # Example input
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -25,12 +21,16 @@ from fastapi import (
 )
 from pydantic import BaseModel
 from pymongo.database import Database
-from pymongo.errors import DuplicateKeyError  # added import
 
+# Import services and utilities
 from crocodile import Crocodile
+from dependencies import get_crocodile_db, get_db
+from endpoints.imdb_example import IMDB_EXAMPLE
+from services.data_service import DataService
+from services.result_sync import ResultSyncService
+from services.utils import sanitize_for_json
 
 router = APIRouter()
-
 
 class TableUpload(BaseModel):
     table_name: str
@@ -39,225 +39,12 @@ class TableUpload(BaseModel):
     classified_columns: Optional[Dict[str, Dict[str, str]]] = {}
     data: List[dict]
 
-
-# Add helper function to format classification results
-def format_classification(raw_classification: dict, header: list) -> dict:
-    ne_types = {"PERSON", "OTHER", "ORGANIZATION", "LOCATION"}
-    ne, lit = {}, {}
-    for i, col_name in enumerate(header):
-        col_result = raw_classification.get(col_name, {})
-        classification = col_result.get("classification", "UNKNOWN")
-        if classification in ne_types:
-            ne[str(i)] = classification
-        else:
-            lit[str(i)] = classification
-    all_indexes = set(str(i) for i in range(len(header)))
-    recognized = set(ne.keys()).union(lit.keys())
-    ignored = list(all_indexes - recognized)
-    return {"NE": ne, "LIT": lit, "IGNORED": ignored}
-
-
-# Add helper function to sanitize JSON data with potentially invalid numeric values
-def sanitize_for_json(obj: Any) -> Any:
-    """
-    Recursively sanitize a Python object for JSON serialization,
-    replacing any float infinity or NaN values with None.
-    """
-    if isinstance(obj, dict):
-        return {k: sanitize_for_json(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [sanitize_for_json(item) for item in obj]
-    elif isinstance(obj, float):
-        # Handle special float values that are not JSON compliant
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    return obj
-
-
-# Add a function to sync results from Crocodile to backend database
-def sync_results_from_crocodile(
-    user_id: str,
-    dataset_name: str,
-    table_name: str,
-    total_rows: int = 0
-):
-    """
-    Sync entity linking results from Crocodile to the backend database.
-    Uses a continuous loop that will keep checking for updates until all rows are processed.
-    
-    Args:
-        user_id: User ID for multi-tenant isolation
-        dataset_name: Name of the dataset
-        table_name: Name of the table
-        total_rows: Total number of rows in the table
-    """
-    print(f"Starting result sync for {user_id}/{dataset_name}/{table_name}")
-
-    # Create a direct MongoDB connection for this background task
-    import os
-    from pymongo import MongoClient
-    
-    # Get connection string from environment
-    mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
-    client = MongoClient(mongo_uri)
-    db = client["crocodile_backend_db"]
-    
-    try:
-        # Create a Crocodile instance for fetching results only
-        croco_sync = Crocodile(
-            client_id=user_id,
-            dataset_name=dataset_name,
-            table_name=table_name,
-            fetch_result_mode_only=True
-        )
-        
-        # Sync until all rows are processed
-        completed_rows = set()
-        consecutive_failures = 0
-        last_progress_time = time.time()
-        max_failures = 5  # Safety limit for consecutive failures
-        
-        while True:
-            # Get all row IDs not yet completed
-            row_ids = list(set(range(total_rows)) - completed_rows)
-            
-            if not row_ids:
-                print(f"All rows have been synced for {user_id}/{dataset_name}/{table_name}")
-                break
-                
-            # Process in batches to not overload the system
-            batch_size = 50
-            batch_processed = False
-            
-            for i in range(0, len(row_ids), batch_size):
-                batch_ids = row_ids[i:i + batch_size]
-                
-                try:
-                    # Fetch results for this batch from Crocodile
-                    results = croco_sync.fetch_results(batch_ids)
-                    
-                    if not results:
-                        continue
-                    
-                    # Process each result
-                    pre_completion_count = len(completed_rows)
-                    for result in results:
-                        row_id = result.get("row_id")
-                        status = result.get("status")
-                        ml_status = result.get("ml_status")
-                        el_results = result.get("el_results", {})
-                        
-                        # Skip if no results yet
-                        if not el_results:
-                            continue
-                        
-                        # Update the backend database
-                        db.input_data.update_one(
-                            {
-                                "user_id": user_id,
-                                "dataset_name": dataset_name,
-                                "table_name": table_name,
-                                "row_id": row_id
-                            },
-                            {
-                                "$set": {
-                                    "status": status,
-                                    "ml_status": ml_status,
-                                    "el_results": el_results,
-                                    "last_updated": datetime.now()
-                                }
-                            },
-                            upsert=False
-                        )
-                        
-                        # Mark as completed if done
-                        if status == "DONE" and ml_status == "DONE":
-                            completed_rows.add(row_id)
-                    
-                    # Check if we made progress
-                    if len(completed_rows) > pre_completion_count:
-                        batch_processed = True
-                        consecutive_failures = 0
-                        last_progress_time = time.time()
-                        print(f"Synced batch of {len(results)} results, completed {len(completed_rows)}/{total_rows} rows")
-                    
-                except Exception as e:
-                    print(f"Error syncing results: {str(e)}")
-                    consecutive_failures += 1
-                    
-                    # Break out if we've had too many consecutive failures
-                    if consecutive_failures >= max_failures:
-                        print(f"Too many consecutive failures ({max_failures}), stopping sync")
-                        raise
-            
-            # Break if all rows are processed
-            if len(completed_rows) == total_rows:
-                print(f"All {total_rows} rows have been synced successfully")
-                break
-                
-            # If we processed no batches successfully, we should wait longer
-            # to avoid hammering the database
-            if not batch_processed:
-                # Check if we haven't made progress in a long time (5 minutes)
-                if time.time() - last_progress_time > 300:
-                    print(f"No progress for 5 minutes, completing sync process")
-                    break
-                
-                # Longer pause if no batches were processed
-                time.sleep(30)
-            else:
-                # Normal pause between iterations to not overload the system
-                time.sleep(5)
-        
-        # Update table status based on completion
-        completion_percentage = len(completed_rows) / total_rows if total_rows > 0 else 0
-        table_status = "completed" if completion_percentage >= 0.95 else "partially_completed"
-        
-        db.tables.update_one(
-            {
-                "user_id": user_id,
-                "dataset_name": dataset_name, 
-                "table_name": table_name
-            },
-            {"$set": {
-                "status": table_status,
-                "completion_percentage": round(completion_percentage * 100, 2)
-            }}
-        )
-        print(f"Marked table {dataset_name}/{table_name} as {table_status} ({completion_percentage:.2%} complete)")
-        
-    except Exception as e:
-        print(f"Sync process terminated with error: {str(e)}")
-        # Update table with partial completion information if possible
-        try:
-            completion_percentage = len(completed_rows) / total_rows if total_rows > 0 else 0
-            db.tables.update_one(
-                {
-                    "user_id": user_id,
-                    "dataset_name": dataset_name, 
-                    "table_name": table_name
-                },
-                {"$set": {
-                    "status": "sync_error",
-                    "completion_percentage": round(completion_percentage * 100, 2),
-                    "error": str(e)
-                }}
-            )
-        except Exception:
-            print("Failed to update table status after error")
-    finally:
-        # Close our MongoDB connection when done
-        client.close()
-        print(f"Sync process finished for {dataset_name}/{table_name}")
-
-
 @router.post("/datasets/{datasetName}/tables/json", status_code=status.HTTP_201_CREATED)
 def add_table(
     datasetName: str,
     table_upload: TableUpload = Body(..., example=IMDB_EXAMPLE),
     background_tasks: BackgroundTasks = None,
-    user_id: str = Query(None),  # Moved after required parameters
+    user_id: str = Query(None),
     db: Database = Depends(get_db),
 ):
     """
@@ -267,138 +54,80 @@ def add_table(
     if user_id is None:
         raise HTTPException(status_code=400, detail="user_id is required")
         
-    # Check if dataset exists; if not, create it
-    dataset = db.datasets.find_one({"user_id": user_id, "dataset_name": datasetName})  # user_id first
-    if not dataset:
-        try:
-            dataset_id = db.datasets.insert_one(
-                {
-                    "user_id": user_id,  # Moved to first position
-                    "dataset_name": datasetName,
-                    "created_at": datetime.now(),
-                    "total_tables": 0,
-                    "total_rows": 0,
-                }
-            ).inserted_id
-        except DuplicateKeyError:
-            raise HTTPException(status_code=400, detail="Duplicate dataset insertion")
-    else:
-        dataset_id = dataset["_id"]
-
-    if not table_upload.classified_columns:
-        df = pd.DataFrame(table_upload.data)
-        raw_classification = (
-            ColumnClassifier(model_type="fast")
-            .classify_multiple_tables([df.head(1024)])[0]
-            .get("table_1", {})
-        )
-        classification = format_classification(raw_classification, table_upload.header)
-    else:
-        classification = table_upload.classified_columns
-
-    # Create table metadata including classified_columns
-    table_metadata = {
-        "user_id": user_id,  # Moved to first position
-        "dataset_name": datasetName,
-        "table_name": table_upload.table_name,
-        "header": table_upload.header,
-        "total_rows": table_upload.total_rows,
-        "created_at": datetime.now(),
-        "status": "processing",
-        "classified_columns": classification,
-    }
     try:
-        db.tables.insert_one(table_metadata)
-    except DuplicateKeyError:
-        raise HTTPException(
-            status_code=400, detail="Table with this name already exists in the dataset"
+        # Convert data to DataFrame for classification if needed
+        df = pd.DataFrame(table_upload.data)
+        
+        # Get or create column classification
+        classification = DataService.get_or_create_column_classification(
+            data=df,
+            header=table_upload.header,
+            provided_classification=table_upload.classified_columns
         )
-
-    # Update dataset metadata
-    db.datasets.update_one(
-        {"_id": dataset_id}, {"$inc": {"total_tables": 1, "total_rows": table_upload.total_rows}}
-    )
-
-    # Store each row in the backend database input_data collection
-    input_data = []
-    for i, row_data in enumerate(table_upload.data):
-        # Convert row data to list format if it's a dict
-        if isinstance(row_data, dict):
-            row_values = [row_data.get(col, None) for col in table_upload.header]
-        else:
-            row_values = row_data
-
-        input_doc = {
-            "user_id": user_id,  # Moved to first position
-            "dataset_name": datasetName,
-            "table_name": table_upload.table_name,
-            "row_id": i,
-            "data": row_values,
-            "status": "TODO",  # Initial status
-            "el_results": {},  # Empty results initially
-            "ml_status": "TODO",  # Initial ML status
-            "manually_annotated": False,  # Not manually annotated initially
-            "created_at": datetime.now(),
-        }
-        input_data.append(input_doc)
-
-    # Insert all row documents into the input_data collection
-    if input_data:
-        try:
-            db.input_data.insert_many(input_data)
-            print(f"Stored {len(input_data)} rows in backend database")
-        except Exception as e:
-            print(f"Error storing rows in backend database: {e}")
-            # Continue anyway - we'll let Crocodile handle the processing
-
-    # Trigger background task with classification passed to Crocodile
-    def run_crocodile_task():
-        croco = Crocodile(
-            input_csv=pd.DataFrame(table_upload.data),
-            client_id=user_id,  # Pass user_id as client_id to Crocodile
+        
+        # Create the table and store data
+        table_metadata = DataService.create_table(
+            db=db,
+            user_id=user_id,
             dataset_name=datasetName,
             table_name=table_upload.table_name,
-            max_candidates=3,
-            entity_retrieval_endpoint=os.environ.get("ENTITY_RETRIEVAL_ENDPOINT"),
-            entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT"),
-            entity_retrieval_token=os.environ.get("ENTITY_RETRIEVAL_TOKEN"),
-            max_workers=8,
-            candidate_retrieval_limit=10,
-            model_path="./crocodile/models/default.h5",
-            save_output_to_csv=False,
-            columns_type=classification,
+            header=table_upload.header,
+            total_rows=table_upload.total_rows,
+            classification=classification,
+            data_list=table_upload.data
         )
-        croco.run()
+        
+        # Trigger background task with classification passed to Crocodile
+        def run_crocodile_task():
+            croco = Crocodile(
+                input_csv=df,
+                client_id=user_id,
+                dataset_name=datasetName,
+                table_name=table_upload.table_name,
+                max_candidates=3,
+                entity_retrieval_endpoint=os.environ.get("ENTITY_RETRIEVAL_ENDPOINT"),
+                entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT"),
+                entity_retrieval_token=os.environ.get("ENTITY_RETRIEVAL_TOKEN"),
+                max_workers=8,
+                candidate_retrieval_limit=10,
+                model_path="./crocodile/models/default.h5",
+                save_output_to_csv=False,
+                columns_type=classification,
+            )
+            croco.run()
 
-    # Add a separate background task to sync results
-    def sync_results_task():
-        # Wait a moment before starting sync to allow initial processing
-        time.sleep(5)
-        sync_results_from_crocodile(
-            user_id=user_id,
-            dataset_name=datasetName, 
-            table_name=table_upload.table_name,
-            total_rows=table_upload.total_rows
-        )
+        # Add a separate background task to sync results using the service
+        def sync_results_task():
+            # Wait a moment before starting sync to allow initial processing
+            time.sleep(5)
+            
+            # Create a result sync service and sync results
+            mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
+            sync_service = ResultSyncService(mongo_uri=mongo_uri)
+            sync_service.sync_results(
+                user_id=user_id,
+                dataset_name=datasetName, 
+                table_name=table_upload.table_name
+            )
 
-    # Add both tasks to background processing
-    background_tasks.add_task(run_crocodile_task)
-    background_tasks.add_task(sync_results_task)
+        # Add both tasks to background processing
+        background_tasks.add_task(run_crocodile_task)
+        background_tasks.add_task(sync_results_task)
 
-    return {
-        "message": "Table added successfully.",
-        "tableName": table_upload.table_name,
-        "datasetName": datasetName,
-        "userId": user_id,  # Renamed from clientId to userId
-    }
-
+        return {
+            "message": "Table added successfully.",
+            "tableName": table_upload.table_name,
+            "datasetName": datasetName,
+            "userId": user_id,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 def parse_json_column_classification(column_classification: str = Form("")) -> Optional[dict]:
     # Parse the form field; return None if empty
     if not column_classification:
         return None
     return json.loads(column_classification)
-
 
 @router.post("/datasets/{datasetName}/tables/csv", status_code=status.HTTP_201_CREATED)
 def add_table_csv(
@@ -407,137 +136,86 @@ def add_table_csv(
     file: UploadFile = File(...),
     column_classification: Optional[dict] = Depends(parse_json_column_classification),
     background_tasks: BackgroundTasks = None,
-    user_id: str = Query(None),  # Moved after required parameters
+    user_id: str = Query(None),
     db: Database = Depends(get_db),
 ):
+    """
+    Add a new table from CSV file to an existing dataset and trigger Crocodile processing.
+    """
     # Require user_id for data isolation
     if user_id is None:
         raise HTTPException(status_code=400, detail="user_id is required")
-        
-    # Read CSV file and convert NaN values to None
-    df = pd.read_csv(file.file)
-    df = df.replace({np.nan: None})  # permanent fix for JSON serialization
+    
+    try:    
+        # Read CSV file and convert NaN values to None
+        df = pd.read_csv(file.file)
+        df = df.replace({np.nan: None})  # permanent fix for JSON serialization
 
-    header = df.columns.tolist()
-    total_rows = len(df)
+        header = df.columns.tolist()
+        total_rows = len(df)
 
-    # Use the provided classification; if empty, call ColumnClassifier on a sample
-    classification = column_classification if column_classification else {}
-    if not classification:
-        from column_classifier import ColumnClassifier
-
-        classifier = ColumnClassifier(model_type="fast")
-        classification_result = classifier.classify_multiple_tables([df.head(1024)])
-        raw_classification = classification_result[0].get("table_1", {})
-        classification = format_classification(raw_classification, header)
-
-    # Check if dataset exists; if not, create it
-    dataset = db.datasets.find_one({"user_id": user_id, "dataset_name": datasetName})  # user_id first
-    if not dataset:
-        try:
-            dataset_id = db.datasets.insert_one(
-                {
-                    "user_id": user_id,  # Moved to first position
-                    "dataset_name": datasetName,
-                    "created_at": datetime.now(),
-                    "total_tables": 0,
-                    "total_rows": 0,
-                }
-            ).inserted_id
-        except DuplicateKeyError:
-            raise HTTPException(status_code=400, detail="Duplicate dataset insertion")
-    else:
-        dataset_id = dataset["_id"]
-
-    # Create table metadata
-    table_metadata = {
-        "user_id": user_id,  # Moved to first position
-        "dataset_name": datasetName,
-        "table_name": table_name,
-        "header": header,
-        "total_rows": total_rows,
-        "created_at": datetime.now(),
-        "classified_columns": classification,
-    }
-    try:
-        db.tables.insert_one(table_metadata)
-    except DuplicateKeyError:
-        raise HTTPException(
-            status_code=400, detail="Table with this name already exists in the dataset"
+        # Get or create column classification
+        classification = DataService.get_or_create_column_classification(
+            data=df,
+            header=header,
+            provided_classification=column_classification
         )
-
-    # Update dataset metadata
-    db.datasets.update_one(
-        {"_id": dataset_id}, {"$inc": {"total_tables": 1, "total_rows": total_rows}}
-    )
-
-    # Store each row in the backend database input_data collection
-    input_data = []
-    for i, (_, row) in enumerate(df.iterrows()):
-        # Convert row to list, handling NaN/None values
-        row_values = row.replace({np.nan: None}).tolist()
-
-        input_doc = {
-            "user_id": user_id,  # Moved to first position
-            "dataset_name": datasetName,
-            "table_name": table_name,
-            "row_id": i,
-            "data": row_values,
-            "status": "TODO",
-            "el_results": {},
-            "ml_status": "TODO",
-            "manually_annotated": False,
-            "created_at": datetime.now(),
-        }
-        input_data.append(input_doc)
-
-    # Insert all row documents into the input_data collection
-    if input_data:
-        try:
-            db.input_data.insert_many(input_data)
-            print(f"Stored {len(input_data)} rows in backend database")
-        except Exception as e:
-            print(f"Error storing rows in backend database: {e}")
-            # Continue anyway - we'll let Crocodile handle the processing
-
-    # Trigger background task with columns_type passed to Crocodile
-    def run_crocodile_task():
-        croco = Crocodile(
-            input_csv=df,
-            client_id=user_id,  # Pass user_id as client_id to Crocodile
+        
+        # Create the table and store data
+        table_metadata = DataService.create_table(
+            db=db,
+            user_id=user_id,
             dataset_name=datasetName,
             table_name=table_name,
-            entity_retrieval_endpoint=os.environ.get("ENTITY_RETRIEVAL_ENDPOINT"),
-            entity_retrieval_token=os.environ.get("ENTITY_RETRIEVAL_TOKEN"),
-            max_workers=8,
-            candidate_retrieval_limit=10,
-            model_path="./crocodile/models/default.h5",
-            save_output_to_csv=False,
-            columns_type=classification,
-            entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT"),
-        )
-        croco.run()
-
-    # Add a separate background task to sync results
-    def sync_results_task():
-        sync_results_from_crocodile(
-            user_id=user_id,
-            dataset_name=datasetName, 
-            table_name=table_name,
-            total_rows=total_rows
+            header=header,
+            total_rows=total_rows,
+            classification=classification,
+            data_df=df
         )
 
-    # Add both tasks to background processing
-    background_tasks.add_task(run_crocodile_task)
-    background_tasks.add_task(sync_results_task)
+        # Trigger background task with columns_type passed to Crocodile
+        def run_crocodile_task():
+            croco = Crocodile(
+                input_csv=df,
+                client_id=user_id,
+                dataset_name=datasetName,
+                table_name=table_name,
+                entity_retrieval_endpoint=os.environ.get("ENTITY_RETRIEVAL_ENDPOINT"),
+                entity_retrieval_token=os.environ.get("ENTITY_RETRIEVAL_TOKEN"),
+                max_workers=8,
+                candidate_retrieval_limit=10,
+                model_path="./crocodile/models/default.h5",
+                save_output_to_csv=False,
+                columns_type=classification,
+                entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT"),
+            )
+            croco.run()
 
-    return {
-        "message": "CSV table added successfully.",
-        "tableName": table_name,
-        "datasetName": datasetName,
-        "userId": user_id,  # Renamed from clientId to userId
-    }
+        # Add a separate background task to sync results using the service
+        def sync_results_task():
+            # Create a result sync service and sync results
+            mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
+            sync_service = ResultSyncService(mongo_uri=mongo_uri)
+            sync_service.sync_results(
+                user_id=user_id,
+                dataset_name=datasetName, 
+                table_name=table_name
+            )
 
+        # Add both tasks to background processing
+        background_tasks.add_task(run_crocodile_task)
+        background_tasks.add_task(sync_results_task)
+
+        return {
+            "message": "CSV table added successfully.",
+            "tableName": table_name,
+            "datasetName": datasetName,
+            "userId": user_id,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
 
 @router.get("/datasets")
 def get_datasets(
@@ -1056,9 +734,8 @@ def update_annotation(
     row_id: int,
     column_id: int,
     annotation: AnnotationUpdate,
-    user_id: str = Query(None),  # Moved after required parameters
-    crocodile_db: Database = Depends(get_crocodile_db),
-    db: Database = Depends(get_db),
+    user_id: str = Query(None),
+    db: Database = Depends(get_db),  # Only using the backend database now
 ):
     """
     Update the annotation for a specific cell by marking a candidate as matching.
@@ -1080,8 +757,8 @@ def update_annotation(
             status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
         )
 
-    # Find the row in the database
-    row = crocodile_db.input_data.find_one(
+    # Find the row in the backend database
+    row = db.input_data.find_one(
         {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name, "row_id": row_id}
     )
 
@@ -1166,8 +843,8 @@ def update_annotation(
     # Update the database with the modified candidates
     el_results[str(column_id)] = updated_candidates
 
-    # Perform the update - set manually_annotated at cell level
-    result = crocodile_db.input_data.update_one(
+    # Perform the update in the backend database - set manually_annotated at cell level
+    result = db.input_data.update_one(
         {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name, "row_id": row_id},
         {"$set": {"el_results": el_results, "manually_annotated": True}},
     )
@@ -1203,9 +880,8 @@ def delete_candidate(
     row_id: int,
     column_id: int,
     entity_id: str,
-    user_id: str = Query(None),  # Moved after required parameters
-    crocodile_db: Database = Depends(get_crocodile_db),
-    db: Database = Depends(get_db),
+    user_id: str = Query(None),
+    db: Database = Depends(get_db),  # Only using the backend database now
 ):
     """
     Delete a specific candidate from the entity linking results for a cell.
@@ -1224,8 +900,8 @@ def delete_candidate(
             status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
         )
 
-    # Find the row in the database
-    row = crocodile_db.input_data.find_one(
+    # Find the row in the backend database
+    row = db.input_data.find_one(
         {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name, "row_id": row_id}
     )
 
@@ -1266,8 +942,8 @@ def delete_candidate(
     # Update the database with the modified candidates
     el_results[str(column_id)] = updated_candidates
 
-    # Perform the update
-    result = crocodile_db.input_data.update_one(
+    # Perform the update in the backend database
+    result = db.input_data.update_one(
         {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name, "row_id": row_id},
         {
             "$set": {

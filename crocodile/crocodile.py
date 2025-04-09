@@ -336,10 +336,6 @@ class Crocodile:
         if not save_to_csv and not return_dataframe:
             return None
 
-        # Early exit if no output is requested - silently return None
-        if not save_to_csv and not return_dataframe:
-            return None
-
         # Verify that we have a valid output path for CSV if saving
         if save_to_csv and not isinstance(self.output_csv, (str, Path)):
             print("No valid output CSV path specified. Cannot save results to CSV.")

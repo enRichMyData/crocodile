@@ -40,3 +40,4 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Import the main class
 from .crocodile import Crocodile as Crocodile
+from .result_fetcher import CrocodileResultFetcher as CrocodileResultFetcher

@@ -171,9 +171,16 @@ class MongoWrapper:
         input_collection: Collection = db["input_data"]
 
         # Update indexes to include client_id
-        input_collection.create_index([("client_id", ASCENDING), ("dataset_name", ASCENDING), ("table_name", ASCENDING)])
         input_collection.create_index(
-            [("client_id", ASCENDING), ("dataset_name", ASCENDING), ("table_name", ASCENDING), ("row_id", ASCENDING)],
+            [("client_id", ASCENDING), ("dataset_name", ASCENDING), ("table_name", ASCENDING)]
+        )
+        input_collection.create_index(
+            [
+                ("client_id", ASCENDING),
+                ("dataset_name", ASCENDING),
+                ("table_name", ASCENDING),
+                ("row_id", ASCENDING),
+            ],
             unique=True,
         )
         input_collection.create_index([("status", ASCENDING)])

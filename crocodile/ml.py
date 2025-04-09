@@ -32,7 +32,7 @@ class MLWorker:
         super(MLWorker, self).__init__()
         self.table_name = table_name
         self.dataset_name = dataset_name
-        self.client_id = client_id  
+        self.client_id = client_id
         self.model_path: str = model_path or os.path.join(
             PROJECT_ROOT, "crocodile", "models", "default.h5"
         )
@@ -90,7 +90,7 @@ class MLWorker:
                 remaining = self.mongo_wrapper.count_documents(
                     input_collection,
                     {
-                        "client_id": self.client_id, 
+                        "client_id": self.client_id,
                         "dataset_name": self.dataset_name,
                         "table_name": self.table_name,
                         "status": "DONE",
@@ -112,7 +112,7 @@ class MLWorker:
         for _ in range(self.batch_size):
             doc = input_collection.find_one_and_update(
                 {
-                    "client_id": self.client_id,  
+                    "client_id": self.client_id,
                     "dataset_name": self.dataset_name,
                     "table_name": self.table_name,
                     "status": "DONE",

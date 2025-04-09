@@ -2,11 +2,13 @@ import json
 import os
 import time
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 from bson import ObjectId
+from dependencies import get_crocodile_db, get_db
+from endpoints.imdb_example import IMDB_EXAMPLE
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -21,16 +23,16 @@ from fastapi import (
 )
 from pydantic import BaseModel
 from pymongo.database import Database
-
-# Import services and utilities
-from crocodile import Crocodile
-from dependencies import get_crocodile_db, get_db
-from endpoints.imdb_example import IMDB_EXAMPLE
+from pymongo.errors import DuplicateKeyError
 from services.data_service import DataService
 from services.result_sync import ResultSyncService
 from services.utils import sanitize_for_json
 
+# Import services and utilities
+from crocodile import Crocodile
+
 router = APIRouter()
+
 
 class TableUpload(BaseModel):
     table_name: str
@@ -38,6 +40,7 @@ class TableUpload(BaseModel):
     total_rows: int
     classified_columns: Optional[Dict[str, Dict[str, str]]] = {}
     data: List[dict]
+
 
 @router.post("/datasets/{datasetName}/tables/json", status_code=status.HTTP_201_CREATED)
 def add_table(
@@ -53,20 +56,20 @@ def add_table(
     # Require user_id for data isolation
     if user_id is None:
         raise HTTPException(status_code=400, detail="user_id is required")
-        
+
     try:
         # Convert data to DataFrame for classification if needed
         df = pd.DataFrame(table_upload.data)
-        
+
         # Get or create column classification
         classification = DataService.get_or_create_column_classification(
             data=df,
             header=table_upload.header,
-            provided_classification=table_upload.classified_columns
+            provided_classification=table_upload.classified_columns,
         )
-        
+
         # Create the table and store data
-        table_metadata = DataService.create_table(
+        DataService.create_table(
             db=db,
             user_id=user_id,
             dataset_name=datasetName,
@@ -74,9 +77,9 @@ def add_table(
             header=table_upload.header,
             total_rows=table_upload.total_rows,
             classification=classification,
-            data_list=table_upload.data
+            data_list=table_upload.data,
         )
-        
+
         # Trigger background task with classification passed to Crocodile
         def run_crocodile_task():
             croco = Crocodile(
@@ -100,14 +103,12 @@ def add_table(
         def sync_results_task():
             # Wait a moment before starting sync to allow initial processing
             time.sleep(5)
-            
+
             # Create a result sync service and sync results
             mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
             sync_service = ResultSyncService(mongo_uri=mongo_uri)
             sync_service.sync_results(
-                user_id=user_id,
-                dataset_name=datasetName, 
-                table_name=table_upload.table_name
+                user_id=user_id, dataset_name=datasetName, table_name=table_upload.table_name
             )
 
         # Add both tasks to background processing
@@ -123,11 +124,13 @@ def add_table(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
 def parse_json_column_classification(column_classification: str = Form("")) -> Optional[dict]:
     # Parse the form field; return None if empty
     if not column_classification:
         return None
     return json.loads(column_classification)
+
 
 @router.post("/datasets/{datasetName}/tables/csv", status_code=status.HTTP_201_CREATED)
 def add_table_csv(
@@ -145,8 +148,8 @@ def add_table_csv(
     # Require user_id for data isolation
     if user_id is None:
         raise HTTPException(status_code=400, detail="user_id is required")
-    
-    try:    
+
+    try:
         # Read CSV file and convert NaN values to None
         df = pd.read_csv(file.file)
         df = df.replace({np.nan: None})  # permanent fix for JSON serialization
@@ -156,13 +159,11 @@ def add_table_csv(
 
         # Get or create column classification
         classification = DataService.get_or_create_column_classification(
-            data=df,
-            header=header,
-            provided_classification=column_classification
+            data=df, header=header, provided_classification=column_classification
         )
-        
+
         # Create the table and store data
-        table_metadata = DataService.create_table(
+        DataService.create_table(
             db=db,
             user_id=user_id,
             dataset_name=datasetName,
@@ -170,7 +171,7 @@ def add_table_csv(
             header=header,
             total_rows=total_rows,
             classification=classification,
-            data_df=df
+            data_df=df,
         )
 
         # Trigger background task with columns_type passed to Crocodile
@@ -197,9 +198,7 @@ def add_table_csv(
             mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
             sync_service = ResultSyncService(mongo_uri=mongo_uri)
             sync_service.sync_results(
-                user_id=user_id,
-                dataset_name=datasetName, 
-                table_name=table_name
+                user_id=user_id, dataset_name=datasetName, table_name=table_name
             )
 
         # Add both tasks to background processing
@@ -217,6 +216,7 @@ def add_table_csv(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
 
+
 @router.get("/datasets")
 def get_datasets(
     limit: int = Query(10),
@@ -232,7 +232,7 @@ def get_datasets(
     # Require user_id for data isolation
     if user_id is None:
         raise HTTPException(status_code=400, detail="user_id is required")
-        
+
     # Determine pagination direction and set up query
     query_filter = {"user_id": user_id}  # user_id is already first
     sort_direction = 1  # Default ascending (forward)
@@ -325,9 +325,11 @@ def get_tables(
     # Require user_id for data isolation
     if user_id is None:
         raise HTTPException(status_code=400, detail="user_id is required")
-        
+
     # Ensure dataset exists
-    if not db.datasets.find_one({"user_id": user_id, "dataset_name": dataset_name}):  # user_id first
+    if not db.datasets.find_one(
+        {"user_id": user_id, "dataset_name": dataset_name}
+    ):  # user_id first
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 
     # Determine pagination direction
@@ -379,9 +381,16 @@ def get_tables(
             else:
                 # We're on first page - check if this is a fresh query or already paginated
                 first_id = tables[0]["_id"]
-                if db.tables.count_documents(
-                    {"user_id": user_id, "dataset_name": dataset_name, "_id": {"$lt": first_id}}
-                ) > 0:
+                if (
+                    db.tables.count_documents(
+                        {
+                            "user_id": user_id,
+                            "dataset_name": dataset_name,
+                            "_id": {"$lt": first_id},
+                        }
+                    )
+                    > 0
+                ):
                     prev_cursor = str(first_id)
                 # Otherwise prev_cursor remains None (we're truly on first page)
         else:
@@ -428,13 +437,17 @@ def get_table(
     # Require user_id for data isolation
     if user_id is None:
         raise HTTPException(status_code=400, detail="user_id is required")
-        
+
     # Check dataset
-    if not db.datasets.find_one({"user_id": user_id, "dataset_name": dataset_name}):  # user_id first
+    if not db.datasets.find_one(
+        {"user_id": user_id, "dataset_name": dataset_name}
+    ):  # user_id first
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 
     # Check table
-    table = db.tables.find_one({"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name})
+    table = db.tables.find_one(
+        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+    )
     if not table:
         raise HTTPException(
             status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
@@ -443,7 +456,11 @@ def get_table(
     header = table.get("header", [])
 
     # Determine pagination direction
-    query_filter = {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}  # user_id first
+    query_filter = {
+        "user_id": user_id,
+        "dataset_name": dataset_name,
+        "table_name": table_name,
+    }  # user_id first
     sort_direction = 1  # Default ascending (forward)
 
     if next_cursor and prev_cursor:
@@ -470,8 +487,10 @@ def get_table(
 
     # If no rows found in backend db, fallback to crocodile_db
     if not raw_rows:
-        results = crocodile_db.input_data.find(query_filter).sort("row_id", sort_direction).limit(
-            limit + 1
+        results = (
+            crocodile_db.input_data.find(query_filter)
+            .sort("row_id", sort_direction)
+            .limit(limit + 1)
         )
         raw_rows = list(results)
 
@@ -601,7 +620,7 @@ def create_dataset(
     # Require user_id for data isolation
     if user_id is None:
         raise HTTPException(status_code=400, detail="user_id is required")
-        
+
     existing = db.datasets.find_one(
         {"user_id": user_id, "dataset_name": dataset_data.get("dataset_name")}
     )  # updated query key
@@ -638,9 +657,11 @@ def delete_dataset(
     # Require user_id for data isolation
     if user_id is None:
         raise HTTPException(status_code=400, detail="user_id is required")
-        
+
     # Check existence using uniform dataset key
-    existing = db.datasets.find_one({"user_id": user_id, "dataset_name": dataset_name})  # updated query key
+    existing = db.datasets.find_one(
+        {"user_id": user_id, "dataset_name": dataset_name}
+    )  # updated query key
     if not existing:
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 
@@ -651,7 +672,7 @@ def delete_dataset(
     db.datasets.delete_one({"user_id": user_id, "dataset_name": dataset_name})  # updated query key
 
     # Delete data from crocodile_db
-    deletion_result = crocodile_db.input_data.delete_many({"user_id": user_id, "dataset_name": dataset_name})
+    crocodile_db.input_data.delete_many({"user_id": user_id, "dataset_name": dataset_name})
 
     return None
 
@@ -672,13 +693,17 @@ def delete_table(
     # Require user_id for data isolation
     if user_id is None:
         raise HTTPException(status_code=400, detail="user_id is required")
-        
+
     # Ensure dataset exists using uniform dataset key
-    dataset = db.datasets.find_one({"user_id": user_id, "dataset_name": dataset_name})  # updated query key
+    dataset = db.datasets.find_one(
+        {"user_id": user_id, "dataset_name": dataset_name}
+    )  # updated query key
     if not dataset:
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 
-    table = db.tables.find_one({"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name})
+    table = db.tables.find_one(
+        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+    )
     if not table:
         raise HTTPException(
             status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
@@ -687,15 +712,18 @@ def delete_table(
     row_count = table.get("total_rows", 0)
 
     # Delete table
-    db.tables.delete_one({"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name})
+    db.tables.delete_one(
+        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+    )
 
     # Update dataset metadata
     db.datasets.update_one(
-        {"user_id": user_id, "dataset_name": dataset_name}, {"$inc": {"total_tables": -1, "total_rows": -row_count}}
+        {"user_id": user_id, "dataset_name": dataset_name},
+        {"$inc": {"total_tables": -1, "total_rows": -row_count}},
     )
 
     # Delete data from crocodile_db
-    deletion_result = crocodile_db.input_data.delete_many(
+    crocodile_db.input_data.delete_many(
         {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
     )
 
@@ -704,12 +732,14 @@ def delete_table(
 
 class EntityType(BaseModel):
     """Type information for an entity"""
+
     id: str
     name: str
 
 
 class EntityCandidate(BaseModel):
     """Complete entity candidate information without matching status"""
+
     id: str
     name: str
     description: str
@@ -719,6 +749,7 @@ class EntityCandidate(BaseModel):
 
 class AnnotationUpdate(BaseModel):
     """Request model for updating an annotation."""
+
     entity_id: str
     match: bool = True  # Whether this is the correct entity
     score: Optional[float] = 1.0  # Default to 1.0 for user selections
@@ -747,19 +778,26 @@ def update_annotation(
     # Require user_id for data isolation
     if user_id is None:
         raise HTTPException(status_code=400, detail="user_id is required")
-        
+
     # Check if dataset and table exist
     if not db.datasets.find_one({"user_id": user_id, "dataset_name": dataset_name}):
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 
-    if not db.tables.find_one({"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}):
+    if not db.tables.find_one(
+        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+    ):
         raise HTTPException(
             status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
         )
 
     # Find the row in the backend database
     row = db.input_data.find_one(
-        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name, "row_id": row_id}
+        {
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "row_id": row_id,
+        }
     )
 
     if not row:
@@ -773,12 +811,10 @@ def update_annotation(
 
     # Find if the candidate already exists
     entity_found = False
-    target_candidate = None
 
     for candidate in column_candidates:
         if candidate.get("id") == annotation.entity_id:
             entity_found = True
-            target_candidate = candidate
             break
 
     # Create the updated candidates list
@@ -789,7 +825,8 @@ def update_annotation(
         if not annotation.candidate_info:
             raise HTTPException(
                 status_code=400,
-                detail=f"Entity with ID {annotation.entity_id} not found in candidates. Please provide 'candidate_info' to add a new candidate.",
+                detail=f"""Entity with ID {annotation.entity_id} not found in candidates.
+                            Please provide 'candidate_info' to add a new candidate.""",
             )
 
         # Convert Pydantic model to dict for MongoDB storage and add annotation data
@@ -798,8 +835,6 @@ def update_annotation(
         new_candidate["score"] = annotation.score if annotation.match else None
         if annotation.notes:
             new_candidate["notes"] = annotation.notes
-
-        target_candidate = new_candidate
 
         # Add all other candidates with match=False and score=null
         for candidate in column_candidates:
@@ -845,7 +880,12 @@ def update_annotation(
 
     # Perform the update in the backend database - set manually_annotated at cell level
     result = db.input_data.update_one(
-        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name, "row_id": row_id},
+        {
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "row_id": row_id,
+        },
         {"$set": {"el_results": el_results, "manually_annotated": True}},
     )
 
@@ -890,19 +930,26 @@ def delete_candidate(
     # Require user_id for data isolation
     if user_id is None:
         raise HTTPException(status_code=400, detail="user_id is required")
-        
+
     # Check if dataset and table exist
     if not db.datasets.find_one({"user_id": user_id, "dataset_name": dataset_name}):
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 
-    if not db.tables.find_one({"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}):
+    if not db.tables.find_one(
+        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+    ):
         raise HTTPException(
             status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
         )
 
     # Find the row in the backend database
     row = db.input_data.find_one(
-        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name, "row_id": row_id}
+        {
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "row_id": row_id,
+        }
     )
 
     if not row:
@@ -943,12 +990,18 @@ def delete_candidate(
     el_results[str(column_id)] = updated_candidates
 
     # Perform the update in the backend database
+    # Mark as manually annotated since we're modifying the candidates
     result = db.input_data.update_one(
-        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name, "row_id": row_id},
+        {
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "row_id": row_id,
+        },
         {
             "$set": {
                 "el_results": el_results,
-                "manually_annotated": True,  # Mark as manually annotated since we're modifying the candidates
+                "manually_annotated": True,
             }
         },
     )

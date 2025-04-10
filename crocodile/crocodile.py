@@ -31,8 +31,9 @@ class Crocodile:
 
     def __init__(
         self,
-        input_csv: str | Path | pd.DataFrame,
+        input_csv: str | Path | pd.DataFrame | None = None,
         output_csv: str | Path | None = None,
+        client_id: str = None,
         dataset_name: str = None,
         table_name: str = None,
         columns_type: ColType | None = None,
@@ -58,12 +59,19 @@ class Crocodile:
                     "An output name must be specified is the input is a `pd.Dataframe`"
                 )
             self.output_csv = os.path.splitext(input_csv)[0] + "_output.csv"
-        if dataset_name is None:
-            dataset_name = uuid.uuid4().hex
+
+        # Ensure we have proper defaults for all components of the triple identifier
+        self.client_id = client_id or str(uuid.uuid4())
+        self.dataset_name = dataset_name or uuid.uuid4().hex
         if table_name is None:
-            table_name = os.path.basename(self.input_csv).split(".")[0]
-        self.dataset_name = dataset_name
-        self.table_name = table_name
+            self.table_name = (
+                os.path.basename(self.input_csv).split(".")[0]
+                if not isinstance(self.input_csv, pd.DataFrame)
+                else "unnamed_table"
+            )
+        else:
+            self.table_name = table_name
+
         self.columns_type = columns_type
         self.max_workers = max_workers or mp.cpu_count()
         self.max_candidates_in_result = max_candidates_in_result
@@ -78,12 +86,14 @@ class Crocodile:
         self._entity_bow_endpoint = kwargs.pop("entity_bow_endpoint", None)
         self._mongo_uri = kwargs.pop("mongo_uri", None) or self._DEFAULT_MONGO_URI
         self._save_output_to_csv = kwargs.pop("save_output_to_csv", True)
+        self._return_dataframe = kwargs.pop("return_dataframe", False)
         self.mongo_wrapper = MongoWrapper(
             self._mongo_uri, self._DB_NAME, self._ERROR_LOG_COLLECTION
         )
         self.feature = Feature(
-            dataset_name,
-            table_name,
+            self.client_id,
+            self.dataset_name,
+            self.table_name,
             top_n_for_type_freq=top_n_for_type_freq,
             features=selected_features,
             db_name=self._DB_NAME,
@@ -148,6 +158,7 @@ class Crocodile:
         for _ in range(batch_size):
             doc = input_collection.find_one_and_update(
                 {
+                    "client_id": self.client_id,  # Add client_id to the query
                     "dataset_name": self.dataset_name,
                     "table_name": self.table_name,
                     "status": "TODO",
@@ -167,6 +178,10 @@ class Crocodile:
     ):
         """Efficiently load data into MongoDB using batched inserts."""
         start_time = time.perf_counter()
+
+        # Use class-level values if not provided
+        dataset_name = dataset_name or self.dataset_name
+        table_name = table_name or self.table_name
 
         # Get database connection
         db = self.get_db()
@@ -240,6 +255,7 @@ class Crocodile:
             for i, (_, row) in enumerate(chunk.iterrows()):
                 row_id = start_idx + i
                 document = {
+                    "client_id": self.client_id,  # Add client_id to each document
                     "dataset_name": dataset_name,
                     "table_name": table_name,
                     "row_id": row_id,
@@ -290,17 +306,43 @@ class Crocodile:
             f"({processed_rows/total_time:.1f} rows/sec)"
         )
 
-    def fetch_results(self):
-        """Retrieves processed documents from MongoDB using memory-efficient streaming.
+    def export_results_to_csv(self, save_to_csv=None, return_dataframe=None):
+        """Processes documents from MongoDB and exports results in one of three ways:
 
-        For large tables, this avoids loading all results into memory at once.
-        Instead, it processes documents in batches and writes directly to CSV.
+        This method efficiently processes entity linking results and can:
+        1. Return a pandas DataFrame with the results (prioritized if both options are True)
+        2. Write directly to a CSV file without loading all results into memory
+        3. Do nothing and return None if output is disabled
+
+        Args:
+            save_to_csv: If True AND return_dataframe is not True, results are saved to CSV file
+            return_dataframe: If True, returns results as pandas DataFrame (takes precedence)
+
+        Returns:
+            - pandas DataFrame if return_dataframe is True
+            - None otherwise
         """
+        # Determine output behaviors, with method parameters taking precedence
+        save_to_csv = save_to_csv if save_to_csv is not None else self._save_output_to_csv
+        return_dataframe = (
+            return_dataframe if return_dataframe is not None else self._return_dataframe
+        )
+
+        # DataFrame takes priority over CSV output
+        if return_dataframe:
+            save_to_csv = False
+
+        # Early exit if no output is requested
+        if not save_to_csv and not return_dataframe:
+            return None
+
+        # Verify that we have a valid output path for CSV if saving
+        if save_to_csv and not isinstance(self.output_csv, (str, Path)):
+            print("No valid output CSV path specified. Cannot save results to CSV.")
+            return None
+
         db = self.get_db()
         input_collection = db[self._INPUT_COLLECTION]
-
-        # Determine if we need to write to CSV or return full results
-        stream_to_csv = self._save_output_to_csv and isinstance(self.output_csv, (str, Path))
 
         # Get header information
         header = None
@@ -308,17 +350,22 @@ class Crocodile:
             header = self.input_csv.columns.tolist()
         elif isinstance(self.input_csv, str):
             header = pd.read_csv(self.input_csv, nrows=0).columns.tolist()
-        num_cols = len(header)
+        num_cols = len(header) if header else 0
 
         # Get first document to determine column count if header is still None
         sample_doc = input_collection.find_one(
-            {"dataset_name": self.dataset_name, "table_name": self.table_name}
+            {
+                "client_id": self.client_id,
+                "dataset_name": self.dataset_name,
+                "table_name": self.table_name,
+            }
         )
         if not sample_doc:
             print("No documents found for the specified dataset and table.")
-            return []
+            return None
 
         if header is None:
+            num_cols = len(sample_doc.get("data", []))
             print("Could not extract header from input table, using generic column names.")
             header = [f"col_{i}" for i in range(num_cols)]
 
@@ -328,56 +375,64 @@ class Crocodile:
         # Only fetch fields we actually need to reduce network transfer
         projection = {"data": 1, "el_results": 1, "classified_columns.NE": 1}
         cursor = input_collection.find(
-            {"dataset_name": self.dataset_name, "table_name": self.table_name},
+            {
+                "client_id": self.client_id,
+                "dataset_name": self.dataset_name,
+                "table_name": self.table_name,
+            },
             projection=projection,
         ).batch_size(batch_size)
 
-        # Count documents if streaming to CSV for progress reporting
-        if stream_to_csv:
-            total_docs = input_collection.count_documents(
-                {"dataset_name": self.dataset_name, "table_name": self.table_name}
-            )
-            print(f"Streaming {total_docs} documents to CSV...")
+        # Count documents for progress reporting
+        total_docs = input_collection.count_documents(
+            {
+                "client_id": self.client_id,
+                "dataset_name": self.dataset_name,
+                "table_name": self.table_name,
+            }
+        )
+
+        # Report appropriate output mode
+        if save_to_csv:
+            print(f"Processing {total_docs} documents to CSV at {self.output_csv}...")
+        else:  # return_dataframe must be True here
+            print(f"Processing {total_docs} documents to return as DataFrame...")
 
         # Setup for handling results
-        all_rows = [] if not stream_to_csv else None
         current_chunk = []
+        all_results = [] if return_dataframe else None
         processed_count = 0
         chunk_size = 256  # Size for chunked CSV writing
 
         # Process all documents
         for doc in cursor:
-            # Process each document - this is the common code between both paths
+            # Process each document
             row_data = self._extract_row_data(doc, header)
 
-            if stream_to_csv:
-                # For CSV streaming, collect into chunk
+            # Store based on output mode
+            if return_dataframe:
+                all_results.append(row_data)
+            else:  # save_to_csv must be True here
                 current_chunk.append(row_data)
-                processed_count += 1
 
-                # Write chunk when it reaches desired size
-                if len(current_chunk) >= chunk_size:
-                    self._write_csv_chunk(current_chunk, processed_count, chunk_size, total_docs)
-                    current_chunk = []
-            else:
-                # For memory collection, just append to results
-                all_rows.append(row_data)
-                processed_count += 1
+            processed_count += 1
 
-                # Report progress periodically
-                if processed_count % batch_size == 0:
-                    print(f"Processed {processed_count} rows...")
+            # Write chunk when it reaches desired size (only in CSV mode)
+            if save_to_csv and len(current_chunk) >= chunk_size:
+                self._write_csv_chunk(current_chunk, processed_count, chunk_size, total_docs)
+                current_chunk = []
 
-        # Handle any remaining rows for CSV streaming
-        if stream_to_csv and current_chunk:
+        # Handle any remaining rows for CSV output
+        if save_to_csv and current_chunk:
             self._write_csv_chunk(current_chunk, processed_count, chunk_size, total_docs)
+
+        # Final reporting
+        if save_to_csv:
             print(f"Results saved to '{self.output_csv}'. Total rows: {processed_count}")
-            return []
-        elif not stream_to_csv:
-            print(f"Retrieved {processed_count} rows total")
-            return all_rows
-        else:
-            return []
+        else:  # return_dataframe must be True here
+            print(f"DataFrame with {processed_count} rows prepared for return.")
+
+        return pd.DataFrame(all_results)
 
     def _extract_row_data(self, doc, header):
         """Extract row data from a MongoDB document.
@@ -429,10 +484,12 @@ class Crocodile:
 
     def ml_worker(self, rank: int, global_type_counts: Dict[Any, Counter]):
         """Wrapper function to create and run an MLWorker with the correct parameters"""
+
         worker = MLWorker(
             rank,
-            table_name=self.table_name,
+            client_id=self.client_id,
             dataset_name=self.dataset_name,
+            table_name=self.table_name,
             error_log_collection_name=self._ERROR_LOG_COLLECTION,
             input_collection=self._INPUT_COLLECTION,
             model_path=self.model_path,
@@ -467,7 +524,15 @@ class Crocodile:
         db = self.get_db()
         input_collection = db[self._INPUT_COLLECTION]
 
-        total_rows = self.mongo_wrapper.count_documents(input_collection, {"status": "TODO"})
+        total_rows = self.mongo_wrapper.count_documents(
+            input_collection,
+            {
+                "client_id": self.client_id,  # Add client_id to the query
+                "dataset_name": self.dataset_name,
+                "table_name": self.table_name,
+                "status": "TODO",
+            },
+        )
         print(f"Found {total_rows} tasks to process.")
 
         with mp.Pool(processes=self.max_workers) as pool:
@@ -484,5 +549,5 @@ class Crocodile:
         # self.close_mongo_connection()
         print("All tasks have been processed.")
 
-        extracted_rows = self.fetch_results()
-        return extracted_rows
+        # Export results and return whatever export_results_to_csv returns (DataFrame or None)
+        return self.export_results_to_csv()

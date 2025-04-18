@@ -1,8 +1,7 @@
 from config import settings
 from endpoints.crocodile_api import router
-from dependencies import verify_token
-from fastapi import FastAPI, Depends
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware  # Import CORS middleware
 
 app = FastAPI(title=settings.FASTAPI_APP_NAME, debug=settings.DEBUG)
 
@@ -15,12 +14,8 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
-# Include the crocodile router with authentication
-app.include_router(router, dependencies=[Depends(verify_token)])
-
-@app.get("/protected")
-def protected_route(token_payload: str = Depends(verify_token)):
-    return {"message": f"Hello {token_payload['email']}"}
+# Include the crocodile router
+app.include_router(router)
 
 @app.get("/")
 def read_root():

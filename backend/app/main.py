@@ -1,11 +1,9 @@
 from typing import Dict, Any
 from config import settings
 from endpoints.crocodile_api import router
-from jose import JWTError, jwt
 from dependencies import verify_token
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 app = FastAPI(title=settings.FASTAPI_APP_NAME, debug=settings.DEBUG)
 
@@ -17,9 +15,6 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
 )
-
-# Set up JWT authentication
-bearer_scheme = HTTPBearer()
 
 # Include the crocodile router with authentication
 app.include_router(router, dependencies=[Depends(verify_token)])

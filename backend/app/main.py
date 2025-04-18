@@ -1,9 +1,11 @@
+from typing import Dict, Any
 from config import settings
 from endpoints.crocodile_api import router
+from jose import JWTError, jwt
+from dependencies import verify_token
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
 
 app = FastAPI(title=settings.FASTAPI_APP_NAME, debug=settings.DEBUG)
 
@@ -19,21 +21,12 @@ app.add_middleware(
 # Set up JWT authentication
 bearer_scheme = HTTPBearer()
 
-# Include the crocodile router
-app.include_router(router)
+# Include the crocodile router with authentication
+app.include_router(router, dependencies=[Depends(verify_token)])
 
 @app.get("/protected")
-def protected_route(token: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
-    try:
-        payload = jwt.decode(token.credentials, settings.JWT_SECRET_KEY, algorithms=["HS256"])
-    except JWTError:    
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return {"message": f"Hello {payload['email']}"}
-
+def protected_route(token_payload: Dict[str, Any] = Depends(verify_token)):
+    return {"message": f"Hello {token_payload['email']}"}
 
 @app.get("/")
 def read_root():

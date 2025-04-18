@@ -1,4 +1,3 @@
-from typing import Dict, Any
 from config import settings
 from endpoints.crocodile_api import router
 from dependencies import verify_token
@@ -20,7 +19,7 @@ app.add_middleware(
 app.include_router(router, dependencies=[Depends(verify_token)])
 
 @app.get("/protected")
-def protected_route(token_payload: Dict[str, Any] = Depends(verify_token)):
+def protected_route(token_payload: str = Depends(verify_token)):
     return {"message": f"Hello {token_payload['email']}"}
 
 @app.get("/")

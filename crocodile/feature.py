@@ -47,6 +47,7 @@ def map_nertype_to_numeric(nertype: str) -> int:
 class Feature:
     def __init__(
         self,
+        client_id: str,
         dataset_name: str,
         table_name: str,
         top_n_for_type_freq: int = 5,
@@ -55,6 +56,7 @@ class Feature:
     ):
         self.dataset_name = dataset_name
         self.table_name = table_name
+        self.client_id = client_id  # Store client_id
         self.top_n_for_type_freq = top_n_for_type_freq
         self.selected_features = features or DEFAULT_FEATURES
         self._db_name = kwargs.pop("db_name", "crocodile_db")
@@ -178,6 +180,7 @@ class Feature:
 
         # Base query to find documents with candidates
         match_query = {
+            "client_id": self.client_id,
             "dataset_name": self.dataset_name,
             "table_name": self.table_name,
             "status": "DONE",

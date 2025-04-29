@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     MONGO_URI: str = "mongodb://localhost:27017"
     MONGO_SERVER_PORT: int = 27017
     FASTAPI_SERVER_PORT: int = 8000
-    JWT_SECRET_KEY: str = "secret"
+    JWT_SECRET_KEY: str 
 
     class Config:
         env_file = str(Path(__file__).parent.parent / ".env")  # Adjust path to .env

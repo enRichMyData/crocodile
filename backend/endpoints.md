@@ -2,6 +2,18 @@
 
 This document provides information about the available endpoints in the Crocodile API and how to use them. All endpoints require authentication via a JWT token passed in the request header.
 
+## Authentication
+
+All endpoints in the Crocodile API require a valid JWT token for authentication. The token must be included in the request header as follows:
+
+```
+Authorization: Bearer <your_jwt_token>
+```
+
+The JWT token contains information about the user and is verified on each request. Tokens have an expiration time after which they become invalid and require regeneration.
+
+A token generation script (`scripts/generate_token.py`) is provided for development and testing purposes. See the script for usage instructions.
+
 ## Datasets Management
 
 ### List Datasets
@@ -391,3 +403,4 @@ curl -H "Authorization: Bearer {token}" "http://localhost:8000/datasets?limit=5&
 
 # Previous page (using prev_cursor)
 curl -H "Authorization: Bearer {token}" "http://localhost:8000/datasets?limit=5&prev_cursor=60ab1234c1d8a45678901234"
+```

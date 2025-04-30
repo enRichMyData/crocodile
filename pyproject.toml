@@ -39,7 +39,8 @@ app = [
     "pydantic<3",
     "pydantic-settings==2.8.1",
     "uvicorn==0.34",
-    "python-multipart== 0.0.20"
+    "python-multipart== 0.0.20",
+    "python-jose==3.4.0"
 ]
 dev = [
     "flake8==4.0.1",

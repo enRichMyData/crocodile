@@ -17,10 +17,31 @@ services:
     ports:
       - "${FASTAPI_SERVER_PORT:-8000}:8000"  # Default to 8000 if not set
     volumes:
-    # Mount the app directory to the container
+      # Mount the app directory to the container
       - ./backend/app:/app
       - ./crocodile:/app/crocodile
       - ./backend/scripts:/app/scripts
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     env_file:
       - .env  # Load environment variables from .env file
+
+  # Development-only Jupyter service for debugging
+  jupyter:
+    build: .
+    container_name: crocodile_jupyter
+    ports:
+      - "${JUPYTER_SERVER_PORT:-8888}:8888"  # Default to 8888 if not set
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./crocodile:/home/jovyan/work/crocodile
+      - ./tables:/home/jovyan/work/tables
+      - ./training/:/home/jovyan/work/training
+      - ./backend:/home/jovyan/work/backend  # Include backend code for debugging
+    command: start-notebook.sh --NotebookApp.token='' --NotebookApp.password=''
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+    env_file:
+      - .env  # Load environment variables from .env file
+    depends_on:
+      - mongodb
+      - fastapi

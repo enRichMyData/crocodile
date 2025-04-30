@@ -17,7 +17,6 @@ app.add_middleware(
 # Include the crocodile router
 app.include_router(router)
 
-
 @app.get("/")
 def read_root():
     return {

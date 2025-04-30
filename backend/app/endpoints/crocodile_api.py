@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 from bson import ObjectId
-from dependencies import get_crocodile_db, get_db
+from dependencies import get_crocodile_db, get_db, verify_token
 from endpoints.imdb_example import IMDB_EXAMPLE
 from fastapi import (
     APIRouter,
@@ -33,7 +33,6 @@ from crocodile import Crocodile
 
 router = APIRouter()
 
-
 class TableUpload(BaseModel):
     table_name: str
     header: List[str]
@@ -41,21 +40,19 @@ class TableUpload(BaseModel):
     classified_columns: Optional[Dict[str, Dict[str, str]]] = {}
     data: List[dict]
 
-
 @router.post("/datasets/{datasetName}/tables/json", status_code=status.HTTP_201_CREATED)
 def add_table(
     datasetName: str,
     table_upload: TableUpload = Body(..., example=IMDB_EXAMPLE),
     background_tasks: BackgroundTasks = None,
-    user_id: str = Query(None),
+    token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
 ):
     """
     Add a new table to an existing dataset and trigger Crocodile processing in the background.
     """
     # Require user_id for data isolation
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id is required")
+    user_id = token_payload.get("email")
 
     try:
         # Convert data to DataFrame for classification if needed
@@ -124,13 +121,11 @@ def add_table(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-
 def parse_json_column_classification(column_classification: str = Form("")) -> Optional[dict]:
     # Parse the form field; return None if empty
     if not column_classification:
         return None
     return json.loads(column_classification)
-
 
 @router.post("/datasets/{datasetName}/tables/csv", status_code=status.HTTP_201_CREATED)
 def add_table_csv(
@@ -139,15 +134,13 @@ def add_table_csv(
     file: UploadFile = File(...),
     column_classification: Optional[dict] = Depends(parse_json_column_classification),
     background_tasks: BackgroundTasks = None,
-    user_id: str = Query(None),
+    token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
 ):
     """
     Add a new table from CSV file to an existing dataset and trigger Crocodile processing.
     """
-    # Require user_id for data isolation
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id is required")
+    user_id = token_payload.get("email")
 
     try:
         # Read CSV file and convert NaN values to None
@@ -216,22 +209,19 @@ def add_table_csv(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
 
-
 @router.get("/datasets")
 def get_datasets(
     limit: int = Query(10),
     next_cursor: Optional[str] = Query(None),
     prev_cursor: Optional[str] = Query(None),
-    user_id: str = Query(None),  # Default parameters are fine here
+    token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
 ):
     """
     Get datasets with bi-directional keyset pagination, using ObjectId as the cursor.
     Supports both forward (next_cursor) and backward (prev_cursor) navigation.
     """
-    # Require user_id for data isolation
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id is required")
+    user_id = token_payload.get("email")
 
     # Determine pagination direction and set up query
     query_filter = {"user_id": user_id}  # user_id is already first
@@ -309,22 +299,19 @@ def get_datasets(
         "pagination": {"next_cursor": next_cursor, "prev_cursor": prev_cursor},
     }
 
-
 @router.get("/datasets/{dataset_name}/tables")
 def get_tables(
     dataset_name: str,
     limit: int = Query(10),
     next_cursor: Optional[str] = Query(None),
     prev_cursor: Optional[str] = Query(None),
-    user_id: str = Query(None),  # Moved after required parameters
+    token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
 ):
     """
     Get tables for a dataset with bi-directional keyset pagination.
     """
-    # Require user_id for data isolation
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id is required")
+    user_id = token_payload.get("email")
 
     # Ensure dataset exists
     if not db.datasets.find_one(
@@ -418,7 +405,6 @@ def get_tables(
         "pagination": {"next_cursor": next_cursor, "prev_cursor": prev_cursor},
     }
 
-
 @router.get("/datasets/{dataset_name}/tables/{table_name}")
 def get_table(
     dataset_name: str,
@@ -426,7 +412,7 @@ def get_table(
     limit: int = Query(10),
     next_cursor: Optional[str] = Query(None),
     prev_cursor: Optional[str] = Query(None),
-    user_id: str = Query(None),  # Moved after required parameters
+    token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
     crocodile_db: Database = Depends(get_crocodile_db),
 ):
@@ -434,9 +420,7 @@ def get_table(
     Get table data with bi-directional keyset pagination.
     First try to get data from backend database, fallback to crocodile_db if needed.
     """
-    # Require user_id for data isolation
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id is required")
+    user_id = token_payload.get("email")
 
     # Check dataset
     if not db.datasets.find_one(
@@ -607,19 +591,16 @@ def get_table(
 
     return response_data
 
-
 @router.post("/datasets", status_code=status.HTTP_201_CREATED)
 def create_dataset(
     dataset_data: dict = Body(..., example={"dataset_name": "test"}),  # updated example key
-    user_id: str = Query(None),  # Moved after required parameters
+    token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
 ):
     """
     Create a new dataset.
     """
-    # Require user_id for data isolation
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id is required")
+    user_id = token_payload.get("email")
 
     existing = db.datasets.find_one(
         {"user_id": user_id, "dataset_name": dataset_data.get("dataset_name")}
@@ -643,20 +624,17 @@ def create_dataset(
 
     return {"message": "Dataset created successfully", "dataset": dataset_data}
 
-
 @router.delete("/datasets/{dataset_name}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_dataset(
     dataset_name: str,
-    user_id: str = Query(None),  # Moved after required parameters
+    token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
     crocodile_db: Database = Depends(get_crocodile_db),
 ):
     """
     Delete a dataset by name.
     """
-    # Require user_id for data isolation
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id is required")
+    user_id = token_payload.get("email")
 
     # Check existence using uniform dataset key
     existing = db.datasets.find_one(
@@ -676,23 +654,18 @@ def delete_dataset(
 
     return None
 
-
-@router.delete(
-    "/datasets/{dataset_name}/tables/{table_name}", status_code=status.HTTP_204_NO_CONTENT
-)
+@router.delete("/datasets/{dataset_name}/tables/{table_name}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_table(
     dataset_name: str,
     table_name: str,
-    user_id: str = Query(None),  # Moved after required parameters
+    token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
     crocodile_db: Database = Depends(get_crocodile_db),
 ):
     """
     Delete a table by name within a dataset.
     """
-    # Require user_id for data isolation
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id is required")
+    user_id = token_payload.get("email")
 
     # Ensure dataset exists using uniform dataset key
     dataset = db.datasets.find_one(
@@ -729,13 +702,11 @@ def delete_table(
 
     return None
 
-
 class EntityType(BaseModel):
     """Type information for an entity"""
 
     id: str
     name: str
-
 
 class EntityCandidate(BaseModel):
     """Complete entity candidate information without matching status"""
@@ -745,7 +716,6 @@ class EntityCandidate(BaseModel):
     description: str
     types: List[EntityType]
     # Note: score and match are handled at the annotation level
-
 
 class AnnotationUpdate(BaseModel):
     """Request model for updating an annotation."""
@@ -757,7 +727,6 @@ class AnnotationUpdate(BaseModel):
     # If providing a new candidate not in the existing list
     candidate_info: Optional[EntityCandidate] = None
 
-
 @router.put("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}")
 def update_annotation(
     dataset_name: str,
@@ -765,7 +734,7 @@ def update_annotation(
     row_id: int,
     column_id: int,
     annotation: AnnotationUpdate,
-    user_id: str = Query(None),
+    token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),  # Only using the backend database now
 ):
     """
@@ -775,9 +744,7 @@ def update_annotation(
     The annotation can either reference an existing candidate by ID or provide
     a completely new candidate that doesn't exist in the current list.
     """
-    # Require user_id for data isolation
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id is required")
+    user_id = token_payload.get("email")
 
     # Check if dataset and table exist
     if not db.datasets.find_one({"user_id": user_id, "dataset_name": dataset_name}):
@@ -910,26 +877,21 @@ def update_annotation(
         }
     )
 
-
-@router.delete(
-    "/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}"
-)
+@router.delete("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}")
 def delete_candidate(
     dataset_name: str,
     table_name: str,
     row_id: int,
     column_id: int,
     entity_id: str,
-    user_id: str = Query(None),
+    token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),  # Only using the backend database now
 ):
     """
     Delete a specific candidate from the entity linking results for a cell.
     This allows users to remove unwanted or incorrect candidate entities.
     """
-    # Require user_id for data isolation
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id is required")
+    user_id = token_payload.get("email")
 
     # Check if dataset and table exist
     if not db.datasets.find_one({"user_id": user_id, "dataset_name": dataset_name}):

@@ -306,6 +306,42 @@ curl -X DELETE \
   "http://localhost:8000/datasets/my_dataset/tables/movies"
 ```
 
+### Get Table Status (Streaming)
+
+```
+GET /datasets/{dataset_name}/tables/{table_name}/status
+```
+
+Streams the current processing status of a table using Server-Sent Events (SSE). This is useful for monitoring the progress of Crocodile processing after adding a table.
+
+**Example:**
+```bash
+curl -N \
+  -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies/status"
+```
+
+**Response (SSE Stream):**
+The server will continuously send messages in the following format:
+```
+data: {"rows": 50, "pending": 10, "pending_percent": "20.00%", "done_percent": "80.00%"}
+
+data: {"rows": 50, "pending": 5, "pending_percent": "10.00%", "done_percent": "90.00%"}
+
+...
+
+data: {"rows": 50, "pending": 0, "pending_percent": "0.00%", "done_percent": "100.00%"}
+```
+- `rows`: Total number of rows in the table.
+- `pending`: Number of rows still being processed.
+- `pending_percent`: Percentage of rows pending.
+- `done_percent`: Percentage of rows completed.
+
+The stream ends when `pending` reaches 0. If an error occurs (e.g., table not found), an error message will be sent:
+```
+data: {"status": "ERROR", "detail": "Table movies not found in dataset my_dataset"}
+```
+
 ## Annotations Management
 
 ### Update Annotation

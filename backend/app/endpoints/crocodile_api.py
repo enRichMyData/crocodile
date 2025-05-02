@@ -1,9 +1,9 @@
 import json
 import os
 import time
+import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional
-
 import numpy as np
 import pandas as pd
 from bson import ObjectId
@@ -21,9 +21,11 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
+from pymongo import MongoClient
 from services.data_service import DataService
 from services.result_sync import ResultSyncService
 from services.utils import sanitize_for_json
@@ -590,6 +592,80 @@ def get_table(
     response_data = sanitize_for_json(response_data)
 
     return response_data
+
+async def get_table_status(
+    dataset_name: str,
+    table_name: str,
+    token_payload: str,
+):
+    """
+    Get the current status of a specific table (streaming).
+    Manages its own DB connection for the stream duration.
+    """
+    user_id = token_payload.get("email")
+    client = None  # Initialize client to None
+    try:
+        # Create a new client specifically for this stream
+        client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
+        db = client["crocodile_backend_db"]
+
+        # Check dataset
+        if not db.datasets.find_one(
+            {"user_id": user_id, "dataset_name": dataset_name}
+        ):
+            yield f"data: {json.dumps({'status': 'ERROR', 'detail': f'Dataset {dataset_name} not found'})}\n\n"
+            return  # Stop the generator
+
+        # Check table
+        table = db.tables.find_one(
+            {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+        )
+        if not table:
+            yield f"data: {json.dumps({'status': 'ERROR', 'detail': f'Table {table_name} not found in dataset {dataset_name}'})}\n\n"
+            return  # Stop the generator
+
+        # Check if there are documents with status or ml_status = TODO or DOING
+        table_status_filter = {
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "$or": [
+                {"status": {"$in": ["TODO", "DOING"]}},
+                {"ml_status": {"$in": ["TODO", "DOING"]}},
+            ],
+        }
+
+        while True:  # Loop indefinitely until explicitly broken or returned
+            # Check databases for pending documents
+            pending_docs_count = db.input_data.count_documents(table_status_filter)
+
+            if pending_docs_count == 0:
+                yield f"data: {json.dumps({'status': 'DONE', 'pending_docs_count': 0})}\n\n"
+                break  # Exit the loop and finish the stream
+
+            # Send the current status
+            yield f"data: {json.dumps({'status': 'DOING', 'pending_docs_count': pending_docs_count})}\n\n"
+            await asyncio.sleep(1)  # Check every second
+
+    except Exception as e:
+        yield f"data: {json.dumps({'status': 'ERROR', 'detail': str(e)})}\n\n"
+    finally:
+        if client:
+            client.close()
+
+@router.get("/datasets/{dataset_name}/tables/{table_name}/status")
+async def stream_table_status(
+    dataset_name: str,
+    table_name: str,
+    token_payload: str = Depends(verify_token),
+):
+    """
+    Stream the current status of a specific table (streaming).
+    """
+    return StreamingResponse(
+        get_table_status(dataset_name, table_name, token_payload),
+        media_type="text/event-stream",
+    )
 
 @router.post("/datasets", status_code=status.HTTP_201_CREATED)
 def create_dataset(

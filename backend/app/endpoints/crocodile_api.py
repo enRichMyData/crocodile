@@ -635,16 +635,21 @@ async def get_table_status(
             ],
         }
 
+        rows = table.get("total_rows", 0)
+
         while True:  # Loop indefinitely until explicitly broken or returned
             # Check databases for pending documents
             pending_docs_count = db.input_data.count_documents(table_status_filter)
 
-            if pending_docs_count == 0:
-                yield f"data: {json.dumps({'status': 'DONE', 'pending_docs_count': 0})}\n\n"
-                break  # Exit the loop and finish the stream
-
             # Send the current status
-            yield f"data: {json.dumps({'status': 'DOING', 'pending_docs_count': pending_docs_count})}\n\n"
+            pending_percent = (pending_docs_count / rows) * 100
+            done_percent = f"{100 - pending_percent:.2f}%"
+            pending_percent = f"{pending_percent:.2f}%"
+            yield f"data: {json.dumps({'rows': rows, 'pending': pending_docs_count, 'pending_percent': pending_percent, 'done_percent': done_percent})}\n\n"
+
+            if pending_docs_count == 0:
+                break  # Exit the loop and finish the stream
+            
             await asyncio.sleep(1)  # Check every second
 
     except Exception as e:

@@ -166,11 +166,22 @@ Retrieves table data with rows, columns and linked entities with pagination.
 - `limit` (int, default=10): Maximum number of rows to return
 - `next_cursor` (string, optional): Cursor for forward pagination
 - `prev_cursor` (string, optional): Cursor for backward pagination
+- `search` (string, optional): Text to match in cell values
+- `column` (integer, optional): Restrict text search to a specific column index
 
 **Example:**
 ```bash
+# Basic table data retrieval
 curl -H "Authorization: Bearer {your_token}" \
   "http://localhost:8000/datasets/my_dataset/tables/movies?limit=5"
+
+# Search for movies with "Godfather" in any column
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?search=Godfather"
+
+# Search for movies with "1972" but only in column 2 (year)
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?search=1972&column=2"
 ```
 
 **Response:**

@@ -7,6 +7,7 @@ from pymongo.collection import Collection
 from services.utils import log_error, log_info
 
 from crocodile import CrocodileResultFetcher
+from dependencies import es, ES_INDEX
 
 
 class ResultSyncService:
@@ -194,6 +195,9 @@ class ResultSyncService:
                         time.sleep(5)  # Wait a bit before trying another batch
                         continue
 
+                    # Prepare bulk operations for Elasticsearch updates
+                    es_operations = []
+                    
                     # Process each result
                     for result in results:
                         row_id = result.get("row_id")
@@ -223,17 +227,33 @@ class ResultSyncService:
                             },
                             upsert=False,
                         )
+                        
+                        # Prepare Elasticsearch update
+                        doc_id = f"{user_id}_{dataset_name}_{table_name}_{row_id}"
+                        es_operations.append({"update": {"_index": ES_INDEX, "_id": doc_id}})
+                        es_operations.append({
+                            "doc": {
+                                "status": status,
+                                "ml_status": ml_status,
+                                "el_results": el_results,
+                                "last_updated": datetime.now().isoformat()
+                            }
+                        })
 
                         # Count as completed if done
                         if status == "DONE" and ml_status == "DONE":
                             completed_count += 1
+                    
+                    # Execute bulk ES updates if we have operations
+                    if es_operations:
+                        es.bulk(body=es_operations)
+                        log_info(f"Updated {len(es_operations)//2} documents in Elasticsearch")
 
                     # We made progress
                     consecutive_failures = 0
                     last_progress_time = time.time()
                     log_info(
-                        f"""Processed batch with {len(results)} results,
-                        completed {completed_count} rows so far"""
+                        f"Processed batch with {len(results)} results, completed {completed_count} rows so far"
                     )
 
                 except Exception as e:

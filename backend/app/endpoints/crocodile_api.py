@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 from bson import ObjectId
-from dependencies import get_crocodile_db, get_db, verify_token
+from dependencies import get_crocodile_db, get_db, verify_token, es, ES_INDEX
 from endpoints.imdb_example import IMDB_EXAMPLE
 from fastapi import (
     APIRouter,
@@ -412,6 +412,8 @@ def get_table(
     limit: int = Query(10),
     next_cursor: Optional[str] = Query(None),
     prev_cursor: Optional[str] = Query(None),
+    search: Optional[str] = Query(None, description="Text to match in cell values"),
+    column: Optional[int] = Query(None, description="Restrict match to this column index"),
     token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
     crocodile_db: Database = Depends(get_crocodile_db),
@@ -439,7 +441,81 @@ def get_table(
 
     header = table.get("header", [])
 
-    # Determine pagination direction
+    if search:
+        filters = [
+            {"term": {"user_id": user_id}},
+            {"term": {"dataset_name": dataset_name}},
+            {"term": {"table_name": table_name}},
+            {
+                "nested": {
+                    "path": "data",
+                    "query": {
+                        "bool": {
+                            "must": [{"match": {"data.value": search}}],
+                            **(
+                                {"filter": [{"term": {"data.col_index": column}}]}
+                                if column is not None
+                                else {}
+                            ),
+                        }
+                    },
+                }
+            },
+        ]
+        sort_order = "asc"
+        if next_cursor and not prev_cursor:
+            filters.append({"range": {"row_id": {"gt": int(next_cursor)}}})
+        elif prev_cursor and not next_cursor:
+            filters.append({"range": {"row_id": {"lt": int(prev_cursor)}}})
+            sort_order = "desc"
+        body = {
+            "query": {"bool": {"filter": filters}},
+            "sort": [{"row_id": {"order": sort_order}}],
+            "size": limit + 1,
+        }
+        res = es.search(index=ES_INDEX, body=body)
+        hits = res["hits"]["hits"]
+        has_more = len(hits) > limit
+        hits = hits[:limit]
+        if sort_order == "desc":
+            hits.reverse()
+
+        # ES‐only cursors
+        new_next = new_prev = None
+        if hits:
+            first_id = hits[0]["_source"]["row_id"]
+            last_id = hits[-1]["_source"]["row_id"]
+            if sort_order == "asc":
+                new_next = str(last_id) if has_more else None
+                new_prev = str(first_id) if next_cursor else None
+            else:
+                new_next = str(last_id) if prev_cursor else None
+                new_prev = str(first_id) if has_more else None
+
+        # Build rows directly from ES
+        rows_formatted = []
+        for hit in hits:
+            src = hit["_source"]
+            linked_entities = []
+            for idx, cands in src.get("el_results", {}).items():
+                linked_entities.append({"idColumn": int(idx), "candidates": cands})
+            rows_formatted.append({
+                "idRow": src["row_id"],
+                "data": [d["value"] for d in src["data"]],
+                "linked_entities": linked_entities,
+            })
+
+        return {
+            "data": {
+                "datasetName": dataset_name,
+                "tableName": table_name,
+                "status": "DONE",
+                "header": header,
+                "rows": rows_formatted,
+            },
+            "pagination": {"next_cursor": new_next, "prev_cursor": new_prev},
+        }
+
     query_filter = {
         "user_id": user_id,
         "dataset_name": dataset_name,
@@ -465,11 +541,9 @@ def get_table(
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid cursor value")
 
-    # First try to find rows in the backend database
     results = db.input_data.find(query_filter).sort("row_id", sort_direction).limit(limit + 1)
     raw_rows = list(results)
 
-    # If no rows found in backend db, fallback to crocodile_db
     if not raw_rows:
         results = (
             crocodile_db.input_data.find(query_filter)
@@ -478,30 +552,22 @@ def get_table(
         )
         raw_rows = list(results)
 
-    # Handle pagination metadata
     has_more = len(raw_rows) > limit
     if has_more:
-        raw_rows = raw_rows[:limit]  # Remove the extra item
+        raw_rows = raw_rows[:limit]
 
-    # If we did backward pagination, reverse the results
     if prev_cursor:
         raw_rows.reverse()
 
-    # Get cursors for next and previous pages
     next_cursor = None
     prev_cursor = None
 
     if raw_rows:
-        # For previous cursor, we need the ID of the first item
-        # But only if we're not on the first page
-        if not query_filter.get("_id", {}).get("$gt"):  # No forward pagination filter
-            # Check if there are documents before the current page
-            if prev_cursor:  # We came backwards, so there are previous items
+        if not query_filter.get("_id", {}).get("$gt"):
+            if prev_cursor:
                 prev_cursor = str(raw_rows[0]["_id"])
             else:
-                # We're on first page - check if this is a fresh query or already paginated
                 first_id = raw_rows[0]["_id"]
-                # Check both databases for previous pages
                 prev_docs_count = db.input_data.count_documents(
                     {
                         "user_id": user_id,
@@ -521,19 +587,14 @@ def get_table(
                     )
                 if prev_docs_count > 0:
                     prev_cursor = str(first_id)
-                # Otherwise prev_cursor remains None (we're truly on first page)
         else:
-            # We came from a next_cursor, there are previous items
             prev_cursor = str(raw_rows[0]["_id"])
 
-        # For next cursor, we need the ID of the last item
-        # But only if we have more items or we came backwards
         if has_more:
             next_cursor = str(raw_rows[-1]["_id"])
-        elif query_filter.get("_id", {}).get("$lt"):  # We came backwards
+        elif query_filter.get("_id", {}).get("$lt"):
             next_cursor = str(raw_rows[-1]["_id"])
 
-    # Check if there are documents with status or ml_status = TODO or DOING
     table_status_filter = {
         "user_id": user_id,
         "dataset_name": dataset_name,
@@ -544,7 +605,6 @@ def get_table(
         ],
     }
 
-    # Check both databases for pending documents
     pending_docs_count = db.input_data.count_documents(table_status_filter)
     if pending_docs_count == 0:
         pending_docs_count = crocodile_db.input_data.count_documents(table_status_filter)
@@ -553,17 +613,14 @@ def get_table(
     if pending_docs_count == 0:
         status = "DONE"
 
-    # Build a cleaned-up response with *all* candidates
     rows_formatted = []
     for row in raw_rows:
         linked_entities = []
         el_results = row.get("el_results", {})
 
-        # For each column, gather all candidates
         for col_index in range(len(header)):
             candidates = el_results.get(str(col_index), [])
             if candidates:
-                # Sanitize candidate data to handle any special float values
                 sanitized_candidates = sanitize_for_json(candidates)
                 linked_entities.append({"idColumn": col_index, "candidates": sanitized_candidates})
 
@@ -586,7 +643,6 @@ def get_table(
         "pagination": {"next_cursor": next_cursor, "prev_cursor": prev_cursor},
     }
 
-    # Final sanity check - ensure the entire response is safe for JSON serialization
     response_data = sanitize_for_json(response_data)
 
     return response_data

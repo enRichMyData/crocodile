@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     MONGO_SERVER_PORT: int = 27017
     FASTAPI_SERVER_PORT: int = 8000
     JWT_SECRET_KEY: str 
+    ELASTIC_PASSWORD: str = ""  # Default empty, override in .env
 
     class Config:
         env_file = str(Path(__file__).parent.parent / ".env")  # Adjust path to .env

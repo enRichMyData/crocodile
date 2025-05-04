@@ -7,6 +7,7 @@ from column_classifier import ColumnClassifier
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 from services.utils import format_classification, log_error, log_info
+from dependencies import es, ES_INDEX
 
 
 class DataService:
@@ -187,9 +188,41 @@ class DataService:
         if input_data:
             try:
                 db.input_data.insert_many(input_data)
-                log_info(
-                    f"Stored {len(input_data)} rows in database for {dataset_name}/{table_name}"
-                )
+                log_info(f"Stored {len(input_data)} rows in database for {dataset_name}/{table_name}")
+                
+                # Index into Elasticsearch
+                es_operations = []
+                for doc in input_data:
+                    # Create an ES-friendly document ID that ensures uniqueness
+                    doc_id = f"{user_id}_{dataset_name}_{table_name}_{doc['row_id']}"
+                    
+                    # Prepare the document for ES
+                    es_doc = {
+                        "user_id": doc["user_id"],
+                        "dataset_name": doc["dataset_name"],
+                        "table_name": doc["table_name"],
+                        "row_id": doc["row_id"],
+                        "status": doc["status"],
+                        "ml_status": doc["ml_status"],
+                        "manually_annotated": doc["manually_annotated"],
+                        "created_at": doc["created_at"].isoformat(),
+                        "last_updated": doc["created_at"].isoformat(),
+                        "data": [
+                            {"col_index": idx, "value": str(val) if val is not None else ""}
+                            for idx, val in enumerate(doc["data"])
+                        ],
+                        "el_results": {}  # Initially empty, will be populated later
+                    }
+                    
+                    # Add to bulk operations list
+                    es_operations.append({"index": {"_index": ES_INDEX, "_id": doc_id}})
+                    es_operations.append(es_doc)
+                
+                if es_operations:
+                    # Execute bulk indexing in ES
+                    es.bulk(index=ES_INDEX, body=es_operations)
+                    log_info(f"Indexed {len(input_data)} rows in Elasticsearch for {dataset_name}/{table_name}")
+                
             except Exception as e:
                 log_error(f"Error storing rows in database: {str(e)}", e)
                 # We'll continue anyway since Crocodile will handle processing

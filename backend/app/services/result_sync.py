@@ -1,13 +1,14 @@
 import time
 from datetime import datetime
 from typing import Any, Dict, List
+from collections import defaultdict, Counter
 
 from pymongo import MongoClient
 from pymongo.collection import Collection
 from services.utils import log_error, log_info
+from dependencies import es, ES_INDEX
 
 from crocodile import CrocodileResultFetcher
-from dependencies import es, ES_INDEX
 
 
 class ResultSyncService:
@@ -167,6 +168,9 @@ class ResultSyncService:
             consecutive_failures = 0
             max_failures = 5  # Safety limit for consecutive failures
 
+            # Dictionary to collect type frequencies by column
+            column_type_frequencies = defaultdict(Counter)
+
             # Process all rows in batches, focusing on incomplete ones
             input_collection = db.input_data
 
@@ -197,7 +201,7 @@ class ResultSyncService:
 
                     # Prepare bulk operations for Elasticsearch updates
                     es_operations = []
-                    
+
                     # Process each result
                     for result in results:
                         row_id = result.get("row_id")
@@ -227,27 +231,72 @@ class ResultSyncService:
                             },
                             upsert=False,
                         )
-                        
-                        # Prepare Elasticsearch update
+
+                        # Update type information in ES and collect type frequencies
                         doc_id = f"{user_id}_{dataset_name}_{table_name}_{row_id}"
-                        es_operations.append({"update": {"_index": ES_INDEX, "_id": doc_id}})
-                        es_operations.append({
-                            "doc": {
-                                "status": status,
-                                "ml_status": ml_status,
-                                "el_results": el_results,
-                                "last_updated": datetime.now().isoformat()
+
+                        # Prepare data updates with types from each column's top candidate
+                        data_updates = []
+
+                        for col_idx, candidates in el_results.items():
+                            if candidates and len(candidates) > 0:
+                                # Get the top candidate (winning candidate)
+                                top_candidate = candidates[0]
+
+                                # Extract all types from the top candidate
+                                entity_types = []
+                                if "types" in top_candidate:
+                                    for type_obj in top_candidate["types"]:
+                                        if isinstance(type_obj, dict) and "name" in type_obj:
+                                            type_name = type_obj["name"]
+                                            entity_types.append(type_name)
+                                            # Count for type frequencies
+                                            column_type_frequencies[col_idx][type_name] += 1
+
+                                # Only add update if we found types
+                                if entity_types:
+                                    data_updates.append({
+                                        "col_index": int(col_idx),
+                                        "types": entity_types
+                                    })
+
+                        # Create an update script if we have any type data
+                        if data_updates:
+                            # Use a script to update only the types field for matching columns
+                            update_script = {
+                                "script": {
+                                    "source": """
+                                    for (def update : params.updates) {
+                                        for (int i = 0; i < ctx._source.data.length; i++) {
+                                            if (ctx._source.data[i].col_index == update.col_index) {
+                                                ctx._source.data[i].types = update.types;
+                                            }
+                                        }
+                                    }
+                                    """,
+                                    "params": {
+                                        "updates": data_updates
+                                    }
+                                }
                             }
-                        })
+
+                            es_operations.append({"update": {"_index": ES_INDEX, "_id": doc_id}})
+                            es_operations.append(update_script)
 
                         # Count as completed if done
                         if status == "DONE" and ml_status == "DONE":
                             completed_count += 1
-                    
+
                     # Execute bulk ES updates if we have operations
                     if es_operations:
-                        es.bulk(body=es_operations)
-                        log_info(f"Updated {len(es_operations)//2} documents in Elasticsearch")
+                        try:
+                            resp = es.bulk(body=es_operations, refresh=True)
+                            if resp.get("errors"):
+                                log_error(f"Errors in bulk update: {resp.get('items')}")
+                            else:
+                                log_info(f"Updated {len(es_operations)//2} documents with type information")
+                        except Exception as e:
+                            log_error(f"Failed to update ES: {str(e)}", e)
 
                     # We made progress
                     consecutive_failures = 0
@@ -272,6 +321,23 @@ class ResultSyncService:
 
                 # Brief pause between batches to avoid hammering the database
                 time.sleep(2)
+
+            # After processing all rows, update the table with type frequencies
+            if column_type_frequencies:
+                column_type_summary = {}
+                for col_idx, type_counter in column_type_frequencies.items():
+                    # Convert Counter to a sorted list of (type, frequency) tuples
+                    column_type_summary[str(col_idx)] = {
+                        "types": [{"name": type_name, "count": count}
+                                  for type_name, count in type_counter.most_common()]
+                    }
+
+                # Update the table document with type frequencies
+                db.tables.update_one(
+                    {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name},
+                    {"$set": {"column_types": column_type_summary}}
+                )
+                log_info(f"Updated table {dataset_name}/{table_name} with type frequencies")
 
             # Do a final count of completed rows to get accurate completion percentage
             final_completed_count = db.input_data.count_documents(

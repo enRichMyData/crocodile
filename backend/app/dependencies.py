@@ -20,24 +20,16 @@ ES_BODY = {
             "dataset_name": {"type": "keyword"},
             "table_name": {"type": "keyword"},
             "row_id": {"type": "integer"},
-            "status": {"type": "keyword"},
-            "ml_status": {"type": "keyword"},
-            "manually_annotated": {"type": "boolean"},
-            "created_at": {"type": "date"},
-            "last_updated": {"type": "date"},
             "data": {
                 "type": "nested",
                 "properties": {
                     "col_index": {"type": "integer"},
-                    "value": {"type": "text"},
-                    "confidence_score": {"type": "float"},
-                    "types": {"type": "keyword"},
-                },
-            },
-            # store full EL results as opaque JSON
-            "el_results": {"type": "object", "enabled": False},
-        },
-    },
+                    "value": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                    "types": {"type": "keyword"}  # Add types field for filtering
+                }
+            }
+        }
+    }
 }
 
 # Initialize ES client and ensure index exists

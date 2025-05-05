@@ -2,7 +2,7 @@ import json
 import os
 import time
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 import numpy as np
 import pandas as pd
@@ -413,14 +413,20 @@ def get_table(
     next_cursor: Optional[str] = Query(None),
     prev_cursor: Optional[str] = Query(None),
     search: Optional[str] = Query(None, description="Text to match in cell values"),
-    column: Optional[int] = Query(None, description="Restrict match to this column index"),
+    columns: Optional[List[int]] = Query(None, description="Restrict match to specific column indices"),
+    include_types: Optional[List[str]] = Query(None, description="Include rows with these entity types"),
+    exclude_types: Optional[List[str]] = Query(None, description="Exclude rows with these entity types"),
+    type_column: Optional[int] = Query(None, description="Column to apply type filters to"),
     token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
     crocodile_db: Database = Depends(get_crocodile_db),
 ):
     """
     Get table data with bi-directional keyset pagination.
-    First try to get data from backend database, fallback to crocodile_db if needed.
+    
+    - When search is provided, uses Elasticsearch for text search
+    - When types are provided, filters by entity types
+    - Can combine search and type filters for advanced filtering
     """
     user_id = token_payload.get("email")
 
@@ -441,81 +447,320 @@ def get_table(
 
     header = table.get("header", [])
 
-    if search:
+    # Get type information for the table
+    table_types = {}
+    if "column_types" in table:
+        table_types = table["column_types"]
+
+    # If search or type filters are provided, use Elasticsearch
+    if search is not None or include_types or exclude_types:
+        # Convert string cursors to integers for row_id-based pagination
+        next_cursor_int = prev_cursor_int = None
+        if next_cursor:
+            try:
+                next_cursor_int = int(next_cursor)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid next_cursor value")
+        if prev_cursor:
+            try:
+                prev_cursor_int = int(prev_cursor)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid prev_cursor value")
+
+        if next_cursor_int is not None and prev_cursor_int is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Only one of next_cursor or prev_cursor should be provided",
+            )
+            
+        # Build base query filters
         filters = [
             {"term": {"user_id": user_id}},
             {"term": {"dataset_name": dataset_name}},
             {"term": {"table_name": table_name}},
-            {
-                "nested": {
-                    "path": "data",
-                    "query": {
-                        "bool": {
-                            "must": [{"match": {"data.value": search}}],
-                            **(
-                                {"filter": [{"term": {"data.col_index": column}}]}
-                                if column is not None
-                                else {}
-                            ),
-                        }
-                    },
-                }
-            },
         ]
-        sort_order = "asc"
-        if next_cursor and not prev_cursor:
-            filters.append({"range": {"row_id": {"gt": int(next_cursor)}}})
-        elif prev_cursor and not next_cursor:
-            filters.append({"range": {"row_id": {"lt": int(prev_cursor)}}})
-            sort_order = "desc"
+        
+        # Add text search filter if provided
+        if search:
+            if columns:
+                # Search in specified columns only (OR condition across columns)
+                nested_queries = []
+                for col_idx in columns:
+                    nested_queries.append({
+                        "bool": {
+                            "must": [
+                                {"match": {"data.value": search}},
+                                {"term": {"data.col_index": col_idx}}
+                            ]
+                        }
+                    })
+                
+                filters.append({
+                    "nested": {
+                        "path": "data",
+                        "query": {"bool": {"should": nested_queries, "minimum_should_match": 1}}
+                    }
+                })
+            else:
+                # Search in all columns
+                filters.append({
+                    "nested": {
+                        "path": "data",
+                        "query": {"bool": {"must": [{"match": {"data.value": search}}]}}
+                    }
+                })
+        
+        # Add type filters if provided
+        if (include_types or exclude_types) and type_column is not None:
+            # Include specific types (ANY of the specified types must match)
+            if include_types:
+                type_filter_query = {
+                    "nested": {
+                        "path": "data",
+                        "query": {
+                            "bool": {
+                                "must": [
+                                    {"term": {"data.col_index": type_column}},
+                                    {"bool": {"should": [{"term": {"data.types": type_name}} for type_name in include_types]}}
+                                ]
+                            }
+                        }
+                    }
+                }
+                filters.append(type_filter_query)
+            
+            # Exclude specific types (NONE of the specified types should match)
+            if exclude_types:
+                for type_name in exclude_types:
+                    exclude_filter = {
+                        "bool": {
+                            "must_not": {
+                                "nested": {
+                                    "path": "data",
+                                    "query": {
+                                        "bool": {
+                                            "must": [
+                                                {"term": {"data.col_index": type_column}},
+                                                {"term": {"data.types": type_name}}
+                                            ]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    filters.append(exclude_filter)
+        
+        # Handle pagination direction
+        sort_order = "asc"  # Default is forward pagination
+        if next_cursor_int is not None:
+            filters.append({"range": {"row_id": {"gt": next_cursor_int}}})
+        elif prev_cursor_int is not None:
+            filters.append({"range": {"row_id": {"lt": prev_cursor_int}}})
+            sort_order = "desc"  # Backward pagination
+            
+        # Execute ES query
         body = {
             "query": {"bool": {"filter": filters}},
             "sort": [{"row_id": {"order": sort_order}}],
-            "size": limit + 1,
+            "_source": ["row_id"],  # Only need row_ids for MongoDB lookup
+            "size": limit + 1,      # Get one extra to check for more results
+            "track_total_hits": True  # Get accurate total hit count
         }
+        
+        # Execute search and get results
         res = es.search(index=ES_INDEX, body=body)
         hits = res["hits"]["hits"]
+        total_hits = res["hits"]["total"]["value"]
+        
+        # Determine if there are more results
         has_more = len(hits) > limit
-        hits = hits[:limit]
+        if has_more:
+            hits = hits[:limit]  # Remove the extra item
+            
+        # If we did backward pagination, we need to reverse the results
+        # to maintain consistent ordering for the user
         if sort_order == "desc":
             hits.reverse()
-
-        # ES‐only cursors
-        new_next = new_prev = None
+            
+        # Calculate next_cursor and prev_cursor for pagination
+        new_next_cursor = new_prev_cursor = None
+        
         if hits:
             first_id = hits[0]["_source"]["row_id"]
             last_id = hits[-1]["_source"]["row_id"]
+            
+            # For forward pagination or initial page
             if sort_order == "asc":
-                new_next = str(last_id) if has_more else None
-                new_prev = str(first_id) if next_cursor else None
-            else:
-                new_next = str(last_id) if prev_cursor else None
-                new_prev = str(first_id) if has_more else None
+                # If we have more results, provide next_cursor
+                if has_more:
+                    new_next_cursor = str(last_id)
+                
+                # For prev_cursor, we need to check if there are results before this page
+                if next_cursor_int is not None:
+                    # If we came via next_cursor, there must be previous results
+                    new_prev_cursor = str(first_id)
+                else:
+                    # Check if there are any results before our first row
+                    prev_check = {
+                        "query": {
+                            "bool": {
+                                "filter": [
+                                    {"term": {"user_id": user_id}},
+                                    {"term": {"dataset_name": dataset_name}},
+                                    {"term": {"table_name": table_name}},
+                                    {"range": {"row_id": {"lt": first_id}}}
+                                ]
+                            }
+                        },
+                        "size": 0
+                    }
+                    
+                    # Add search filter if needed
+                    if search:
+                        if columns:
+                            nested_queries = []
+                            for col_idx in columns:
+                                nested_queries.append({
+                                    "bool": {
+                                        "must": [
+                                            {"match": {"data.value": search}},
+                                            {"term": {"data.col_index": col_idx}}
+                                        ]
+                                    }
+                                })
+                            
+                            prev_check["query"]["bool"]["filter"].append({
+                                "nested": {
+                                    "path": "data",
+                                    "query": {"bool": {"should": nested_queries, "minimum_should_match": 1}}
+                                }
+                            })
+                        else:
+                            prev_check["query"]["bool"]["filter"].append({
+                                "nested": {
+                                    "path": "data",
+                                    "query": {"bool": {"must": [{"match": {"data.value": search}}]}}
+                                }
+                            })
+                    
+                    # Add type filters if needed
+                    if (include_types or exclude_types) and type_column is not None:
+                        # Include types filter
+                        if include_types:
+                            type_terms = [{"term": {"data.types": t}} for t in include_types]
+                            prev_check["query"]["bool"]["filter"].append({
+                                "nested": {
+                                    "path": "data",
+                                    "query": {
+                                        "bool": {
+                                            "must": [
+                                                {"term": {"data.col_index": type_column}},
+                                                {"bool": {"should": type_terms, "minimum_should_match": 1}}
+                                            ]
+                                        }
+                                    }
+                                }
+                            })
+                        
+                        # Exclude types filter
+                        if exclude_types:
+                            for type_name in exclude_types:
+                                prev_check["query"]["bool"]["filter"].append({
+                                    "bool": {
+                                        "must_not": {
+                                            "nested": {
+                                                "path": "data",
+                                                "query": {
+                                                    "bool": {
+                                                        "must": [
+                                                            {"term": {"data.col_index": type_column}},
+                                                            {"term": {"data.types": type_name}}
+                                                        ]
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                })
+                    
+                    prev_results = es.search(index=ES_INDEX, body=prev_check)
+                    if prev_results["hits"]["total"]["value"] > 0:
+                        new_prev_cursor = str(first_id)
 
-        # Build rows directly from ES
+        # Extract row IDs from search hits
+        row_ids = [hit["_source"]["row_id"] for hit in hits]
+        
+        # Fetch full data from MongoDB using the row_ids
+        mongo_query = {
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "row_id": {"$in": row_ids}
+        }
+        
+        # Try backend DB first, then crocodile DB if needed
+        raw_rows = list(db.input_data.find(mongo_query))
+        if not raw_rows:
+            raw_rows = list(crocodile_db.input_data.find(mongo_query))
+            
+        # Sort rows to match the order from ES results
+        row_id_to_idx = {row_id: i for i, row_id in enumerate(row_ids)}
+        raw_rows.sort(key=lambda row: row_id_to_idx.get(row.get("row_id"), float('inf')))
+
+        # Format rows
         rows_formatted = []
-        for hit in hits:
-            src = hit["_source"]
+        for row in raw_rows:
             linked_entities = []
-            for idx, cands in src.get("el_results", {}).items():
-                linked_entities.append({"idColumn": int(idx), "candidates": cands})
-            rows_formatted.append({
-                "idRow": src["row_id"],
-                "data": [d["value"] for d in src["data"]],
-                "linked_entities": linked_entities,
-            })
+            el_results = row.get("el_results", {})
+
+            for col_index in range(len(header)):
+                candidates = el_results.get(str(col_index), [])
+                if candidates:
+                    sanitized_candidates = sanitize_for_json(candidates)
+                    linked_entities.append({"idColumn": col_index, "candidates": sanitized_candidates})
+
+            rows_formatted.append(
+                {
+                    "idRow": row.get("row_id"),
+                    "data": sanitize_for_json(row.get("data", [])),
+                    "linked_entities": linked_entities,
+                }
+            )
+
+        # Determine table status
+        table_status_filter = {
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "$or": [
+                {"status": {"$in": ["TODO", "DOING"]}},
+                {"ml_status": {"$in": ["TODO", "DOING"]}},
+            ],
+        }
+
+        pending_docs_count = db.input_data.count_documents(table_status_filter)
+        if pending_docs_count == 0:
+            pending_docs_count = crocodile_db.input_data.count_documents(table_status_filter)
+
+        status = "DOING"
+        if pending_docs_count == 0:
+            status = "DONE"
 
         return {
             "data": {
                 "datasetName": dataset_name,
                 "tableName": table_name,
-                "status": "DONE",
+                "status": status,
                 "header": header,
                 "rows": rows_formatted,
+                "total_matches": total_hits,
+                "column_types": table_types,
             },
-            "pagination": {"next_cursor": new_next, "prev_cursor": new_prev},
+            "pagination": {"next_cursor": new_next_cursor, "prev_cursor": new_prev_cursor},
         }
 
+    # MongoDB-only logic when no search/type filters provided
     query_filter = {
         "user_id": user_id,
         "dataset_name": dataset_name,
@@ -642,6 +887,8 @@ def get_table(
         },
         "pagination": {"next_cursor": next_cursor, "prev_cursor": prev_cursor},
     }
+
+    response_data["data"]["column_types"] = table_types
 
     response_data = sanitize_for_json(response_data)
 

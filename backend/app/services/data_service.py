@@ -187,31 +187,31 @@ class DataService:
         # Store rows in database
         if input_data:
             try:
+                # Insert into MongoDB
                 db.input_data.insert_many(input_data)
                 log_info(f"Stored {len(input_data)} rows in database for {dataset_name}/{table_name}")
                 
-                # Index into Elasticsearch
+                # Index minimal data into Elasticsearch for search only
                 es_operations = []
                 for doc in input_data:
                     # Create an ES-friendly document ID that ensures uniqueness
                     doc_id = f"{user_id}_{dataset_name}_{table_name}_{doc['row_id']}"
                     
-                    # Prepare the document for ES
+                    # Prepare the document with only search-required fields
+                    # Types will be initially empty and updated when entity linking results arrive
                     es_doc = {
-                        "user_id": doc["user_id"],
-                        "dataset_name": doc["dataset_name"],
-                        "table_name": doc["table_name"],
+                        "user_id": user_id,
+                        "dataset_name": dataset_name,
+                        "table_name": table_name,
                         "row_id": doc["row_id"],
-                        "status": doc["status"],
-                        "ml_status": doc["ml_status"],
-                        "manually_annotated": doc["manually_annotated"],
-                        "created_at": doc["created_at"].isoformat(),
-                        "last_updated": doc["created_at"].isoformat(),
                         "data": [
-                            {"col_index": idx, "value": str(val) if val is not None else ""}
+                            {
+                                "col_index": idx, 
+                                "value": str(val) if val is not None else "",
+                                "types": []  # Initially empty, filled during result sync
+                            } 
                             for idx, val in enumerate(doc["data"])
                         ],
-                        "el_results": {}  # Initially empty, will be populated later
                     }
                     
                     # Add to bulk operations list
@@ -221,7 +221,7 @@ class DataService:
                 if es_operations:
                     # Execute bulk indexing in ES
                     es.bulk(index=ES_INDEX, body=es_operations)
-                    log_info(f"Indexed {len(input_data)} rows in Elasticsearch for {dataset_name}/{table_name}")
+                    log_info(f"Indexed {len(input_data)} rows in Elasticsearch for search")
                 
             except Exception as e:
                 log_error(f"Error storing rows in database: {str(e)}", e)

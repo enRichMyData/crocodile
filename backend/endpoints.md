@@ -167,7 +167,10 @@ Retrieves table data with rows, columns and linked entities with pagination.
 - `next_cursor` (string, optional): Cursor for forward pagination
 - `prev_cursor` (string, optional): Cursor for backward pagination
 - `search` (string, optional): Text to match in cell values
-- `column` (integer, optional): Restrict text search to a specific column index
+- `columns` (array of integers, optional): Restrict text search to specific column indices
+- `include_types` (array of strings, optional): Only include rows with specified entity types
+- `exclude_types` (array of strings, optional): Exclude rows with specified entity types
+- `type_column` (integer, optional): Column to apply type filters to
 
 **Example:**
 ```bash
@@ -181,7 +184,19 @@ curl -H "Authorization: Bearer {your_token}" \
 
 # Search for movies with "1972" but only in column 2 (year)
 curl -H "Authorization: Bearer {your_token}" \
-  "http://localhost:8000/datasets/my_dataset/tables/movies?search=1972&column=2"
+  "http://localhost:8000/datasets/my_dataset/tables/movies?search=1972&columns=[2]"
+
+# Get only films (exclude TV shows) in column 1 (title)
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?include_types=film&type_column=1"
+
+# Get all items except TV shows in column 1 (title)
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?exclude_types=television_show&type_column=1"
+
+# Combine search with type filtering
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?search=comedy&include_types=film&type_column=1"
 ```
 
 **Response:**
@@ -192,31 +207,22 @@ curl -H "Authorization: Bearer {your_token}" \
     "tableName": "movies",
     "status": "DONE",
     "header": ["id", "title", "year", "director"],
-    "rows": [
-      {
-        "idRow": 0,
-        "data": ["1", "The Godfather", "1972", "Francis Ford Coppola"],
-        "linked_entities": [
-          {
-            "idColumn": 1,
-            "candidates": [
-              {
-                "id": "Q47703",
-                "name": "The Godfather",
-                "description": "1972 film by Francis Ford Coppola",
-                "types": [
-                  {"id": "Q11424", "name": "film"}
-                ],
-                "match": true,
-                "score": 0.95
-              },
-              ...
-            ]
-          }
+    "rows": [...],
+    "column_types": {
+      "1": {
+        "types": [
+          {"name": "film", "count": 150},
+          {"name": "television_show", "count": 45},
+          {"name": "television_series", "count": 30}
         ]
       },
-      ...
-    ]
+      "3": {
+        "types": [
+          {"name": "human", "count": 220},
+          {"name": "film_director", "count": 195}
+        ]
+      }
+    }
   },
   "pagination": {
     "next_cursor": "60ab9012c1d8a45678901234",

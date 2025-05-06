@@ -20,12 +20,14 @@ ES_BODY = {
             "dataset_name": {"type": "keyword"},
             "table_name": {"type": "keyword"},
             "row_id": {"type": "integer"},
+            "avg_confidence": {"type": "float"},  # Row-level average confidence
             "data": {
                 "type": "nested",
                 "properties": {
                     "col_index": {"type": "integer"},
                     "value": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
-                    "types": {"type": "keyword"}  # Add types field for filtering
+                    "types": {"type": "keyword"},
+                    "confidence": {"type": "float"}  # Column-level confidence
                 }
             }
         }

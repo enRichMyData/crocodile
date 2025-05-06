@@ -213,7 +213,48 @@ class ResultSyncService:
                         if not el_results:
                             continue
 
-                        # Update the backend database
+                        # Calculate row-level average confidence score
+                        confidence_scores = []
+                        # Prepare data updates with types from each column's top candidate
+                        data_updates = []
+                        column_confidence_scores = {}  # Track confidence by column
+
+                        for col_idx, candidates in el_results.items():
+                            if candidates and len(candidates) > 0:
+                                # Get the top candidate and its confidence score
+                                top_candidate = candidates[0]
+                                confidence = top_candidate.get("score", 0.0)
+                                
+                                # Track score if not None for row average
+                                if confidence is not None:
+                                    confidence_scores.append(confidence)
+                                    column_confidence_scores[col_idx] = confidence
+                                
+                                # Extract all types from the top candidate
+                                entity_types = []
+                                if "types" in top_candidate:
+                                    for type_obj in top_candidate["types"]:
+                                        if isinstance(type_obj, dict) and "name" in type_obj:
+                                            type_name = type_obj["name"]
+                                            entity_types.append(type_name)
+                                            # Count for type frequencies
+                                            column_type_frequencies[col_idx][type_name] += 1
+
+                                # Prepare update with types and confidence score
+                                if entity_types or confidence is not None:
+                                    update = {
+                                        "col_index": int(col_idx),
+                                    }
+                                    if entity_types:
+                                        update["types"] = entity_types
+                                    if confidence is not None:
+                                        update["confidence"] = confidence
+                                    data_updates.append(update)
+
+                        # Calculate row average confidence
+                        row_avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
+
+                        # Update the backend database with confidence scores
                         db.input_data.update_one(
                             {
                                 "user_id": user_id,
@@ -227,6 +268,8 @@ class ResultSyncService:
                                     "ml_status": ml_status,
                                     "el_results": el_results,
                                     "last_updated": datetime.now(),
+                                    "confidence_scores": column_confidence_scores,
+                                    "avg_confidence": row_avg_confidence
                                 }
                             },
                             upsert=False,
@@ -235,47 +278,34 @@ class ResultSyncService:
                         # Update type information in ES and collect type frequencies
                         doc_id = f"{user_id}_{dataset_name}_{table_name}_{row_id}"
 
-                        # Prepare data updates with types from each column's top candidate
-                        data_updates = []
-
-                        for col_idx, candidates in el_results.items():
-                            if candidates and len(candidates) > 0:
-                                # Get the top candidate (winning candidate)
-                                top_candidate = candidates[0]
-
-                                # Extract all types from the top candidate
-                                entity_types = []
-                                if "types" in top_candidate:
-                                    for type_obj in top_candidate["types"]:
-                                        if isinstance(type_obj, dict) and "name" in type_obj:
-                                            type_name = type_obj["name"]
-                                            entity_types.append(type_name)
-                                            # Count for type frequencies
-                                            column_type_frequencies[col_idx][type_name] += 1
-
-                                # Only add update if we found types
-                                if entity_types:
-                                    data_updates.append({
-                                        "col_index": int(col_idx),
-                                        "types": entity_types
-                                    })
-
-                        # Create an update script if we have any type data
+                        # Create an update script if we have any type or confidence data
                         if data_updates:
-                            # Use a script to update only the types field for matching columns
+                            # Use a script to update types and confidence scores
                             update_script = {
                                 "script": {
                                     "source": """
                                     for (def update : params.updates) {
                                         for (int i = 0; i < ctx._source.data.length; i++) {
                                             if (ctx._source.data[i].col_index == update.col_index) {
-                                                ctx._source.data[i].types = update.types;
+                                                if (update.containsKey('types')) {
+                                                    ctx._source.data[i].types = update.types;
+                                                }
+                                                if (update.containsKey('confidence')) {
+                                                    ctx._source.data[i].confidence = update.confidence;
+                                                }
                                             }
                                         }
                                     }
+                                    // Add the row's average confidence
+                                    if (!ctx._source.containsKey('avg_confidence')) {
+                                        ctx._source.avg_confidence = params.avg_confidence;
+                                    } else {
+                                        ctx._source.avg_confidence = params.avg_confidence;
+                                    }
                                     """,
                                     "params": {
-                                        "updates": data_updates
+                                        "updates": data_updates,
+                                        "avg_confidence": row_avg_confidence
                                     }
                                 }
                             }
@@ -326,12 +356,24 @@ class ResultSyncService:
             if column_type_frequencies:
                 column_type_summary = {}
                 for col_idx, type_counter in column_type_frequencies.items():
-                    # Convert Counter to a sorted list of (type, frequency) tuples
+                    # Get the total count of types for this column for normalization
+                    total_count = sum(type_counter.values())
+                    
+                    # Convert Counter to a sorted list with normalized frequencies only
+                    type_info = []
+                    for type_name, count in type_counter.most_common():
+                        # Calculate normalized frequency between 0 and 1
+                        frequency = count / total_count if total_count > 0 else 0
+                        
+                        type_info.append({
+                            "name": type_name,
+                            "frequency": frequency  # Only keep frequency
+                        })
+                    
                     column_type_summary[str(col_idx)] = {
-                        "types": [{"name": type_name, "count": count}
-                                  for type_name, count in type_counter.most_common()]
+                        "types": type_info
                     }
-
+                
                 # Update the table document with type frequencies
                 db.tables.update_one(
                     {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name},

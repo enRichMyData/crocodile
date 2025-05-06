@@ -171,6 +171,8 @@ Retrieves table data with rows, columns and linked entities with pagination.
 - `include_types` (array of strings, optional): Only include rows with specified entity types
 - `exclude_types` (array of strings, optional): Exclude rows with specified entity types
 - `type_column` (integer, optional): Column to apply type filters to
+- `sort_by` (string, optional): Column name to sort by
+- `sort_order` (string, optional): Sort order, either `asc` for ascending or `desc` for descending
 
 **Example:**
 ```bash
@@ -197,6 +199,14 @@ curl -H "Authorization: Bearer {your_token}" \
 # Combine search with type filtering
 curl -H "Authorization: Bearer {your_token}" \
   "http://localhost:8000/datasets/my_dataset/tables/movies?search=comedy&include_types=film&type_column=1"
+
+# Sort movies by year in ascending order
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?sort_by=year&sort_order=asc"
+
+# Sort movies by title in descending order
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?sort_by=title&sort_order=desc"
 ```
 
 **Response:**
@@ -211,16 +221,18 @@ curl -H "Authorization: Bearer {your_token}" \
     "column_types": {
       "1": {
         "types": [
-          {"name": "film", "count": 150},
-          {"name": "television_show", "count": 45},
-          {"name": "television_series", "count": 30}
-        ]
+          {"name": "film", "count": 150, "frequency": 0.67},
+          {"name": "television_show", "count": 45, "frequency": 0.2},
+          {"name": "television_series", "count": 30, "frequency": 0.13}
+        ],
+        "total_count": 225
       },
       "3": {
         "types": [
-          {"name": "human", "count": 220},
-          {"name": "film_director", "count": 195}
-        ]
+          {"name": "human", "count": 220, "frequency": 0.53},
+          {"name": "film_director", "count": 195, "frequency": 0.47}
+        ],
+        "total_count": 415
       }
     }
   },

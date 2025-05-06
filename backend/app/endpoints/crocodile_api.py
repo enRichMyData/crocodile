@@ -413,10 +413,12 @@ def get_table(
     next_cursor: Optional[str] = Query(None),
     prev_cursor: Optional[str] = Query(None),
     search: Optional[str] = Query(None, description="Text to match in cell values"),
-    columns: Optional[List[int]] = Query(None, description="Restrict match to specific column indices"),
+    column: Optional[int] = Query(None, description="Column index to use for search, types filtering or sorting"),
+    search_columns: Optional[List[int]] = Query(None, description="Restrict search to specific column indices"),
     include_types: Optional[List[str]] = Query(None, description="Include rows with these entity types"),
     exclude_types: Optional[List[str]] = Query(None, description="Exclude rows with these entity types"),
-    type_column: Optional[int] = Query(None, description="Column to apply type filters to"),
+    sort_by: Optional[str] = Query(None, description="Sort by: 'confidence' or 'confidence_avg'"),
+    sort_direction: str = Query("desc", description="Sort direction: 'asc' or 'desc'"),
     token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
     crocodile_db: Database = Depends(get_crocodile_db),
@@ -426,7 +428,10 @@ def get_table(
     
     - When search is provided, uses Elasticsearch for text search
     - When types are provided, filters by entity types
-    - Can combine search and type filters for advanced filtering
+    - Can sort by confidence scores at column or row level
+    - Sorting options:
+      - 'confidence': Sort by confidence score of a specific column (requires 'column' parameter)
+      - 'confidence_avg': Sort by average confidence across all columns in each row
     """
     user_id = token_payload.get("email")
 
@@ -452,8 +457,14 @@ def get_table(
     if "column_types" in table:
         table_types = table["column_types"]
 
-    # If search or type filters are provided, use Elasticsearch
-    if search is not None or include_types or exclude_types:
+    # Check if we're sorting by confidence
+    sort_by_confidence = sort_by == "confidence"
+    if sort_by_confidence:
+        # Set default sort order
+        sort_direction = "desc" if sort_direction.lower() == "desc" else "asc"
+
+    # If search, type filters or confidence sorting is requested, use Elasticsearch
+    if search is not None or include_types or exclude_types or sort_by is not None:
         # Convert string cursors to integers for row_id-based pagination
         next_cursor_int = prev_cursor_int = None
         if next_cursor:
@@ -468,10 +479,7 @@ def get_table(
                 raise HTTPException(status_code=400, detail="Invalid prev_cursor value")
 
         if next_cursor_int is not None and prev_cursor_int is not None:
-            raise HTTPException(
-                status_code=400,
-                detail="Only one of next_cursor or prev_cursor should be provided",
-            )
+            raise HTTPException(status_code=400, detail="Only one of next_cursor or prev_cursor should be provided")
             
         # Build base query filters
         filters = [
@@ -482,10 +490,10 @@ def get_table(
         
         # Add text search filter if provided
         if search:
-            if columns:
+            if search_columns:
                 # Search in specified columns only (OR condition across columns)
                 nested_queries = []
-                for col_idx in columns:
+                for col_idx in search_columns:
                     nested_queries.append({
                         "bool": {
                             "must": [
@@ -501,6 +509,21 @@ def get_table(
                         "query": {"bool": {"should": nested_queries, "minimum_should_match": 1}}
                     }
                 })
+            elif column is not None:
+                # Search in specified column
+                filters.append({
+                    "nested": {
+                        "path": "data",
+                        "query": {
+                            "bool": {
+                                "must": [
+                                    {"match": {"data.value": search}},
+                                    {"term": {"data.col_index": column}}
+                                ]
+                            }
+                        }
+                    }
+                })
             else:
                 # Search in all columns
                 filters.append({
@@ -510,8 +533,16 @@ def get_table(
                     }
                 })
         
-        # Add type filters if provided
-        if (include_types or exclude_types) and type_column is not None:
+        # Add type filters if provided - must specify a column
+        if (include_types or exclude_types):
+            type_column = column  # Use the unified column parameter
+            
+            if type_column is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Must specify 'column' parameter when filtering by types"
+                )
+                
             # Include specific types (ANY of the specified types must match)
             if include_types:
                 type_filter_query = {
@@ -559,11 +590,46 @@ def get_table(
             filters.append({"range": {"row_id": {"lt": prev_cursor_int}}})
             sort_order = "desc"  # Backward pagination
             
-        # Execute ES query
+        # Build sort criteria
+        sort_criteria = []
+        
+        # Set up sorting based on confidence if requested
+        if sort_by == "confidence":
+            # Column-level confidence sort - requires column parameter
+            if column is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Must specify 'column' parameter when sorting by column confidence"
+                )
+                
+            # Use the working format for nested sort
+            sort_criteria.append({
+                "data.confidence": {
+                    "order": sort_direction,
+                    "nested": {
+                        "path": "data",
+                        "filter": {"term": {"data.col_index": column}}
+                    },
+                    "missing": "_last" if sort_direction == "desc" else "_first"
+                }
+            })
+        elif sort_by == "confidence_avg":
+            # Row-level average confidence sort
+            sort_criteria.append({
+                "avg_confidence": {
+                    "order": sort_direction,
+                    "missing": "_last" if sort_direction == "desc" else "_first"
+                }
+            })
+            
+        # Always add row_id as secondary sort for stable pagination
+        sort_criteria.append({"row_id": {"order": sort_order}})
+            
+        # Execute ES query with custom sort criteria
         body = {
             "query": {"bool": {"filter": filters}},
-            "sort": [{"row_id": {"order": sort_order}}],
-            "_source": ["row_id"],  # Only need row_ids for MongoDB lookup
+            "sort": sort_criteria,
+            "_source": ["row_id", "avg_confidence"],  # Include avg_confidence in results
             "size": limit + 1,      # Get one extra to check for more results
             "track_total_hits": True  # Get accurate total hit count
         }
@@ -618,9 +684,9 @@ def get_table(
                     
                     # Add search filter if needed
                     if search:
-                        if columns:
+                        if search_columns:
                             nested_queries = []
-                            for col_idx in columns:
+                            for col_idx in search_columns:
                                 nested_queries.append({
                                     "bool": {
                                         "must": [
@@ -645,7 +711,7 @@ def get_table(
                             })
                     
                     # Add type filters if needed
-                    if (include_types or exclude_types) and type_column is not None:
+                    if (include_types or exclude_types) and column is not None:
                         # Include types filter
                         if include_types:
                             type_terms = [{"term": {"data.types": t}} for t in include_types]
@@ -655,7 +721,7 @@ def get_table(
                                     "query": {
                                         "bool": {
                                             "must": [
-                                                {"term": {"data.col_index": type_column}},
+                                                {"term": {"data.col_index": column}},
                                                 {"bool": {"should": type_terms, "minimum_should_match": 1}}
                                             ]
                                         }
@@ -674,7 +740,7 @@ def get_table(
                                                 "query": {
                                                     "bool": {
                                                         "must": [
-                                                            {"term": {"data.col_index": type_column}},
+                                                            {"term": {"data.col_index": column}},
                                                             {"term": {"data.types": type_name}}
                                                         ]
                                                     }
@@ -760,69 +826,61 @@ def get_table(
             "pagination": {"next_cursor": new_next_cursor, "prev_cursor": new_prev_cursor},
         }
 
-    # MongoDB-only logic when no search/type filters provided
-    query_filter = {
-        "user_id": user_id,
-        "dataset_name": dataset_name,
-        "table_name": table_name,
-    }  # user_id first
-    sort_direction = 1  # Default ascending (forward)
+    # MongoDB-only logic when no search/type filters or special sorting provided
+    else:
+        query_filter = {
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+        }  # user_id first
+        sort_direction = 1  # Default ascending (forward)
 
-    if next_cursor and prev_cursor:
-        raise HTTPException(
-            status_code=400,
-            detail="Only one of next_cursor or prev_cursor should be provided",
-        )
+        if next_cursor and prev_cursor:
+            raise HTTPException(
+                status_code=400,
+                detail="Only one of next_cursor or prev_cursor should be provided",
+            )
 
-    if next_cursor:
-        try:
-            query_filter["_id"] = {"$gt": ObjectId(next_cursor)}
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid cursor value")
-    elif prev_cursor:
-        try:
-            query_filter["_id"] = {"$lt": ObjectId(prev_cursor)}
-            sort_direction = -1  # Sort descending for backward pagination
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid cursor value")
+        if next_cursor:
+            try:
+                query_filter["_id"] = {"$gt": ObjectId(next_cursor)}
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid cursor value")
+        elif prev_cursor:
+            try:
+                query_filter["_id"] = {"$lt": ObjectId(prev_cursor)}
+                sort_direction = -1  # Sort descending for backward pagination
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid cursor value")
 
-    results = db.input_data.find(query_filter).sort("row_id", sort_direction).limit(limit + 1)
-    raw_rows = list(results)
-
-    if not raw_rows:
-        results = (
-            crocodile_db.input_data.find(query_filter)
-            .sort("row_id", sort_direction)
-            .limit(limit + 1)
-        )
+        results = db.input_data.find(query_filter).sort("row_id", sort_direction).limit(limit + 1)
         raw_rows = list(results)
 
-    has_more = len(raw_rows) > limit
-    if has_more:
-        raw_rows = raw_rows[:limit]
+        if not raw_rows:
+            results = (
+                crocodile_db.input_data.find(query_filter)
+                .sort("row_id", sort_direction)
+                .limit(limit + 1)
+            )
+            raw_rows = list(results)
 
-    if prev_cursor:
-        raw_rows.reverse()
+        has_more = len(raw_rows) > limit
+        if has_more:
+            raw_rows = raw_rows[:limit]
 
-    next_cursor = None
-    prev_cursor = None
+        if prev_cursor:
+            raw_rows.reverse()
 
-    if raw_rows:
-        if not query_filter.get("_id", {}).get("$gt"):
-            if prev_cursor:
-                prev_cursor = str(raw_rows[0]["_id"])
-            else:
-                first_id = raw_rows[0]["_id"]
-                prev_docs_count = db.input_data.count_documents(
-                    {
-                        "user_id": user_id,
-                        "dataset_name": dataset_name,
-                        "table_name": table_name,
-                        "_id": {"$lt": first_id},
-                    }
-                )
-                if prev_docs_count == 0:
-                    prev_docs_count = crocodile_db.input_data.count_documents(
+        next_cursor = None
+        prev_cursor = None
+
+        if raw_rows:
+            if not query_filter.get("_id", {}).get("$gt"):
+                if prev_cursor:
+                    prev_cursor = str(raw_rows[0]["_id"])
+                else:
+                    first_id = raw_rows[0]["_id"]
+                    prev_docs_count = db.input_data.count_documents(
                         {
                             "user_id": user_id,
                             "dataset_name": dataset_name,
@@ -830,69 +888,78 @@ def get_table(
                             "_id": {"$lt": first_id},
                         }
                     )
-                if prev_docs_count > 0:
-                    prev_cursor = str(first_id)
-        else:
-            prev_cursor = str(raw_rows[0]["_id"])
+                    if prev_docs_count == 0:
+                        prev_docs_count = crocodile_db.input_data.count_documents(
+                            {
+                                "user_id": user_id,
+                                "dataset_name": dataset_name,
+                                "table_name": table_name,
+                                "_id": {"$lt": first_id},
+                            }
+                        )
+                    if prev_docs_count > 0:
+                        prev_cursor = str(first_id)
+            else:
+                prev_cursor = str(raw_rows[0]["_id"])
 
-        if has_more:
-            next_cursor = str(raw_rows[-1]["_id"])
-        elif query_filter.get("_id", {}).get("$lt"):
-            next_cursor = str(raw_rows[-1]["_id"])
+            if has_more:
+                next_cursor = str(raw_rows[-1]["_id"])
+            elif query_filter.get("_id", {}).get("$lt"):
+                next_cursor = str(raw_rows[-1]["_id"])
 
-    table_status_filter = {
-        "user_id": user_id,
-        "dataset_name": dataset_name,
-        "table_name": table_name,
-        "$or": [
-            {"status": {"$in": ["TODO", "DOING"]}},
-            {"ml_status": {"$in": ["TODO", "DOING"]}},
-        ],
-    }
+        table_status_filter = {
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "$or": [
+                {"status": {"$in": ["TODO", "DOING"]}},
+                {"ml_status": {"$in": ["TODO", "DOING"]}},
+            ],
+        }
 
-    pending_docs_count = db.input_data.count_documents(table_status_filter)
-    if pending_docs_count == 0:
-        pending_docs_count = crocodile_db.input_data.count_documents(table_status_filter)
+        pending_docs_count = db.input_data.count_documents(table_status_filter)
+        if pending_docs_count == 0:
+            pending_docs_count = crocodile_db.input_data.count_documents(table_status_filter)
 
-    status = "DOING"
-    if pending_docs_count == 0:
-        status = "DONE"
+        status = "DOING"
+        if pending_docs_count == 0:
+            status = "DONE"
 
-    rows_formatted = []
-    for row in raw_rows:
-        linked_entities = []
-        el_results = row.get("el_results", {})
+        rows_formatted = []
+        for row in raw_rows:
+            linked_entities = []
+            el_results = row.get("el_results", {})
 
-        for col_index in range(len(header)):
-            candidates = el_results.get(str(col_index), [])
-            if candidates:
-                sanitized_candidates = sanitize_for_json(candidates)
-                linked_entities.append({"idColumn": col_index, "candidates": sanitized_candidates})
+            for col_index in range(len(header)):
+                candidates = el_results.get(str(col_index), [])
+                if candidates:
+                    sanitized_candidates = sanitize_for_json(candidates)
+                    linked_entities.append({"idColumn": col_index, "candidates": sanitized_candidates})
 
-        rows_formatted.append(
-            {
-                "idRow": row.get("row_id"),
-                "data": sanitize_for_json(row.get("data", [])),
-                "linked_entities": linked_entities,
-            }
-        )
+            rows_formatted.append(
+                {
+                    "idRow": row.get("row_id"),
+                    "data": sanitize_for_json(row.get("data", [])),
+                    "linked_entities": linked_entities,
+                }
+            )
 
-    response_data = {
-        "data": {
-            "datasetName": dataset_name,
-            "tableName": table.get("table_name"),
-            "status": status,
-            "header": header,
-            "rows": rows_formatted,
-        },
-        "pagination": {"next_cursor": next_cursor, "prev_cursor": prev_cursor},
-    }
+        response_data = {
+            "data": {
+                "datasetName": dataset_name,
+                "tableName": table.get("table_name"),
+                "status": status,
+                "header": header,
+                "rows": rows_formatted,
+            },
+            "pagination": {"next_cursor": next_cursor, "prev_cursor": prev_cursor},
+        }
 
-    response_data["data"]["column_types"] = table_types
+        response_data["data"]["column_types"] = table_types
 
-    response_data = sanitize_for_json(response_data)
+        response_data = sanitize_for_json(response_data)
 
-    return response_data
+        return response_data
 
 @router.post("/datasets", status_code=status.HTTP_201_CREATED)
 def create_dataset(
@@ -935,25 +1002,45 @@ def delete_dataset(
     crocodile_db: Database = Depends(get_crocodile_db),
 ):
     """
-    Delete a dataset by name.
+    Delete a dataset by name and all its data from MongoDB and Elasticsearch.
     """
     user_id = token_payload.get("email")
 
     # Check existence using uniform dataset key
     existing = db.datasets.find_one(
         {"user_id": user_id, "dataset_name": dataset_name}
-    )  # updated query key
+    )
     if not existing:
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 
     # Delete all tables associated with this dataset
     db.tables.delete_many({"user_id": user_id, "dataset_name": dataset_name})
 
-    # Delete dataset
-    db.datasets.delete_one({"user_id": user_id, "dataset_name": dataset_name})  # updated query key
+    # Delete dataset metadata
+    db.datasets.delete_one({"user_id": user_id, "dataset_name": dataset_name})
 
     # Delete data from crocodile_db
     crocodile_db.input_data.delete_many({"user_id": user_id, "dataset_name": dataset_name})
+
+    # Delete data from Elasticsearch
+    try:
+        es.delete_by_query(
+            index=ES_INDEX,
+            body={
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {"term": {"user_id": user_id}},
+                            {"term": {"dataset_name": dataset_name}}
+                        ]
+                    }
+                }
+            },
+            refresh=True  # Refresh the index immediately
+        )
+    except Exception as e:
+        # Log error but don't fail the operation if ES deletion fails
+        print(f"Error deleting dataset from Elasticsearch: {str(e)}")
 
     return None
 
@@ -966,17 +1053,18 @@ def delete_table(
     crocodile_db: Database = Depends(get_crocodile_db),
 ):
     """
-    Delete a table by name within a dataset.
+    Delete a table by name within a dataset and remove all its data from MongoDB and Elasticsearch.
     """
     user_id = token_payload.get("email")
 
-    # Ensure dataset exists using uniform dataset key
+    # Ensure dataset exists
     dataset = db.datasets.find_one(
         {"user_id": user_id, "dataset_name": dataset_name}
-    )  # updated query key
+    )
     if not dataset:
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 
+    # Ensure table exists
     table = db.tables.find_one(
         {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
     )
@@ -987,7 +1075,7 @@ def delete_table(
 
     row_count = table.get("total_rows", 0)
 
-    # Delete table
+    # Delete table metadata
     db.tables.delete_one(
         {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
     )
@@ -1002,6 +1090,27 @@ def delete_table(
     crocodile_db.input_data.delete_many(
         {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
     )
+
+    # Delete data from Elasticsearch
+    try:
+        es.delete_by_query(
+            index=ES_INDEX,
+            body={
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {"term": {"user_id": user_id}},
+                            {"term": {"dataset_name": dataset_name}},
+                            {"term": {"table_name": table_name}}
+                        ]
+                    }
+                }
+            },
+            refresh=True  # Refresh the index immediately
+        )
+    except Exception as e:
+        # Log error but don't fail the operation if ES deletion fails
+        print(f"Error deleting table from Elasticsearch: {str(e)}")
 
     return None
 
@@ -1079,18 +1188,17 @@ def update_annotation(
     el_results = row.get("el_results", {})
     column_candidates = el_results.get(str(column_id), [])
 
-    # Find if the candidate already exists
-    entity_found = False
+    if not column_candidates:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No entity linking candidates found for column {column_id} in row {row_id}",
+        )
 
-    for candidate in column_candidates:
-        if candidate.get("id") == annotation.entity_id:
-            entity_found = True
-            break
+    # Check if the entity exists in the candidates
+    entity_found = any(candidate.get("id") == annotation.entity_id for candidate in column_candidates)
 
-    # Create the updated candidates list
     updated_candidates = []
 
-    # If we have a new candidate to add (not in existing list)
     if not entity_found:
         if not annotation.candidate_info:
             raise HTTPException(
@@ -1286,3 +1394,58 @@ def delete_candidate(
             "remaining_candidates": len(updated_candidates),
         }
     )
+
+def sort_rows_by_confidence(
+    rows: List[Dict], 
+    sort_by: Optional[str] = None,
+    sort_column: Optional[int] = None,
+    sort_direction: str = "desc",
+    header: List[str] = None
+) -> List[Dict]:
+    """
+    Sort rows by confidence scores.
+    """
+    if not sort_by or sort_by != "confidence" or not rows:
+        return rows  # No sorting if not confidence
+
+    reverse = sort_direction == "desc"  # True for descending order
+    
+    if sort_column is not None and header:
+        # Column-level sorting: sort by the confidence of a specific column
+        def get_column_confidence(row):
+            # Get confidence score from the first candidate in the specified column
+            el_results = row.get("el_results", {})
+            candidates = el_results.get(str(sort_column), [])
+            if candidates and len(candidates) > 0:
+                return candidates[0].get("score", 0.0) or 0.0
+            return 0.0
+        
+        return sorted(rows, key=get_column_confidence, reverse=reverse)
+    else:
+        # Row-level sorting: sort by the average confidence across all columns
+        def get_avg_confidence(row):
+            # Calculate average confidence score across all columns with candidates
+            el_results = row.get("el_results", {})
+            total_score = 0.0
+            count = 0
+            
+            # Only consider valid column indices
+            if header:
+                col_range = range(len(header))
+            else:
+                # If no header, try to determine columns from data
+                data = row.get("data", [])
+                col_range = range(len(data))
+                
+            for col_idx in col_range:
+                candidates = el_results.get(str(col_idx), [])
+                if candidates and len(candidates) > 0:
+                    score = candidates[0].get("score", 0.0)
+                    if score is not None:  # Skip None scores
+                        total_score += score
+                        count += 1
+            
+            # Avoid division by zero
+            return total_score / count if count > 0 else 0.0
+        
+        return sorted(rows, key=get_avg_confidence, reverse=reverse)

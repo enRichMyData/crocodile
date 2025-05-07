@@ -9,39 +9,56 @@ services:
       - ./mongod.conf:/etc/mongod.conf  # Custom MongoDB config
     command: mongod --config /etc/mongod.conf
 
-  fastapi:
+  fastapi-dev:
     build:
-      context: .  # Path to the FastAPI backend
-      dockerfile: backend/Dockerfile  # Use the Dockerfile in the backend folder
-    container_name: crocodile_fastapi
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: crocodile_fastapi_dev
     ports:
-      - "${FASTAPI_SERVER_PORT:-8000}:8000"  # Default to 8000 if not set
+      - "${FASTAPI_SERVER_PORT:-8000}:8000"
     volumes:
-    # Mount the app directory to the container
       - ./backend/app:/app
       - ./crocodile:/app/crocodile
       - ./backend/scripts:/app/scripts
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     env_file:
-      - .env  # Load environment variables from .env file
+      - .env
+    depends_on:
+      - mongodb
+    profiles: [dev]
+
+  fastapi-prod:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: crocodile_fastapi_prod
+    ports:
+      - "${FASTAPI_SERVER_PORT:-8000}:8000"
+    command: gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:8000
+    env_file:
+      - .env
+    depends_on:
+      - mongodb
+    profiles: [prod]
+
   # Development-only Jupyter service for debugging
   # Use `docker compose --profile debug up` to start this service       <----
   jupyter:
     build: .
     container_name: crocodile_jupyter
     ports:
-      - "${JUPYTER_SERVER_PORT:-8888}:8888"  # Default to 8888 if not set
+      - "${JUPYTER_SERVER_PORT:-8888}:8888"
     volumes:
       - ./notebooks:/home/jovyan/work
       - ./crocodile:/home/jovyan/work/crocodile
       - ./tables:/home/jovyan/work/tables
       - ./training/:/home/jovyan/work/training
-      - ./backend:/home/jovyan/work/backend  # Include backend code for debugging
+      - ./backend:/home/jovyan/work/backend
     command: start-notebook.sh --NotebookApp.token='' --NotebookApp.password=''
     environment:
       - JUPYTER_ENABLE_LAB=yes
     env_file:
-      - .env  # Load environment variables from .env file
+      - .env
     depends_on:
       - mongodb
       - fastapi

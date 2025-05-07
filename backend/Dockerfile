@@ -12,12 +12,12 @@ COPY pyproject.toml .
 COPY ./crocodile ./crocodile
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -e ".[app]"
+RUN pip install --no-cache-dir ".[app]"
 
 # Expose the port that FastAPI will use
 EXPOSE 8000
 
 RUN python -m spacy download en_core_web_sm
 
-# Run the FastAPI app
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the FastAPI app using Gunicorn for a production-ready default
+CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "main:app", "--bind", "0.0.0.0:8000"]

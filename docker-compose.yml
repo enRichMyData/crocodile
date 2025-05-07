@@ -1,5 +1,6 @@
 services:
   mongodb:
+    profiles: ["dev", "prod"]
     image: mongo:${MONGO_VERSION}
     container_name: crocodile_mongodb
     ports:
@@ -10,6 +11,7 @@ services:
     command: mongod --config /etc/mongod.conf
 
   fastapi-dev:
+    profiles: [dev]
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -25,9 +27,9 @@ services:
       - .env
     depends_on:
       - mongodb
-    profiles: [dev]
 
   fastapi-prod:
+    profiles: [prod]
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -39,11 +41,11 @@ services:
       - .env
     depends_on:
       - mongodb
-    profiles: [prod]
 
   # Development-only Jupyter service for debugging
   # Use `docker compose --profile debug up` to start this service       <----
   jupyter:
+    profiles: [debug]
     build: .
     container_name: crocodile_jupyter
     ports:
@@ -62,4 +64,6 @@ services:
     depends_on:
       - mongodb
       - fastapi
-    profiles: [debug]
+
+volumes:
+  mongodb_data:

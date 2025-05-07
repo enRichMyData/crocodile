@@ -456,12 +456,11 @@ def get_table(
     table_types = {}
     if "column_types" in table:
         table_types = table["column_types"]
-
-    # Check if we're sorting by confidence
-    sort_by_confidence = sort_by == "confidence"
-    if sort_by_confidence:
-        # Set default sort order
-        sort_direction = "desc" if sort_direction.lower() == "desc" else "asc"
+        
+    # Get column classification information
+    classified_columns = {}
+    if "classified_columns" in table:
+        classified_columns = table["classified_columns"]
 
     # If search, type filters or confidence sorting is requested, use Elasticsearch
     if search is not None or include_types or exclude_types or sort_by is not None:
@@ -822,6 +821,7 @@ def get_table(
                 "rows": rows_formatted,
                 "total_matches": total_hits,
                 "column_types": table_types,
+                "classified_columns": classified_columns,
             },
             "pagination": {"next_cursor": new_next_cursor, "prev_cursor": new_prev_cursor},
         }
@@ -951,11 +951,11 @@ def get_table(
                 "status": status,
                 "header": header,
                 "rows": rows_formatted,
+                "column_types": table_types,
+                "classified_columns": classified_columns,
             },
             "pagination": {"next_cursor": next_cursor, "prev_cursor": prev_cursor},
         }
-
-        response_data["data"]["column_types"] = table_types
 
         response_data = sanitize_for_json(response_data)
 

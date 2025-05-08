@@ -23,6 +23,8 @@ services:
       - ./crocodile:/app/crocodile
       - ./backend/scripts:/app/scripts
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - DEBUG=True
     env_file:
       - .env
     depends_on:

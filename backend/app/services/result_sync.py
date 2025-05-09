@@ -1,10 +1,12 @@
 import time
 from datetime import datetime
 from typing import Any, Dict, List
+from collections import defaultdict, Counter
 
 from pymongo import MongoClient
 from pymongo.collection import Collection
 from services.utils import log_error, log_info
+from dependencies import es, ES_INDEX
 
 from crocodile import CrocodileResultFetcher
 
@@ -166,6 +168,10 @@ class ResultSyncService:
             consecutive_failures = 0
             max_failures = 5  # Safety limit for consecutive failures
 
+            # Dictionary to collect type frequencies by column - using type_id as key
+            column_type_frequencies = defaultdict(lambda: defaultdict(int))
+            column_type_mapping = {}  # Maps type_id to {id, name} for later reference
+
             # Process all rows in batches, focusing on incomplete ones
             input_collection = db.input_data
 
@@ -194,6 +200,9 @@ class ResultSyncService:
                         time.sleep(5)  # Wait a bit before trying another batch
                         continue
 
+                    # Prepare bulk operations for Elasticsearch updates
+                    es_operations = []
+
                     # Process each result
                     for result in results:
                         row_id = result.get("row_id")
@@ -205,7 +214,58 @@ class ResultSyncService:
                         if not el_results:
                             continue
 
-                        # Update the backend database
+                        # Calculate row-level average confidence score
+                        confidence_scores = []
+                        # Prepare data updates with types from each column's top candidate
+                        data_updates = []
+                        column_confidence_scores = {}  # Track confidence by column
+
+                        for col_idx, candidates in el_results.items():
+                            if candidates and len(candidates) > 0:
+                                # Get the top candidate and its confidence score
+                                top_candidate = candidates[0]
+                                confidence = top_candidate.get("score", 0.0)
+                                
+                                # Track score if not None for row average
+                                if confidence is not None:
+                                    confidence_scores.append(confidence)
+                                    column_confidence_scores[col_idx] = confidence
+                                
+                                # Extract all types from the top candidate
+                                entity_types = []
+                                if "types" in top_candidate:
+                                    for type_obj in top_candidate["types"]:
+                                        if isinstance(type_obj, dict) and "name" in type_obj and "id" in type_obj:
+                                            type_id = type_obj["id"]
+                                            type_name = type_obj["name"]
+                                            # Store as tuple of (id, name) for entity_types
+                                            entity_types.append((type_id, type_name))
+                                            # Count frequencies using ID as key for uniqueness
+                                            column_type_frequencies[col_idx][type_id] += 1
+                                            # Store mapping from ID to full type info
+                                            column_type_mapping[type_id] = {"id": type_id, "name": type_name}
+                                        elif isinstance(type_obj, dict) and "name" in type_obj:
+                                            # Fallback for types with name but no id
+                                            type_name = type_obj["name"]
+                                            entity_types.append((type_name, type_name))  # Use name as ID
+                                            column_type_frequencies[col_idx][type_name] += 1
+                                            column_type_mapping[type_name] = {"name": type_name}
+
+                                # Prepare update with types and confidence score
+                                if entity_types or confidence is not None:
+                                    update = {
+                                        "col_index": int(col_idx),
+                                    }
+                                    if entity_types:
+                                        update["types"] = [type_id for type_id, _ in entity_types]
+                                    if confidence is not None:
+                                        update["confidence"] = confidence
+                                    data_updates.append(update)
+
+                        # Calculate row average confidence
+                        row_avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
+
+                        # Update the backend database with confidence scores
                         db.input_data.update_one(
                             {
                                 "user_id": user_id,
@@ -219,21 +279,71 @@ class ResultSyncService:
                                     "ml_status": ml_status,
                                     "el_results": el_results,
                                     "last_updated": datetime.now(),
+                                    "confidence_scores": column_confidence_scores,
+                                    "avg_confidence": row_avg_confidence
                                 }
                             },
                             upsert=False,
                         )
 
+                        # Update type information in ES and collect type frequencies
+                        doc_id = f"{user_id}_{dataset_name}_{table_name}_{row_id}"
+
+                        # Create an update script if we have any type or confidence data
+                        if data_updates:
+                            # Use a script to update types and confidence scores
+                            update_script = {
+                                "script": {
+                                    "source": """
+                                    for (def update : params.updates) {
+                                        for (int i = 0; i < ctx._source.data.length; i++) {
+                                            if (ctx._source.data[i].col_index == update.col_index) {
+                                                if (update.containsKey('types')) {
+                                                    ctx._source.data[i].types = update.types;
+                                                }
+                                                if (update.containsKey('confidence')) {
+                                                    ctx._source.data[i].confidence = update.confidence;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Add the row's average confidence
+                                    if (!ctx._source.containsKey('avg_confidence')) {
+                                        ctx._source.avg_confidence = params.avg_confidence;
+                                    } else {
+                                        ctx._source.avg_confidence = params.avg_confidence;
+                                    }
+                                    """,
+                                    "params": {
+                                        "updates": data_updates,
+                                        "avg_confidence": row_avg_confidence
+                                    }
+                                }
+                            }
+
+                            es_operations.append({"update": {"_index": ES_INDEX, "_id": doc_id}})
+                            es_operations.append(update_script)
+
                         # Count as completed if done
                         if status == "DONE" and ml_status == "DONE":
                             completed_count += 1
+
+                    # Execute bulk ES updates if we have operations
+                    if es_operations:
+                        try:
+                            resp = es.bulk(body=es_operations, refresh=True)
+                            if resp.get("errors"):
+                                log_error(f"Errors in bulk update: {resp.get('items')}")
+                            else:
+                                log_info(f"Updated {len(es_operations)//2} documents with type information")
+                        except Exception as e:
+                            log_error(f"Failed to update ES: {str(e)}", e)
 
                     # We made progress
                     consecutive_failures = 0
                     last_progress_time = time.time()
                     log_info(
-                        f"""Processed batch with {len(results)} results,
-                        completed {completed_count} rows so far"""
+                        f"Processed batch with {len(results)} results, completed {completed_count} rows so far"
                     )
 
                 except Exception as e:
@@ -253,6 +363,47 @@ class ResultSyncService:
                 # Brief pause between batches to avoid hammering the database
                 time.sleep(2)
 
+            # After processing all rows, update the table with type frequencies
+            if column_type_frequencies:
+                column_type_summary = {}
+                for col_idx, type_counter in column_type_frequencies.items():
+                    # Get the total count of types for this column for normalization
+                    total_count = sum(type_counter.values())
+                    
+                    # Convert Counter to a sorted list with normalized frequencies and type information
+                    type_info = []
+                    for type_id, count in type_counter.items():
+                        # Calculate normalized frequency between 0 and 1
+                        frequency = count / total_count if total_count > 0 else 0
+                        
+                        # Get the full type info from our mapping
+                        type_data = column_type_mapping.get(type_id, {"name": "unknown"})
+                        
+                        # Create the type entry with id, name and frequency
+                        type_entry = {
+                            "frequency": frequency
+                        }
+                        
+                        # Add ID and name if available
+                        if "id" in type_data:
+                            type_entry["id"] = type_data["id"]
+                        if "name" in type_data:
+                            type_entry["name"] = type_data["name"]
+                        
+                        type_info.append(type_entry)
+                    
+                    column_type_summary[str(col_idx)] = {
+                        "types": type_info,
+                        "total_count": total_count
+                    }
+                
+                # Update the table document with type frequencies
+                db.tables.update_one(
+                    {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name},
+                    {"$set": {"column_types": column_type_summary}}
+                )
+                log_info(f"Updated table {dataset_name}/{table_name} with type frequencies including IDs and names")
+
             # Do a final count of completed rows to get accurate completion percentage
             final_completed_count = db.input_data.count_documents(
                 {
@@ -265,6 +416,8 @@ class ResultSyncService:
             )
 
             # Update table status based on completion
+            log_info(
+                f"Final completed count: {final_completed_count} out of {total_count}")
             result = self._update_table_status(
                 db, user_id, dataset_name, table_name, final_completed_count, total_count
             )

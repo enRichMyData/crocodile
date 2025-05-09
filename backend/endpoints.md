@@ -166,11 +166,47 @@ Retrieves table data with rows, columns and linked entities with pagination.
 - `limit` (int, default=10): Maximum number of rows to return
 - `next_cursor` (string, optional): Cursor for forward pagination
 - `prev_cursor` (string, optional): Cursor for backward pagination
+- `search` (string, optional): Text to match in cell values
+- `columns` (array of integers, optional): Restrict text search to specific column indices
+- `include_types` (array of strings, optional): Only include rows with specified entity types
+- `exclude_types` (array of strings, optional): Exclude rows with specified entity types
+- `type_column` (integer, optional): Column to apply type filters to
+- `sort_by` (string, optional): Column name to sort by
+- `sort_order` (string, optional): Sort order, either `asc` for ascending or `desc` for descending
 
 **Example:**
 ```bash
+# Basic table data retrieval
 curl -H "Authorization: Bearer {your_token}" \
   "http://localhost:8000/datasets/my_dataset/tables/movies?limit=5"
+
+# Search for movies with "Godfather" in any column
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?search=Godfather"
+
+# Search for movies with "1972" but only in column 2 (year)
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?search=1972&columns=[2]"
+
+# Get only films (exclude TV shows) in column 1 (title)
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?include_types=film&type_column=1"
+
+# Get all items except TV shows in column 1 (title)
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?exclude_types=television_show&type_column=1"
+
+# Combine search with type filtering
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?search=comedy&include_types=film&type_column=1"
+
+# Sort movies by year in ascending order
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?sort_by=year&sort_order=asc"
+
+# Sort movies by title in descending order
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies?sort_by=title&sort_order=desc"
 ```
 
 **Response:**
@@ -181,36 +217,72 @@ curl -H "Authorization: Bearer {your_token}" \
     "tableName": "movies",
     "status": "DONE",
     "header": ["id", "title", "year", "director"],
-    "rows": [
-      {
-        "idRow": 0,
-        "data": ["1", "The Godfather", "1972", "Francis Ford Coppola"],
-        "linked_entities": [
-          {
-            "idColumn": 1,
-            "candidates": [
-              {
-                "id": "Q47703",
-                "name": "The Godfather",
-                "description": "1972 film by Francis Ford Coppola",
-                "types": [
-                  {"id": "Q11424", "name": "film"}
-                ],
-                "match": true,
-                "score": 0.95
-              },
-              ...
-            ]
-          }
-        ]
+    "rows": [...],
+    "column_types": {
+      "1": {
+        "types": [
+          {"name": "film", "count": 150, "frequency": 0.67},
+          {"name": "television_show", "count": 45, "frequency": 0.2},
+          {"name": "television_series", "count": 30, "frequency": 0.13}
+        ],
+        "total_count": 225
       },
-      ...
-    ]
+      "3": {
+        "types": [
+          {"name": "human", "count": 220, "frequency": 0.53},
+          {"name": "film_director", "count": 195, "frequency": 0.47}
+        ],
+        "total_count": 415
+      }
+    }
   },
   "pagination": {
     "next_cursor": "60ab9012c1d8a45678901234",
     "prev_cursor": null
   }
+}
+```
+
+### Get Table Status
+
+```
+GET /datasets/{dataset_name}/tables/{table_name}/status
+```
+
+Retrieves the current processing status of a table.
+
+**Example:**
+```bash
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies/status"
+```
+
+**Response:**
+```json
+{
+  "dataset_name": "my_dataset",
+  "table_name": "movies",
+  "status": "DONE",
+  "total_rows": 50,
+  "pending_rows": 0,
+  "completed_rows": 50,
+  "completion_percentage": 100.0,
+  "last_synced": "2023-08-01T14:22:35.123Z"
+}
+```
+
+If there was an error during processing:
+```json
+{
+  "dataset_name": "my_dataset",
+  "table_name": "movies",
+  "status": "PROCESSING",
+  "total_rows": 50,
+  "pending_rows": 12,
+  "completed_rows": 38,
+  "completion_percentage": 76.0,
+  "last_synced": "2023-08-01T14:20:35.123Z",
+  "error": "Error message details"
 }
 ```
 

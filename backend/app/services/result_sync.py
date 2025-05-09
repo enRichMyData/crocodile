@@ -168,8 +168,9 @@ class ResultSyncService:
             consecutive_failures = 0
             max_failures = 5  # Safety limit for consecutive failures
 
-            # Dictionary to collect type frequencies by column
-            column_type_frequencies = defaultdict(Counter)
+            # Dictionary to collect type frequencies by column - using type_id as key
+            column_type_frequencies = defaultdict(lambda: defaultdict(int))
+            column_type_mapping = {}  # Maps type_id to {id, name} for later reference
 
             # Process all rows in batches, focusing on incomplete ones
             input_collection = db.input_data
@@ -234,11 +235,21 @@ class ResultSyncService:
                                 entity_types = []
                                 if "types" in top_candidate:
                                     for type_obj in top_candidate["types"]:
-                                        if isinstance(type_obj, dict) and "name" in type_obj:
+                                        if isinstance(type_obj, dict) and "name" in type_obj and "id" in type_obj:
+                                            type_id = type_obj["id"]
                                             type_name = type_obj["name"]
-                                            entity_types.append(type_name)
-                                            # Count for type frequencies
+                                            # Store as tuple of (id, name) for entity_types
+                                            entity_types.append((type_id, type_name))
+                                            # Count frequencies using ID as key for uniqueness
+                                            column_type_frequencies[col_idx][type_id] += 1
+                                            # Store mapping from ID to full type info
+                                            column_type_mapping[type_id] = {"id": type_id, "name": type_name}
+                                        elif isinstance(type_obj, dict) and "name" in type_obj:
+                                            # Fallback for types with name but no id
+                                            type_name = type_obj["name"]
+                                            entity_types.append((type_name, type_name))  # Use name as ID
                                             column_type_frequencies[col_idx][type_name] += 1
+                                            column_type_mapping[type_name] = {"name": type_name}
 
                                 # Prepare update with types and confidence score
                                 if entity_types or confidence is not None:
@@ -246,7 +257,7 @@ class ResultSyncService:
                                         "col_index": int(col_idx),
                                     }
                                     if entity_types:
-                                        update["types"] = entity_types
+                                        update["types"] = [type_id for type_id, _ in entity_types]
                                     if confidence is not None:
                                         update["confidence"] = confidence
                                     data_updates.append(update)
@@ -359,19 +370,31 @@ class ResultSyncService:
                     # Get the total count of types for this column for normalization
                     total_count = sum(type_counter.values())
                     
-                    # Convert Counter to a sorted list with normalized frequencies only
+                    # Convert Counter to a sorted list with normalized frequencies and type information
                     type_info = []
-                    for type_name, count in type_counter.most_common():
+                    for type_id, count in type_counter.items():
                         # Calculate normalized frequency between 0 and 1
                         frequency = count / total_count if total_count > 0 else 0
                         
-                        type_info.append({
-                            "name": type_name,
-                            "frequency": frequency  # Only keep frequency
-                        })
+                        # Get the full type info from our mapping
+                        type_data = column_type_mapping.get(type_id, {"name": "unknown"})
+                        
+                        # Create the type entry with id, name and frequency
+                        type_entry = {
+                            "frequency": frequency
+                        }
+                        
+                        # Add ID and name if available
+                        if "id" in type_data:
+                            type_entry["id"] = type_data["id"]
+                        if "name" in type_data:
+                            type_entry["name"] = type_data["name"]
+                        
+                        type_info.append(type_entry)
                     
                     column_type_summary[str(col_idx)] = {
-                        "types": type_info
+                        "types": type_info,
+                        "total_count": total_count
                     }
                 
                 # Update the table document with type frequencies
@@ -379,7 +402,7 @@ class ResultSyncService:
                     {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name},
                     {"$set": {"column_types": column_type_summary}}
                 )
-                log_info(f"Updated table {dataset_name}/{table_name} with type frequencies")
+                log_info(f"Updated table {dataset_name}/{table_name} with type frequencies including IDs and names")
 
             # Do a final count of completed rows to get accurate completion percentage
             final_completed_count = db.input_data.count_documents(

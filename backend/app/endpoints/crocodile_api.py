@@ -2,7 +2,8 @@ import json
 import os
 import time
 from datetime import datetime
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Any, Union
+import base64
 
 import numpy as np
 import pandas as pd
@@ -424,7 +425,7 @@ def get_table(
     crocodile_db: Database = Depends(get_crocodile_db),
 ):
     """
-    Get table data with bi-directional keyset pagination.
+    Get table data with bi-directional pagination.
     
     - When search is provided, uses Elasticsearch for text search
     - When types are provided, filters by entity types
@@ -464,21 +465,44 @@ def get_table(
 
     # If search, type filters or confidence sorting is requested, use Elasticsearch
     if search is not None or include_types or exclude_types or sort_by is not None:
-        # Convert string cursors to integers for row_id-based pagination
-        next_cursor_int = prev_cursor_int = None
+        # Ensure mutual exclusivity of pagination cursors
+        if next_cursor and prev_cursor:
+            raise HTTPException(
+                status_code=400,
+                detail="Only one of next_cursor or prev_cursor should be provided"
+            )
+
+        # Parse cursors if provided
+        search_after = None
+        search_before = None
+        is_backward = False
+        
         if next_cursor:
             try:
-                next_cursor_int = int(next_cursor)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid next_cursor value")
-        if prev_cursor:
+                # Try to decode the cursor as JSON first
+                try:
+                    cursor_data = json.loads(base64.b64decode(next_cursor).decode('utf-8'))
+                    search_after = cursor_data.get("sort")
+                except (json.JSONDecodeError, ValueError):
+                    # For backward compatibility, try parsing as a simple row_id
+                    row_id = int(next_cursor)
+                    search_after = [row_id]  # Default to row_id only
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid next_cursor format")
+        
+        elif prev_cursor:
+            is_backward = True
             try:
-                prev_cursor_int = int(prev_cursor)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid prev_cursor value")
-
-        if next_cursor_int is not None and prev_cursor_int is not None:
-            raise HTTPException(status_code=400, detail="Only one of next_cursor or prev_cursor should be provided")
+                # Try to decode the cursor as JSON first
+                try:
+                    cursor_data = json.loads(base64.b64decode(prev_cursor).decode('utf-8'))
+                    search_before = cursor_data.get("sort")
+                except (json.JSONDecodeError, ValueError):
+                    # For backward compatibility, try parsing as a simple row_id
+                    row_id = int(prev_cursor)
+                    search_before = [row_id]  # Default to row_id only
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid prev_cursor format")
             
         # Build base query filters
         filters = [
@@ -581,14 +605,6 @@ def get_table(
                     }
                     filters.append(exclude_filter)
         
-        # Handle pagination direction
-        sort_order = "asc"  # Default is forward pagination
-        if next_cursor_int is not None:
-            filters.append({"range": {"row_id": {"gt": next_cursor_int}}})
-        elif prev_cursor_int is not None:
-            filters.append({"range": {"row_id": {"lt": prev_cursor_int}}})
-            sort_order = "desc"  # Backward pagination
-            
         # Build sort criteria
         sort_criteria = []
         
@@ -604,7 +620,7 @@ def get_table(
             # Use the working format for nested sort
             sort_criteria.append({
                 "data.confidence": {
-                    "order": sort_direction,
+                    "order": "asc" if is_backward else sort_direction,
                     "nested": {
                         "path": "data",
                         "filter": {"term": {"data.col_index": column}}
@@ -616,15 +632,19 @@ def get_table(
             # Row-level average confidence sort
             sort_criteria.append({
                 "avg_confidence": {
-                    "order": sort_direction,
+                    "order": "asc" if is_backward else sort_direction,
                     "missing": "_last" if sort_direction == "desc" else "_first"
                 }
             })
-            
+        
         # Always add row_id as secondary sort for stable pagination
-        sort_criteria.append({"row_id": {"order": sort_order}})
+        sort_criteria.append({
+            "row_id": {
+                "order": "asc" if is_backward else "asc"  # always ascending for row_id
+            }
+        })
             
-        # Execute ES query with custom sort criteria
+        # Prepare the search body
         body = {
             "query": {"bool": {"filter": filters}},
             "sort": sort_criteria,
@@ -632,6 +652,21 @@ def get_table(
             "size": limit + 1,      # Get one extra to check for more results
             "track_total_hits": True  # Get accurate total hit count
         }
+        
+        # Add search_after for forward pagination
+        if search_after:
+            body["search_after"] = search_after
+        
+        # For backward pagination, we need to reverse the sort order temporarily
+        # and then reverse the results afterward
+        if is_backward and search_before:
+            # Reverse sort orders for backward pagination
+            for sort_item in body["sort"]:
+                for key in sort_item:
+                    if isinstance(sort_item[key], dict) and "order" in sort_item[key]:
+                        sort_item[key]["order"] = "desc" if sort_item[key]["order"] == "asc" else "asc"
+            
+            body["search_after"] = search_before
         
         # Execute search and get results
         res = es.search(index=ES_INDEX, body=body)
@@ -645,114 +680,84 @@ def get_table(
             
         # If we did backward pagination, we need to reverse the results
         # to maintain consistent ordering for the user
-        if sort_order == "desc":
+        if is_backward:
             hits.reverse()
             
         # Calculate next_cursor and prev_cursor for pagination
         new_next_cursor = new_prev_cursor = None
         
-        if hits:
-            first_id = hits[0]["_source"]["row_id"]
-            last_id = hits[-1]["_source"]["row_id"]
+        # Helper function to create encoded cursor
+        def create_cursor(sort_values: List[Any]) -> str:
+            cursor_data = {"sort": sort_values}
+            return base64.b64encode(json.dumps(cursor_data).encode('utf-8')).decode('utf-8')
             
-            # For forward pagination or initial page
-            if sort_order == "asc":
-                # If we have more results, provide next_cursor
-                if has_more:
-                    new_next_cursor = str(last_id)
+        if len(hits) > 0:
+            # For next_cursor:
+            # - If we have more results after this page, create next_cursor
+            # - If we came from prev_cursor, create next_cursor unless we're on first page
+            if has_more:
+                last_hit = hits[-1]
+                new_next_cursor = create_cursor(last_hit["sort"])
+            elif is_backward:
+                # Coming backward and no more results means we're approaching first page
+                # Need to check if this is actually the first page
+                first_page_check = {
+                    "query": {
+                        "bool": {"filter": filters}
+                    },
+                    "sort": sort_criteria,
+                    "size": 1,
+                    "_source": False
+                }
                 
-                # For prev_cursor, we need to check if there are results before this page
-                if next_cursor_int is not None:
-                    # If we came via next_cursor, there must be previous results
-                    new_prev_cursor = str(first_id)
-                else:
-                    # Check if there are any results before our first row
-                    prev_check = {
-                        "query": {
-                            "bool": {
-                                "filter": [
-                                    {"term": {"user_id": user_id}},
-                                    {"term": {"dataset_name": dataset_name}},
-                                    {"term": {"table_name": table_name}},
-                                    {"range": {"row_id": {"lt": first_id}}}
-                                ]
-                            }
-                        },
-                        "size": 0
-                    }
-                    
-                    # Add search filter if needed
-                    if search:
-                        if search_columns:
-                            nested_queries = []
-                            for col_idx in search_columns:
-                                nested_queries.append({
-                                    "bool": {
-                                        "must": [
-                                            {"match": {"data.value": search}},
-                                            {"term": {"data.col_index": col_idx}}
-                                        ]
-                                    }
-                                })
-                            
-                            prev_check["query"]["bool"]["filter"].append({
-                                "nested": {
-                                    "path": "data",
-                                    "query": {"bool": {"should": nested_queries, "minimum_should_match": 1}}
-                                }
-                            })
-                        else:
-                            prev_check["query"]["bool"]["filter"].append({
-                                "nested": {
-                                    "path": "data",
-                                    "query": {"bool": {"must": [{"match": {"data.value": search}}]}}
-                                }
-                            })
-                    
-                    # Add type filters if needed
-                    if (include_types or exclude_types) and column is not None:
-                        # Include types filter
-                        if include_types:
-                            type_terms = [{"term": {"data.types": t}} for t in include_types]
-                            prev_check["query"]["bool"]["filter"].append({
-                                "nested": {
-                                    "path": "data",
-                                    "query": {
-                                        "bool": {
-                                            "must": [
-                                                {"term": {"data.col_index": column}},
-                                                {"bool": {"should": type_terms, "minimum_should_match": 1}}
-                                            ]
-                                        }
-                                    }
-                                }
-                            })
-                        
-                        # Exclude types filter
-                        if exclude_types:
-                            for type_name in exclude_types:
-                                prev_check["query"]["bool"]["filter"].append({
-                                    "bool": {
-                                        "must_not": {
-                                            "nested": {
-                                                "path": "data",
-                                                "query": {
-                                                    "bool": {
-                                                        "must": [
-                                                            {"term": {"data.col_index": column}},
-                                                            {"term": {"data.types": type_name}}
-                                                        ]
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                })
-                    
-                    prev_results = es.search(index=ES_INDEX, body=prev_check)
-                    if prev_results["hits"]["total"]["value"] > 0:
-                        new_prev_cursor = str(first_id)
-
+                # Reverse sort directions back to normal
+                for sort_item in first_page_check["sort"]:
+                    for key in sort_item:
+                        if isinstance(sort_item[key], dict) and "order" in sort_item[key]:
+                            sort_item[key]["order"] = "desc" if sort_item[key]["order"] == "asc" else "asc"
+                
+                # Check if there are any documents before this "batch"
+                first_hit = hits[0]
+                first_page_check["search_after"] = first_hit["sort"]
+                
+                check_res = es.search(index=ES_INDEX, body=first_page_check)
+                if len(check_res["hits"]["hits"]) > 0:
+                    # There are results after the first item in our current batch
+                    # So we're not on the first page
+                    new_next_cursor = create_cursor(first_hit["sort"])
+            
+            # For prev_cursor:
+            # - If we're not on the first page, create prev_cursor
+            if len(hits) > 0:
+                first_hit = hits[0]
+                
+                # Check if we're on the first page
+                first_page_check = {
+                    "query": {
+                        "bool": {"filter": filters}
+                    },
+                    "sort": [{key: {"order": "desc" if item[key]["order"] == "asc" else "asc"} 
+                              if isinstance(item[key], dict) and "order" in item[key] else item[key] 
+                              for key in item} 
+                            for item in sort_criteria],
+                    "size": 1,
+                    "_source": False
+                }
+                
+                # If we have a first hit, check if anything comes before it
+                try:
+                    first_page_check["search_after"] = first_hit["sort"]
+                    check_res = es.search(index=ES_INDEX, body=first_page_check)
+                    if len(check_res["hits"]["hits"]) > 0:
+                        new_prev_cursor = create_cursor(first_hit["sort"])
+                except Exception as e:
+                    # Log the error but don't fail the request
+                    print(f"Error checking for previous page: {str(e)}")
+                
+                # If we came via next_cursor, we definitely have a previous page
+                if next_cursor:
+                    new_prev_cursor = create_cursor(first_hit["sort"])
+        
         # Extract row IDs from search hits
         row_ids = [hit["_source"]["row_id"] for hit in hits]
         

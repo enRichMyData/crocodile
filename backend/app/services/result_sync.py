@@ -416,6 +416,8 @@ class ResultSyncService:
             )
 
             # Update table status based on completion
+            log_info(
+                f"Final completed count: {final_completed_count} out of {total_count}")
             result = self._update_table_status(
                 db, user_id, dataset_name, table_name, final_completed_count, total_count
             )

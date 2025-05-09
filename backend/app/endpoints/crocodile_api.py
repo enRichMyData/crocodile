@@ -1454,3 +1454,87 @@ def sort_rows_by_confidence(
             return total_score / count if count > 0 else 0.0
         
         return sorted(rows, key=get_avg_confidence, reverse=reverse)
+
+@router.get("/datasets/{dataset_name}/tables/{table_name}/status")
+def get_table_status(
+    dataset_name: str,
+    table_name: str,
+    token_payload: str = Depends(verify_token),
+    db: Database = Depends(get_db),
+    crocodile_db: Database = Depends(get_crocodile_db),
+):
+    """
+    Get the current processing status of a specific table.
+    Returns completion percentage and status information.
+    """
+    user_id = token_payload.get("email")
+
+    # Check dataset
+    if not db.datasets.find_one({"user_id": user_id, "dataset_name": dataset_name}):
+        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
+
+    # Check table
+    table = db.tables.find_one(
+        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+    )
+    if not table:
+        raise HTTPException(
+            status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
+        )
+
+    # Check if there are documents with status or ml_status = TODO or DOING
+    table_status_filter = {
+        "user_id": user_id,
+        "dataset_name": dataset_name,
+        "table_name": table_name,
+        "$or": [
+            {"status": {"$in": ["TODO", "DOING"]}},
+            {"ml_status": {"$in": ["TODO", "DOING"]}},
+        ],
+    }
+
+    # Check both databases for pending documents
+    pending_docs_count = db.input_data.count_documents(table_status_filter)
+    if pending_docs_count == 0:
+        pending_docs_count = crocodile_db.input_data.count_documents(table_status_filter)
+
+    total_rows = table.get("total_rows", 0)
+    
+    # Calculate completion percentage
+    if total_rows == 0:
+        completion_percentage = 100  # If no rows, consider it complete
+    else:
+        remaining_percentage = (pending_docs_count / total_rows) * 100
+        completion_percentage = 100 - remaining_percentage
+
+    # Determine overall status
+    if pending_docs_count == 0:
+        status = "DONE"
+    else:
+        status = "PROCESSING"
+
+    # Get the completion percentage from the table record if available
+    stored_completion = table.get("completion_percentage", None)
+    
+    # If the table record has a completion percentage and we're not fully done,
+    # use the stored value as it's likely more accurate (from the sync process)
+    if stored_completion is not None and pending_docs_count > 0:
+        completion_percentage = stored_completion
+
+    # Prepare response
+    response = {
+        "dataset_name": dataset_name,
+        "table_name": table_name,
+        "status": status,
+        "total_rows": total_rows,
+        "pending_rows": pending_docs_count,
+        "completed_rows": total_rows - pending_docs_count,
+        "completion_percentage": round(completion_percentage, 2),
+        "last_synced": table.get("last_synced", None),
+    }
+
+    # Include error if present
+    if "error" in table:
+        response["error"] = table["error"]
+
+    return response

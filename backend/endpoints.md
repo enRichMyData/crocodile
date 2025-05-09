@@ -243,6 +243,49 @@ curl -H "Authorization: Bearer {your_token}" \
 }
 ```
 
+### Get Table Status
+
+```
+GET /datasets/{dataset_name}/tables/{table_name}/status
+```
+
+Retrieves the current processing status of a table.
+
+**Example:**
+```bash
+curl -H "Authorization: Bearer {your_token}" \
+  "http://localhost:8000/datasets/my_dataset/tables/movies/status"
+```
+
+**Response:**
+```json
+{
+  "dataset_name": "my_dataset",
+  "table_name": "movies",
+  "status": "DONE",
+  "total_rows": 50,
+  "pending_rows": 0,
+  "completed_rows": 50,
+  "completion_percentage": 100.0,
+  "last_synced": "2023-08-01T14:22:35.123Z"
+}
+```
+
+If there was an error during processing:
+```json
+{
+  "dataset_name": "my_dataset",
+  "table_name": "movies",
+  "status": "PROCESSING",
+  "total_rows": 50,
+  "pending_rows": 12,
+  "completed_rows": 38,
+  "completion_percentage": 76.0,
+  "last_synced": "2023-08-01T14:20:35.123Z",
+  "error": "Error message details"
+}
+```
+
 ### Add Table from JSON
 
 ```

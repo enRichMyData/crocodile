@@ -174,6 +174,10 @@ Retrieves table data with rows, columns and linked entities with pagination.
 - `sort_by` (string, optional): Column name to sort by
 - `sort_order` (string, optional): Sort order, either `asc` for ascending or `desc` for descending
 
+**Note on pagination behavior:**
+- Regular pagination and filtering support bi-directional navigation (both `next_cursor` and `prev_cursor`)
+- When sorting by confidence (`sort_by=confidence` or `sort_by=confidence_avg`), only forward pagination is supported (`prev_cursor` will always be null)
+
 **Example:**
 ```bash
 # Basic table data retrieval
@@ -416,11 +420,11 @@ curl -X DELETE \
 
 ## Note on Pagination
 
-All endpoints that return lists support bi-directional pagination using the cursor pattern. To navigate:
+All endpoints that return lists support bi-directional pagination using the cursor pattern, with the exception of confidence-based sorting which only supports forward pagination. To navigate:
 
 1. For the first page, make a request without cursor parameters
 2. For the next page, use the `next_cursor` from the previous response
-3. For the previous page, use the `prev_cursor` from the current response
+3. For the previous page (when available), use the `prev_cursor` from the current response
 
 Example of moving through pages:
 ```bash

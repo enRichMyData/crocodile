@@ -1024,8 +1024,11 @@ def delete_dataset(
     # Delete dataset metadata
     db.datasets.delete_one({"user_id": user_id, "dataset_name": dataset_name})
 
+    # Delete all rows associated with this dataset
+    db.input_data.delete_many({"user_id": user_id, "dataset_name": dataset_name})
+
     # Delete data from crocodile_db
-    crocodile_db.input_data.delete_many({"user_id": user_id, "dataset_name": dataset_name})
+    crocodile_db.input_data.delete_many({"client_id": user_id, "dataset_name": dataset_name})
 
     # Delete data from Elasticsearch
     try:
@@ -1091,9 +1094,14 @@ def delete_table(
         {"$inc": {"total_tables": -1, "total_rows": -row_count}},
     )
 
+    # Delete all rows associated with this table
+    db.input_data.delete_many(
+        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+    )
+
     # Delete data from crocodile_db
     crocodile_db.input_data.delete_many(
-        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+        {"client_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
     )
 
     # Delete data from Elasticsearch

@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Any, Union
 import base64
+import asyncio
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,8 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import StreamingResponse
+from pymongo import MongoClient
 from pydantic import BaseModel
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
@@ -1463,86 +1466,123 @@ def sort_rows_by_confidence(
         
         return sorted(rows, key=get_avg_confidence, reverse=reverse)
 
+async def get_table_status_stream(
+    dataset_name: str,
+    table_name: str,
+    token_payload: str,
+):
+    """
+    Get the current status of a specific table (streaming).
+    Manages its own DB connection for the stream duration.
+    """
+    user_id = token_payload.get("email")
+    client = None  # Initialize client to None
+    try:
+        # Create a new client specifically for this stream
+        client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
+        db = client["crocodile_backend_db"]
+        crocodile_db = client["crocodile_db"]
+
+        # Check dataset
+        if not db.datasets.find_one(
+            {"user_id": user_id, "dataset_name": dataset_name}
+        ):
+            yield f"data: {json.dumps({'status': 'ERROR', 'detail': f'Dataset {dataset_name} not found'})}\n\n"
+            return  # Stop the generator
+
+        # Check table
+        table = db.tables.find_one(
+            {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+        )
+        if not table:
+            yield f"data: {json.dumps({'status': 'ERROR', 'detail': f'Table {table_name} not found in dataset {dataset_name}'})}\n\n"
+            return  # Stop the generator
+
+        # Check if there are documents with status or ml_status = TODO or DOING
+        table_status_filter = {
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "$or": [
+                {"status": {"$in": ["TODO", "DOING"]}},
+                {"ml_status": {"$in": ["TODO", "DOING"]}},
+            ],
+        }
+
+        total_rows = table.get("total_rows", 0)
+        
+        # Initial response with current state
+        stored_completion = table.get("completion_percentage")
+        last_synced = table.get("last_synced")
+        if last_synced:
+            last_synced = last_synced.isoformat()
+
+        while True:  # Loop until processing is complete
+            # Check both databases for pending documents
+            pending_docs_count = db.input_data.count_documents(table_status_filter)
+            if pending_docs_count == 0:
+                pending_docs_count = crocodile_db.input_data.count_documents(table_status_filter)
+
+            # Calculate completion percentage
+            if total_rows == 0:
+                completion_percentage = 100  # If no rows, consider it complete
+            else:
+                remaining_percentage = (pending_docs_count / total_rows) * 100
+                completion_percentage = 100 - remaining_percentage
+
+            # If the table record has a completion percentage and we're not fully done,
+            # use the stored value as it's likely more accurate (from the sync process)
+            if stored_completion is not None and pending_docs_count > 0:
+                completion_percentage = stored_completion
+
+            # Determine overall status
+            if pending_docs_count == 0:
+                status = "DONE"
+            else:
+                status = "PROCESSING"
+
+            # Send status update
+            response = {
+                "dataset_name": dataset_name,
+                "table_name": table_name,
+                "status": status,
+                "total_rows": total_rows,
+                "pending_rows": pending_docs_count,
+                "completed_rows": total_rows - pending_docs_count,
+                "completion_percentage": round(completion_percentage, 2),
+                "last_synced": last_synced,
+            }
+            
+            # Include error if present
+            if "error" in table:
+                response["error"] = table["error"]
+                
+            yield f"data: {json.dumps(response)}\n\n"
+
+            # If processing is complete, exit the stream
+            if status == "DONE":
+                break
+                
+            # Wait before checking again
+            await asyncio.sleep(1)
+
+    except Exception as e:
+        yield f"data: {json.dumps({'status': 'ERROR', 'detail': str(e)})}\n\n"
+    finally:
+        if client:
+            client.close()
+
 @router.get("/datasets/{dataset_name}/tables/{table_name}/status")
-def get_table_status(
+async def stream_table_status(
     dataset_name: str,
     table_name: str,
     token_payload: str = Depends(verify_token),
-    db: Database = Depends(get_db),
-    crocodile_db: Database = Depends(get_crocodile_db),
 ):
     """
-    Get the current processing status of a specific table.
-    Returns completion percentage and status information.
+    Stream the current status of a specific table with real-time updates.
+    Returns Server-Sent Events (SSE) with status information.
     """
-    user_id = token_payload.get("email")
-
-    # Check dataset
-    if not db.datasets.find_one({"user_id": user_id, "dataset_name": dataset_name}):
-        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
-
-    # Check table
-    table = db.tables.find_one(
-        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+    return StreamingResponse(
+        get_table_status_stream(dataset_name, table_name, token_payload),
+        media_type="text/event-stream",
     )
-    if not table:
-        raise HTTPException(
-            status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
-        )
-
-    # Check if there are documents with status or ml_status = TODO or DOING
-    table_status_filter = {
-        "user_id": user_id,
-        "dataset_name": dataset_name,
-        "table_name": table_name,
-        "$or": [
-            {"status": {"$in": ["TODO", "DOING"]}},
-            {"ml_status": {"$in": ["TODO", "DOING"]}},
-        ],
-    }
-
-    # Check both databases for pending documents
-    pending_docs_count = db.input_data.count_documents(table_status_filter)
-    if pending_docs_count == 0:
-        pending_docs_count = crocodile_db.input_data.count_documents(table_status_filter)
-
-    total_rows = table.get("total_rows", 0)
-    
-    # Calculate completion percentage
-    if total_rows == 0:
-        completion_percentage = 100  # If no rows, consider it complete
-    else:
-        remaining_percentage = (pending_docs_count / total_rows) * 100
-        completion_percentage = 100 - remaining_percentage
-
-    # Determine overall status
-    if pending_docs_count == 0:
-        status = "DONE"
-    else:
-        status = "PROCESSING"
-
-    # Get the completion percentage from the table record if available
-    stored_completion = table.get("completion_percentage", None)
-    
-    # If the table record has a completion percentage and we're not fully done,
-    # use the stored value as it's likely more accurate (from the sync process)
-    if stored_completion is not None and pending_docs_count > 0:
-        completion_percentage = stored_completion
-
-    # Prepare response
-    response = {
-        "dataset_name": dataset_name,
-        "table_name": table_name,
-        "status": status,
-        "total_rows": total_rows,
-        "pending_rows": pending_docs_count,
-        "completed_rows": total_rows - pending_docs_count,
-        "completion_percentage": round(completion_percentage, 2),
-        "last_synced": table.get("last_synced", None),
-    }
-
-    # Include error if present
-    if "error" in table:
-        response["error"] = table["error"]
-
-    return response

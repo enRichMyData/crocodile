@@ -197,7 +197,7 @@ class ResultSyncService:
                     if not results:
                         # No results for this batch, move to the next one
                         log_info(f"No results found for batch with {len(batch_ids)} row IDs")
-                        #time.sleep(2)  # Wait a bit before trying another batch
+                        time.sleep(5)  # Wait a bit before trying another batch
                         continue
 
                     # Prepare bulk operations for Elasticsearch updates
@@ -209,11 +209,6 @@ class ResultSyncService:
                         status = result.get("status")
                         ml_status = result.get("ml_status")
                         el_results = result.get("el_results", {})
-
-                        # Skip if no results yet
-                        if not el_results:
-                            log_info(f"No entity linking results for row {row_id}")
-                            continue
 
                         # Calculate row-level average confidence score
                         confidence_scores = []
@@ -362,7 +357,7 @@ class ResultSyncService:
                     break
 
                 # Brief pause between batches to avoid hammering the database
-                #time.sleep(1)
+                #time.sleep(0.5)
 
             # After processing all rows, update the table with type frequencies
             if column_type_frequencies:
@@ -493,8 +488,7 @@ class ResultSyncService:
                 "table_name": table_name,
                 "$or": [
                     {"status": {"$ne": "DONE"}},
-                    {"ml_status": {"$ne": "DONE"}},
-                    {"el_results": {"$eq": {}}},
+                    {"ml_status": {"$ne": "DONE"}}
                 ],
             },
             {"row_id": 1},

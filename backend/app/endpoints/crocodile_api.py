@@ -7,6 +7,7 @@ import base64
 import asyncio
 
 import numpy as np
+import threading
 import pandas as pd
 from bson import ObjectId
 from dependencies import get_crocodile_db, get_db, verify_token, es, ES_INDEX
@@ -111,11 +112,16 @@ def add_table(
             sync_service.sync_results(
                 user_id=user_id, dataset_name=datasetName, table_name=table_upload.table_name
             )
+        
+        def run_tasks_in_parallel():
+            t1 = threading.Thread(target=run_crocodile_task)
+            t2 = threading.Thread(target=sync_results_task)
+            t1.start()
+            t2.start()
 
         # Add both tasks to background processing
-        background_tasks.add_task(run_crocodile_task)
-        background_tasks.add_task(sync_results_task)
-
+        background_tasks.add_task(run_tasks_in_parallel)
+     
         return {
             "message": "Table added successfully.",
             "tableName": table_upload.table_name,
@@ -198,9 +204,14 @@ def add_table_csv(
                 user_id=user_id, dataset_name=datasetName, table_name=table_name
             )
 
+        def run_tasks_in_parallel():
+            t1 = threading.Thread(target=run_crocodile_task)
+            t2 = threading.Thread(target=sync_results_task)
+            t1.start()
+            t2.start()
+
         # Add both tasks to background processing
-        background_tasks.add_task(run_crocodile_task)
-        background_tasks.add_task(sync_results_task)
+        background_tasks.add_task(run_tasks_in_parallel)
 
         return {
             "message": "CSV table added successfully.",

@@ -1572,10 +1572,10 @@ async def get_table_status_stream(
 
             # If processing is complete, exit the stream
             if status == "DONE":
-                db.tables.update_one(
-                    {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name},
-                    {"$set": {"status": "DONE", "completion_percentage": 100, "last_synced": datetime.now()}}
-                )
+                # db.tables.update_one(
+                #     {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name},
+                #     {"$set": {"status": "DONE", "completion_percentage": 100, "last_synced": datetime.now()}}
+                # )
                 break
                 
             # Wait before checking again

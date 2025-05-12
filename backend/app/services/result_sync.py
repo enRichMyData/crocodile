@@ -77,7 +77,7 @@ class ResultSyncService:
                 status_message = f"Error: {str(error)}"
             else:
                 table_status = (
-                    "completed" if completion_percentage >= 0.95 else "partially_completed"
+                    "DONE" if completion_percentage >= 0.95 else "DOING"
                 )
                 status_message = f"Sync {table_status}"
 
@@ -125,6 +125,9 @@ class ResultSyncService:
         """
         log_info(f"Starting result sync for {user_id}/{dataset_name}/{table_name}")
 
+        # Dealay to wait a bit before starting the sync
+        time.sleep(10)
+
         # Create a MongoDB connection
         client = self._get_client()
         db = client[self.backend_db_name]
@@ -164,10 +167,7 @@ class ResultSyncService:
             # Track progress
             completed_count = 0
             batch_size = self.batch_size
-            last_progress_time = time.time()
-            consecutive_failures = 0
-            max_failures = 5  # Safety limit for consecutive failures
-
+           
             # Dictionary to collect type frequencies by column - using type_id as key
             column_type_frequencies = defaultdict(lambda: defaultdict(int))
             column_type_mapping = {}  # Maps type_id to {id, name} for later reference
@@ -175,202 +175,79 @@ class ResultSyncService:
             # Process all rows in batches, focusing on incomplete ones
             input_collection = db.input_data
 
-            # First, try to get rows that are not yet complete
             while True:
-                # Get a batch of rows that are not completed
-                incomplete_rows = self._get_incomplete_batch(
-                    input_collection, user_id, dataset_name, table_name, batch_size
+                cursor = input_collection.find(
+                    {
+                        "user_id": user_id,
+                        "dataset_name": dataset_name,
+                        "table_name": table_name,
+                        "$or": [
+                            {"status": {"$ne": "DONE"}},
+                            {"ml_status": {"$ne": "DONE"}},
+                        ]
+                    },
+                    {"row_id": 1},
+                    no_cursor_timeout=True
                 )
 
-                # If no more incomplete rows, we're done
-                if not incomplete_rows:
-                    log_info(f"All rows have been synced for {dataset_name}/{table_name}")
-                    break
-
-                # Extract the row IDs from the batch
-                batch_ids = [row["row_id"] for row in incomplete_rows]
-
-                try:
-                    # Fetch the latest results from Crocodile
-                    results = result_fetcher.get_results(batch_ids)
-
-                    if not results:
-                        # No results for this batch, move to the next one
-                        log_info(f"No results found for batch with {len(batch_ids)} row IDs")
-                        time.sleep(5)  # Wait a bit before trying another batch
-                        continue
-
-                    # Prepare bulk operations for Elasticsearch updates
-                    es_operations = []
-
-                    # Process each result
-                    for result in results:
-                        row_id = result.get("row_id")
-                        status = result.get("status")
-                        ml_status = result.get("ml_status")
-                        el_results = result.get("el_results", {})
-
-                        # Calculate row-level average confidence score
-                        confidence_scores = []
-                        # Prepare data updates with types from each column's top candidate
-                        data_updates = []
-                        column_confidence_scores = {}  # Track confidence by column
-
-                        for col_idx, candidates in el_results.items():
-                            if candidates and len(candidates) > 0:
-                                # Get the top candidate and its confidence score
-                                top_candidate = candidates[0]
-                                confidence = top_candidate.get("score", 0.0)
-                                
-                                # Track score if not None for row average
-                                if confidence is not None:
-                                    confidence_scores.append(confidence)
-                                    column_confidence_scores[col_idx] = confidence
-                                
-                                # Extract all types from the top candidate
-                                entity_types = []
-                                if "types" in top_candidate:
-                                    for type_obj in top_candidate["types"]:
-                                        if isinstance(type_obj, dict) and "name" in type_obj and "id" in type_obj:
-                                            type_id = type_obj["id"]
-                                            type_name = type_obj["name"]
-                                            # Store as tuple of (id, name) for entity_types
-                                            entity_types.append((type_id, type_name))
-                                            # Count frequencies using ID as key for uniqueness
-                                            column_type_frequencies[col_idx][type_id] += 1
-                                            # Store mapping from ID to full type info
-                                            column_type_mapping[type_id] = {"id": type_id, "name": type_name}
-                                        elif isinstance(type_obj, dict) and "name" in type_obj:
-                                            # Fallback for types with name but no id
-                                            type_name = type_obj["name"]
-                                            entity_types.append((type_name, type_name))  # Use name as ID
-                                            column_type_frequencies[col_idx][type_name] += 1
-                                            column_type_mapping[type_name] = {"name": type_name}
-
-                                # Prepare update with types and confidence score
-                                if entity_types or confidence is not None:
-                                    update = {
-                                        "col_index": int(col_idx),
-                                    }
-                                    if entity_types:
-                                        update["types"] = [type_id for type_id, _ in entity_types]
-                                    if confidence is not None:
-                                        update["confidence"] = confidence
-                                    data_updates.append(update)
-
-                        # Calculate row average confidence
-                        row_avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
-
-                        # Update the backend database with confidence scores
-                        db.input_data.update_one(
-                            {
-                                "user_id": user_id,
-                                "dataset_name": dataset_name,
-                                "table_name": table_name,
-                                "row_id": row_id,
-                            },
-                            {
-                                "$set": {
-                                    "status": status,
-                                    "ml_status": ml_status,
-                                    "el_results": el_results,
-                                    "last_updated": datetime.now(),
-                                    "confidence_scores": column_confidence_scores,
-                                    "avg_confidence": row_avg_confidence
-                                }
-                            },
-                            upsert=False,
+                batch_ids = []
+                for doc in cursor:
+                    batch_ids.append(doc["row_id"])
+                    if len(batch_ids) >= batch_size:
+                        self._process_batch(
+                            batch_ids, result_fetcher, db, user_id, dataset_name, table_name,
+                            column_type_frequencies, column_type_mapping
                         )
+                        batch_ids = []
 
-                        # Update type information in ES and collect type frequencies
-                        doc_id = f"{user_id}_{dataset_name}_{table_name}_{row_id}"
-
-                        # Create an update script if we have any type or confidence data
-                        if data_updates:
-                            # Use a script to update types and confidence scores
-                            update_script = {
-                                "script": {
-                                    "source": """
-                                    for (def update : params.updates) {
-                                        for (int i = 0; i < ctx._source.data.length; i++) {
-                                            if (ctx._source.data[i].col_index == update.col_index) {
-                                                if (update.containsKey('types')) {
-                                                    ctx._source.data[i].types = update.types;
-                                                }
-                                                if (update.containsKey('confidence')) {
-                                                    ctx._source.data[i].confidence = update.confidence;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // Add the row's average confidence
-                                    if (!ctx._source.containsKey('avg_confidence')) {
-                                        ctx._source.avg_confidence = params.avg_confidence;
-                                    } else {
-                                        ctx._source.avg_confidence = params.avg_confidence;
-                                    }
-                                    """,
-                                    "params": {
-                                        "updates": data_updates,
-                                        "avg_confidence": row_avg_confidence
-                                    }
-                                }
-                            }
-
-                            es_operations.append({"update": {"_index": ES_INDEX, "_id": doc_id}})
-                            es_operations.append(update_script)
-
-                        # Count as completed if done
-                        if status == "DONE" and ml_status == "DONE":
-                            completed_count += 1
-
-                    # Execute bulk ES updates if we have operations
-                    if es_operations:
-                        try:
-                            resp = es.bulk(body=es_operations, refresh=True)
-                            if resp.get("errors"):
-                                log_error(f"Errors in bulk update: {resp.get('items')}")
-                            else:
-                                log_info(f"Updated {len(es_operations)//2} documents with type information")
-                        except Exception as e:
-                            log_error(f"Failed to update ES: {str(e)}", e)
-
-                    # We made progress
-                    consecutive_failures = 0
-                    last_progress_time = time.time()
-                    log_info(
-                        f"Processed batch with {len(results)} results, completed {completed_count} rows so far"
+                if batch_ids:
+                    self._process_batch(
+                        batch_ids, result_fetcher, db, user_id, dataset_name, table_name,
+                        column_type_frequencies, column_type_mapping
                     )
 
-                except Exception as e:
-                    log_error("Error syncing results for batch", e)
-                    consecutive_failures += 1
+                # After processing all batches in this loop iteration, update progress
+                final_completed_count = db.input_data.count_documents(
+                    {
+                        "user_id": user_id,
+                        "dataset_name": dataset_name,
+                        "table_name": table_name,
+                        "status": "DONE",
+                        "ml_status": "DONE",
+                    }
+                )
+                log_info(
+                    f"Processed batch, completed count: {final_completed_count} out of {total_count}"
+                )
+                self._update_table_status(
+                    db, user_id, dataset_name, table_name, final_completed_count, total_count
+                )
 
-                    # Break out if we've had too many consecutive failures
-                    if consecutive_failures >= max_failures:
-                        log_error(f"Too many consecutive failures ({max_failures}), stopping sync")
-                        raise
-
-                # Check if we haven't made progress in a long time (5 minutes)
-                if time.time() - last_progress_time > 300:
-                    log_info("No progress for 5 minutes, completing sync process")
+                # Check if there are still incomplete rows
+                remaining = input_collection.count_documents({
+                    "user_id": user_id,
+                    "dataset_name": dataset_name,
+                    "table_name": table_name,
+                    "$or": [
+                        {"status": {"$ne": "DONE"}},
+                        {"ml_status": {"$ne": "DONE"}},
+                    ]
+                })
+                if remaining == 0:
                     break
-
-                # Brief pause between batches to avoid hammering the database
-                #time.sleep(0.5)
 
             # After processing all rows, update the table with type frequencies
             if column_type_frequencies:
                 column_type_summary = {}
                 for col_idx, type_counter in column_type_frequencies.items():
                     # Get the total count of types for this column for normalization
-                    total_count = sum(type_counter.values())
+                    type_total_count = sum(type_counter.values())
                     
                     # Convert Counter to a sorted list with normalized frequencies and type information
                     type_info = []
                     for type_id, count in type_counter.items():
                         # Calculate normalized frequency between 0 and 1
-                        frequency = count / total_count if total_count > 0 else 0
+                        frequency = count / type_total_count if type_total_count > 0 else 0
                         
                         # Get the full type info from our mapping
                         type_data = column_type_mapping.get(type_id, {"name": "unknown"})
@@ -390,7 +267,7 @@ class ResultSyncService:
                     
                     column_type_summary[str(col_idx)] = {
                         "types": type_info,
-                        "total_count": total_count
+                        "total_count": type_total_count,
                     }
                 
                 # Update the table document with type frequencies
@@ -459,39 +336,131 @@ class ResultSyncService:
             client.close()
             log_info(f"Sync process finished for {dataset_name}/{table_name}")
 
-    def _get_incomplete_batch(
+    def _process_batch(
         self,
-        collection: Collection,
+        batch_ids: List[Any],
+        result_fetcher: Any,
+        db: Any,
         user_id: str,
         dataset_name: str,
         table_name: str,
-        batch_size: int,
-    ) -> List[Dict]:
+        column_type_frequencies: Any,
+        column_type_mapping: Any,
+    ):
         """
-        Get a batch of rows that are not completed.
-
-        Args:
-            collection: MongoDB collection
-            user_id: User ID
-            dataset_name: Dataset name
-            table_name: Table name
-            batch_size: Size of the batch to retrieve
-
-        Returns:
-            List of row documents that need processing
+        Process a batch of row_ids: fetch results, update backend db, and update ES.
         """
-        # Find rows that are not completed yet
-        cursor = collection.find(
-            {
-                "user_id": user_id,
-                "dataset_name": dataset_name,
-                "table_name": table_name,
-                "$or": [
-                    {"status": {"$ne": "DONE"}},
-                    {"ml_status": {"$ne": "DONE"}}
-                ],
-            },
-            {"row_id": 1},
-        ).limit(batch_size)
+        try:
+            results = result_fetcher.get_results(batch_ids)
+            if not results:
+                log_info(f"No results found for batch with {len(batch_ids)} row IDs")
+                time.sleep(5)
+                return
 
-        return list(cursor)
+            es_operations = []
+            for result in results:
+                row_id = result.get("row_id")
+                status = result.get("status")
+                ml_status = result.get("ml_status")
+                el_results = result.get("el_results", {})
+
+                confidence_scores = []
+                data_updates = []
+                column_confidence_scores = {}
+
+                for col_idx, candidates in el_results.items():
+                    if candidates and len(candidates) > 0:
+                        top_candidate = candidates[0]
+                        confidence = top_candidate.get("score", 0.0)
+                        if confidence is not None:
+                            confidence_scores.append(confidence)
+                            column_confidence_scores[col_idx] = confidence
+                        entity_types = []
+                        if "types" in top_candidate:
+                            for type_obj in top_candidate["types"]:
+                                if isinstance(type_obj, dict) and "name" in type_obj and "id" in type_obj:
+                                    type_id = type_obj["id"]
+                                    type_name = type_obj["name"]
+                                    entity_types.append((type_id, type_name))
+                                    column_type_frequencies[col_idx][type_id] += 1
+                                    column_type_mapping[type_id] = {"id": type_id, "name": type_name}
+                                elif isinstance(type_obj, dict) and "name" in type_obj:
+                                    type_name = type_obj["name"]
+                                    entity_types.append((type_name, type_name))
+                                    column_type_frequencies[col_idx][type_name] += 1
+                                    column_type_mapping[type_name] = {"name": type_name}
+                        if entity_types or confidence is not None:
+                            update = {
+                                "col_index": int(col_idx),
+                            }
+                            if entity_types:
+                                update["types"] = [type_id for type_id, _ in entity_types]
+                            if confidence is not None:
+                                update["confidence"] = confidence
+                            data_updates.append(update)
+
+                row_avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
+
+                db.input_data.update_one(
+                    {
+                        "user_id": user_id,
+                        "dataset_name": dataset_name,
+                        "table_name": table_name,
+                        "row_id": row_id,
+                    },
+                    {
+                        "$set": {
+                            "status": status,
+                            "ml_status": ml_status,
+                            "el_results": el_results,
+                            "last_updated": datetime.now(),
+                            "confidence_scores": column_confidence_scores,
+                            "avg_confidence": row_avg_confidence
+                        }
+                    },
+                    upsert=False,
+                )
+
+                doc_id = f"{user_id}_{dataset_name}_{table_name}_{row_id}"
+                if data_updates:
+                    update_script = {
+                        "script": {
+                            "source": """
+                            for (def update : params.updates) {
+                                for (int i = 0; i < ctx._source.data.length; i++) {
+                                    if (ctx._source.data[i].col_index == update.col_index) {
+                                        if (update.containsKey('types')) {
+                                            ctx._source.data[i].types = update.types;
+                                        }
+                                        if (update.containsKey('confidence')) {
+                                            ctx._source.data[i].confidence = update.confidence;
+                                        }
+                                    }
+                                }
+                            }
+                            // Add the row's average confidence
+                            if (!ctx._source.containsKey('avg_confidence')) {
+                                ctx._source.avg_confidence = params.avg_confidence;
+                            } else {
+                                ctx._source.avg_confidence = params.avg_confidence;
+                            }
+                            """,
+                            "params": {
+                                "updates": data_updates,
+                                "avg_confidence": row_avg_confidence
+                            }
+                        }
+                    }
+                    es_operations.append({"update": {"_index": ES_INDEX, "_id": doc_id}})
+                    es_operations.append(update_script)
+            if es_operations:
+                try:
+                    resp = es.bulk(body=es_operations, refresh=True)
+                    if resp.get("errors"):
+                        log_error(f"Errors in bulk update: {resp.get('items')}")
+                    else:
+                        log_info(f"Updated {len(es_operations)//2} documents with type information")
+                except Exception as e:
+                    log_error(f"Failed to update ES: {str(e)}", e)
+        except Exception as e:
+            log_error("Error syncing results for batch", e)

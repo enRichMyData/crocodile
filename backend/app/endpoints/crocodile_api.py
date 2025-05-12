@@ -1482,8 +1482,7 @@ async def get_table_status_stream(
         client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
         db = client["crocodile_backend_db"]
         crocodile_db = client["crocodile_db"]
-        crocodile_backend_db = client["crocodile_backend_db"]
-
+        
         # Check dataset
         if not db.datasets.find_one(
             {"user_id": user_id, "dataset_name": dataset_name}
@@ -1562,7 +1561,7 @@ async def get_table_status_stream(
 
             # If processing is complete, exit the stream
             if status == "DONE":
-                crocodile_backend_db.tables.update_one(
+                db.tables.update_one(
                     {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name},
                     {"$set": {"status": "DONE", "completion_percentage": 100, "last_synced": datetime.now()}}
                 )

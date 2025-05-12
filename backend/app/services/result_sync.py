@@ -175,6 +175,10 @@ class ResultSyncService:
             # Process all rows in batches, focusing on incomplete ones
             input_collection = db.input_data
 
+            last_remaining_count = None
+            last_update_time = time.time()
+            update_timeout = 600  # 10 minutes
+
             while True:
                 cursor = input_collection.find(
                     {
@@ -198,6 +202,7 @@ class ResultSyncService:
                             batch_ids, result_fetcher, db, user_id, dataset_name, table_name,
                             column_type_frequencies, column_type_mapping
                         )
+                        last_update_time = time.time()
                         batch_ids = []
 
                 if batch_ids:
@@ -205,6 +210,7 @@ class ResultSyncService:
                         batch_ids, result_fetcher, db, user_id, dataset_name, table_name,
                         column_type_frequencies, column_type_mapping
                     )
+                    last_update_time = time.time()
 
                 # After processing all batches in this loop iteration, update progress
                 final_completed_count = db.input_data.count_documents(
@@ -233,6 +239,16 @@ class ResultSyncService:
                         {"ml_status": {"$ne": "DONE"}},
                     ]
                 })
+
+                # Timeout logic based on unchanged remaining count
+                if remaining == last_remaining_count:
+                    if time.time() - last_update_time > update_timeout:
+                        log_info("Remaining count hasn't changed in 10 minutes, exiting sync loop")
+                        break
+                else:
+                    last_remaining_count = remaining
+                    last_update_time = time.time()
+
                 if remaining == 0:
                     break
 
@@ -288,21 +304,6 @@ class ResultSyncService:
                 }
             )
 
-            # Update table status based on completion
-            log_info(
-                f"Final completed count: {final_completed_count} out of {total_count}")
-            result = self._update_table_status(
-                db, user_id, dataset_name, table_name, final_completed_count, total_count
-            )
-
-            completion_percentage = final_completed_count / total_count if total_count > 0 else 0
-            log_info(
-                f"""Marked table {dataset_name}/{table_name} as
-                    {result['table_status']} ({completion_percentage:.1%} complete)"""
-            )
-
-            return result
-
         except Exception as e:
             log_error("Sync process terminated with error", e)
 
@@ -354,7 +355,6 @@ class ResultSyncService:
             results = result_fetcher.get_results(batch_ids)
             if not results:
                 log_info(f"No results found for batch with {len(batch_ids)} row IDs")
-                time.sleep(5)
                 return
 
             es_operations = []

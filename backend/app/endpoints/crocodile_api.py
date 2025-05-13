@@ -796,7 +796,7 @@ def delete_table(
 # ------------------
 
 # PUT /rows/{row_id}/columns/{column_id}
-@router.put("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}", tags=["annotation"])
+@router.put("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}", tags=["annotations"])
 def update_annotation(
     dataset_name: str,
     table_name: str,

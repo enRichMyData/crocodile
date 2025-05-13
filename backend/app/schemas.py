@@ -58,3 +58,42 @@ class TableAddResponse(BaseModel):
     tableName: str
     datasetName: str
     userId: str
+
+
+# Dataset Schemas
+class DatasetBase(BaseModel):
+    dataset_name: str = Field(..., description="Name of the dataset.")
+    total_tables: int = Field(default=0, description="Total number of tables in the dataset.")
+    total_rows: int = Field(default=0, description="Total number of rows across all tables in the dataset.")
+    user_id: str = Field(..., description="Identifier of the user who owns the dataset.")
+    created_at: str = Field(..., description="Timestamp of when the dataset was created (ISO format).")
+
+
+class DatasetResponseItem(DatasetBase):
+    id: str = Field(..., alias="_id", description="Unique identifier of the dataset.")
+
+    class Config:
+        populate_by_name = True # Allows using alias "_id" for "id"
+
+
+class DatasetCreateResponse(BaseModel):
+    message: str
+    dataset: DatasetResponseItem
+
+
+class Pagination(BaseModel):
+    next_cursor: Optional[str] = None
+    prev_cursor: Optional[str] = None
+
+
+class DatasetListResponse(BaseModel):
+    data: List[DatasetResponseItem]
+    pagination: Pagination
+
+
+class DatasetCreateRequest(BaseModel):
+    dataset_name: str = Field(..., min_length=1, description="Name of the dataset, cannot be empty.")
+
+
+class DatasetDeleteResponse(BaseModel):
+    message: str

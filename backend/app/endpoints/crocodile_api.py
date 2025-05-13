@@ -29,7 +29,15 @@ from pymongo.errors import DuplicateKeyError # type: ignore
 # Import Local Libraries
 from dependencies import get_crocodile_db, get_db, verify_token
 from endpoints.imdb_example import IMDB_EXAMPLE
-from schemas import AnnotationUpdate, TableUpload, TableAddResponse
+from schemas import (
+    AnnotationUpdate,
+    TableUpload,
+    TableAddResponse,
+    DatasetListResponse,
+    DatasetCreateResponse,
+    DatasetCreateRequest,
+    DatasetDeleteResponse,
+)
 from services.data_service import DataService
 from services.result_sync import ResultSyncService
 from services.utils import sanitize_for_json
@@ -43,7 +51,7 @@ router = APIRouter()
 # -----------------
 
 # GET /datasets
-@router.get("/datasets", tags=["datasets"])
+@router.get("/datasets", tags=["datasets"], response_model=DatasetListResponse)
 def get_datasets(
     limit: int = Query(10),
     next_cursor: Optional[str] = Query(None),
@@ -124,9 +132,13 @@ def get_datasets(
 
     # Format the response
     for dataset in datasets:
-        dataset["_id"] = str(dataset["_id"])
-        if "created_at" in dataset:
+        dataset["_id"] = str(dataset["_id"]) # Ensure _id is a string for aliasing
+        if "created_at" in dataset and isinstance(dataset["created_at"], datetime):
             dataset["created_at"] = dataset["created_at"].isoformat()
+        # Ensure all fields required by DatasetResponseItem are present or have defaults
+        dataset.setdefault("total_tables", 0)
+        dataset.setdefault("total_rows", 0)
+        # user_id is already in query_filter and should be in the dataset doc
 
     return {
         "data": datasets,
@@ -134,9 +146,9 @@ def get_datasets(
     }
 
 # POST /datasets
-@router.post("/datasets", status_code=status.HTTP_201_CREATED, tags=["datasets"])
+@router.post("/datasets", tags=["datasets"], response_model=DatasetCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_dataset(
-    dataset_data: dict = Body(..., example={"dataset_name": "test"}),  # updated example key
+    dataset_request: DatasetCreateRequest, # Changed from dataset_data: dict to use Pydantic model
     token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
 ):
@@ -146,29 +158,42 @@ def create_dataset(
     user_id = token_payload.get("email")
 
     existing = db.datasets.find_one(
-        {"user_id": user_id, "dataset_name": dataset_data.get("dataset_name")}
-    )  # updated query key
+        {"user_id": user_id, "dataset_name": dataset_request.dataset_name} # Use attribute access
+    )
     if existing:
         raise HTTPException(
             status_code=400,
-            detail=f"Dataset with dataset_name {dataset_data.get('dataset_name')} already exists",
+            detail=f"Dataset with dataset_name {dataset_request.dataset_name} already exists", # Use attribute access
         )
 
-    dataset_data["created_at"] = datetime.now()
-    dataset_data["total_tables"] = 0
-    dataset_data["total_rows"] = 0
-    dataset_data["user_id"] = user_id  # Renamed from client_id to user_id
+    # Prepare the document to be inserted into MongoDB
+    new_dataset_doc = {
+        "dataset_name": dataset_request.dataset_name, # Use attribute access
+        "created_at": datetime.now().isoformat(),
+        "total_tables": 0,
+        "total_rows": 0,
+        "user_id": user_id,
+    }
 
     try:
-        result = db.datasets.insert_one(dataset_data)
+        result = db.datasets.insert_one(new_dataset_doc)
     except DuplicateKeyError:
         raise HTTPException(status_code=400, detail="Dataset already exists")
-    dataset_data["_id"] = str(result.inserted_id)
+    
+    # Prepare the response dataset object, ensuring it matches DatasetResponseItem structure
+    response_dataset = {
+        "_id": str(result.inserted_id),
+        "dataset_name": new_dataset_doc["dataset_name"],
+        "total_tables": new_dataset_doc["total_tables"],
+        "total_rows": new_dataset_doc["total_rows"],
+        "user_id": new_dataset_doc["user_id"],
+        "created_at": new_dataset_doc["created_at"],
+    }
 
-    return {"message": "Dataset created successfully", "dataset": dataset_data}
+    return {"message": "Dataset created successfully", "dataset": response_dataset}
 
 # DELETE /datasets/{dataset_name}
-@router.delete("/datasets/{dataset_name}", status_code=status.HTTP_204_NO_CONTENT, tags=["datasets"])
+@router.delete("/datasets/{dataset_name}", tags=["datasets"], response_model=DatasetDeleteResponse, status_code=status.HTTP_200_OK)
 def delete_dataset(
     dataset_name: str,
     token_payload: str = Depends(verify_token),
@@ -196,7 +221,7 @@ def delete_dataset(
     # Delete data from crocodile_db
     crocodile_db.input_data.delete_many({"user_id": user_id, "dataset_name": dataset_name})
 
-    return None
+    return {"message": f"Dataset {dataset_name} and its associated tables deleted successfully"}
 
 # Table Endpoints
 # ---------------

@@ -1,14 +1,15 @@
+# Import Build-in Libraries
+import asyncio
+from datetime import datetime
 import json
 import os
 import time
-import asyncio
-from datetime import datetime
 from typing import Dict, List, Optional
+
+# Import Third-party Libraries
 import numpy as np
 import pandas as pd
 from bson import ObjectId
-from dependencies import get_crocodile_db, get_db, verify_token
-from endpoints.imdb_example import IMDB_EXAMPLE
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -23,14 +24,18 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from pymongo import MongoClient
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
-from pymongo import MongoClient
+
+# Import Local Libraries
+from dependencies import get_crocodile_db, get_db, verify_token
+from endpoints.imdb_example import IMDB_EXAMPLE
 from services.data_service import DataService
 from services.result_sync import ResultSyncService
 from services.utils import sanitize_for_json
 
-# Import services and utilities
+# Import Crocodile Library
 from crocodile import Crocodile
 
 router = APIRouter()

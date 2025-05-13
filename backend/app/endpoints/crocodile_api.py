@@ -39,172 +39,10 @@ from crocodile import Crocodile
 
 router = APIRouter()
 
-@router.post("/datasets/{datasetName}/tables/json", status_code=status.HTTP_201_CREATED)
-def add_table(
-    datasetName: str,
-    table_upload: TableUpload = Body(..., example=IMDB_EXAMPLE),
-    background_tasks: BackgroundTasks = None,
-    token_payload: str = Depends(verify_token),
-    db: Database = Depends(get_db),
-) -> TableAddResponse:
-    """
-    Add a new table to an existing dataset and trigger Crocodile processing in the background.
-    """
-    # Require user_id for data isolation
-    user_id = token_payload.get("email")
+# Dataset Endpoints
+# -----------------
 
-    try:
-        # Convert data to DataFrame for classification if needed
-        df = pd.DataFrame(table_upload.data)
-
-        # Get or create column classification
-        classification = DataService.get_or_create_column_classification(
-            data=df,
-            header=table_upload.header,
-            provided_classification=table_upload.classified_columns,
-        )
-
-        # Create the table and store data
-        DataService.create_table(
-            db=db,
-            user_id=user_id,
-            dataset_name=datasetName,
-            table_name=table_upload.table_name,
-            header=table_upload.header,
-            total_rows=table_upload.total_rows,
-            classification=classification,
-            data_list=table_upload.data,
-        )
-
-        # Trigger background task with classification passed to Crocodile
-        def run_crocodile_task():
-            croco = Crocodile(
-                input_csv=df,
-                client_id=user_id,
-                dataset_name=datasetName,
-                table_name=table_upload.table_name,
-                max_candidates=3,
-                entity_retrieval_endpoint=os.environ.get("ENTITY_RETRIEVAL_ENDPOINT"),
-                entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT"),
-                entity_retrieval_token=os.environ.get("ENTITY_RETRIEVAL_TOKEN"),
-                max_workers=8,
-                candidate_retrieval_limit=10,
-                model_path="./crocodile/models/default.h5",
-                save_output_to_csv=False,
-                columns_type=classification,
-            )
-            croco.run()
-
-        # Add a separate background task to sync results using the service
-        def sync_results_task():
-            # Create a result sync service and sync results
-            mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
-            sync_service = ResultSyncService(mongo_uri=mongo_uri)
-            sync_service.sync_results(
-                user_id=user_id, dataset_name=datasetName, table_name=table_upload.table_name
-            )
-
-        # Add both tasks to background processing
-        background_tasks.add_task(run_crocodile_task)
-        background_tasks.add_task(sync_results_task)
-
-        return TableAddResponse(
-            message="Table added successfully.",
-            tableName=table_upload.table_name,
-            datasetName=datasetName,
-            userId=user_id,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-def parse_json_column_classification(column_classification: str = Form("")) -> Optional[dict]:
-    # Parse the form field; return None if empty
-    if not column_classification:
-        return None
-    return json.loads(column_classification)
-
-@router.post("/datasets/{datasetName}/tables/csv", status_code=status.HTTP_201_CREATED)
-def add_table_csv(
-    datasetName: str,
-    table_name: str,
-    file: UploadFile = File(...),
-    column_classification: Optional[dict] = Depends(parse_json_column_classification),
-    background_tasks: BackgroundTasks = None,
-    token_payload: str = Depends(verify_token),
-    db: Database = Depends(get_db),
-):
-    """
-    Add a new table from CSV file to an existing dataset and trigger Crocodile processing.
-    """
-    user_id = token_payload.get("email")
-
-    try:
-        # Read CSV file and convert NaN values to None
-        df = pd.read_csv(file.file)
-        df = df.replace({np.nan: None})  # permanent fix for JSON serialization
-
-        header = df.columns.tolist()
-        total_rows = len(df)
-
-        # Get or create column classification
-        classification = DataService.get_or_create_column_classification(
-            data=df, header=header, provided_classification=column_classification
-        )
-
-        # Create the table and store data
-        DataService.create_table(
-            db=db,
-            user_id=user_id,
-            dataset_name=datasetName,
-            table_name=table_name,
-            header=header,
-            total_rows=total_rows,
-            classification=classification,
-            data_df=df,
-        )
-
-        # Trigger background task with columns_type passed to Crocodile
-        def run_crocodile_task():
-            croco = Crocodile(
-                input_csv=df,
-                client_id=user_id,
-                dataset_name=datasetName,
-                table_name=table_name,
-                entity_retrieval_endpoint=os.environ.get("ENTITY_RETRIEVAL_ENDPOINT"),
-                entity_retrieval_token=os.environ.get("ENTITY_RETRIEVAL_TOKEN"),
-                max_workers=8,
-                candidate_retrieval_limit=10,
-                model_path="./crocodile/models/default.h5",
-                save_output_to_csv=False,
-                columns_type=classification,
-                entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT"),
-            )
-            croco.run()
-
-        # Add a separate background task to sync results using the service
-        def sync_results_task():
-            # Create a result sync service and sync results
-            mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
-            sync_service = ResultSyncService(mongo_uri=mongo_uri)
-            sync_service.sync_results(
-                user_id=user_id, dataset_name=datasetName, table_name=table_name
-            )
-
-        # Add both tasks to background processing
-        background_tasks.add_task(run_crocodile_task)
-        background_tasks.add_task(sync_results_task)
-
-        return {
-            "message": "CSV table added successfully.",
-            "tableName": table_name,
-            "datasetName": datasetName,
-            "userId": user_id,
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
-
+# GET /datasets
 @router.get("/datasets")
 def get_datasets(
     limit: int = Query(10),
@@ -295,6 +133,75 @@ def get_datasets(
         "pagination": {"next_cursor": next_cursor, "prev_cursor": prev_cursor},
     }
 
+# POST /datasets
+@router.post("/datasets", status_code=status.HTTP_201_CREATED)
+def create_dataset(
+    dataset_data: dict = Body(..., example={"dataset_name": "test"}),  # updated example key
+    token_payload: str = Depends(verify_token),
+    db: Database = Depends(get_db),
+):
+    """
+    Create a new dataset.
+    """
+    user_id = token_payload.get("email")
+
+    existing = db.datasets.find_one(
+        {"user_id": user_id, "dataset_name": dataset_data.get("dataset_name")}
+    )  # updated query key
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset with dataset_name {dataset_data.get('dataset_name')} already exists",
+        )
+
+    dataset_data["created_at"] = datetime.now()
+    dataset_data["total_tables"] = 0
+    dataset_data["total_rows"] = 0
+    dataset_data["user_id"] = user_id  # Renamed from client_id to user_id
+
+    try:
+        result = db.datasets.insert_one(dataset_data)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=400, detail="Dataset already exists")
+    dataset_data["_id"] = str(result.inserted_id)
+
+    return {"message": "Dataset created successfully", "dataset": dataset_data}
+
+# DELETE /datasets/{dataset_name}
+@router.delete("/datasets/{dataset_name}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_dataset(
+    dataset_name: str,
+    token_payload: str = Depends(verify_token),
+    db: Database = Depends(get_db),
+    crocodile_db: Database = Depends(get_crocodile_db),
+):
+    """
+    Delete a dataset by name.
+    """
+    user_id = token_payload.get("email")
+
+    # Check existence using uniform dataset key
+    existing = db.datasets.find_one(
+        {"user_id": user_id, "dataset_name": dataset_name}
+    )  # updated query key
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
+
+    # Delete all tables associated with this dataset
+    db.tables.delete_many({"user_id": user_id, "dataset_name": dataset_name})
+
+    # Delete dataset
+    db.datasets.delete_one({"user_id": user_id, "dataset_name": dataset_name})  # updated query key
+
+    # Delete data from crocodile_db
+    crocodile_db.input_data.delete_many({"user_id": user_id, "dataset_name": dataset_name})
+
+    return None
+
+# Table Endpoints
+# ---------------
+
+# GET /tables
 @router.get("/datasets/{dataset_name}/tables")
 def get_tables(
     dataset_name: str,
@@ -401,6 +308,7 @@ def get_tables(
         "pagination": {"next_cursor": next_cursor, "prev_cursor": prev_cursor},
     }
 
+# GET /tables/{table_name}
 @router.get("/datasets/{dataset_name}/tables/{table_name}")
 def get_table(
     dataset_name: str,
@@ -587,6 +495,224 @@ def get_table(
 
     return response_data
 
+# POST /tables/json
+@router.post("/datasets/{datasetName}/tables/json", status_code=status.HTTP_201_CREATED)
+def add_table(
+    datasetName: str,
+    table_upload: TableUpload = Body(..., example=IMDB_EXAMPLE),
+    background_tasks: BackgroundTasks = None,
+    token_payload: str = Depends(verify_token),
+    db: Database = Depends(get_db),
+) -> TableAddResponse:
+    """
+    Add a new table to an existing dataset and trigger Crocodile processing in the background.
+    """
+    # Require user_id for data isolation
+    user_id = token_payload.get("email")
+
+    try:
+        # Convert data to DataFrame for classification if needed
+        df = pd.DataFrame(table_upload.data)
+
+        # Get or create column classification
+        classification = DataService.get_or_create_column_classification(
+            data=df,
+            header=table_upload.header,
+            provided_classification=table_upload.classified_columns,
+        )
+
+        # Create the table and store data
+        DataService.create_table(
+            db=db,
+            user_id=user_id,
+            dataset_name=datasetName,
+            table_name=table_upload.table_name,
+            header=table_upload.header,
+            total_rows=table_upload.total_rows,
+            classification=classification,
+            data_list=table_upload.data,
+        )
+
+        # Trigger background task with classification passed to Crocodile
+        def run_crocodile_task():
+            croco = Crocodile(
+                input_csv=df,
+                client_id=user_id,
+                dataset_name=datasetName,
+                table_name=table_upload.table_name,
+                max_candidates=3,
+                entity_retrieval_endpoint=os.environ.get("ENTITY_RETRIEVAL_ENDPOINT"),
+                entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT"),
+                entity_retrieval_token=os.environ.get("ENTITY_RETRIEVAL_TOKEN"),
+                max_workers=8,
+                candidate_retrieval_limit=10,
+                model_path="./crocodile/models/default.h5",
+                save_output_to_csv=False,
+                columns_type=classification,
+            )
+            croco.run()
+
+        # Add a separate background task to sync results using the service
+        def sync_results_task():
+            # Create a result sync service and sync results
+            mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
+            sync_service = ResultSyncService(mongo_uri=mongo_uri)
+            sync_service.sync_results(
+                user_id=user_id, dataset_name=datasetName, table_name=table_upload.table_name
+            )
+
+        # Add both tasks to background processing
+        background_tasks.add_task(run_crocodile_task)
+        background_tasks.add_task(sync_results_task)
+
+        return TableAddResponse(
+            message="Table added successfully.",
+            tableName=table_upload.table_name,
+            datasetName=datasetName,
+            userId=user_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# POST /tables/csv
+def parse_json_column_classification(column_classification: str = Form("")) -> Optional[dict]:
+    # Parse the form field; return None if empty
+    if not column_classification:
+        return None
+    return json.loads(column_classification)
+
+@router.post("/datasets/{datasetName}/tables/csv", status_code=status.HTTP_201_CREATED)
+def add_table_csv(
+    datasetName: str,
+    table_name: str,
+    file: UploadFile = File(...),
+    column_classification: Optional[dict] = Depends(parse_json_column_classification),
+    background_tasks: BackgroundTasks = None,
+    token_payload: str = Depends(verify_token),
+    db: Database = Depends(get_db),
+):
+    """
+    Add a new table from CSV file to an existing dataset and trigger Crocodile processing.
+    """
+    user_id = token_payload.get("email")
+
+    try:
+        # Read CSV file and convert NaN values to None
+        df = pd.read_csv(file.file)
+        df = df.replace({np.nan: None})  # permanent fix for JSON serialization
+
+        header = df.columns.tolist()
+        total_rows = len(df)
+
+        # Get or create column classification
+        classification = DataService.get_or_create_column_classification(
+            data=df, header=header, provided_classification=column_classification
+        )
+
+        # Create the table and store data
+        DataService.create_table(
+            db=db,
+            user_id=user_id,
+            dataset_name=datasetName,
+            table_name=table_name,
+            header=header,
+            total_rows=total_rows,
+            classification=classification,
+            data_df=df,
+        )
+
+        # Trigger background task with columns_type passed to Crocodile
+        def run_crocodile_task():
+            croco = Crocodile(
+                input_csv=df,
+                client_id=user_id,
+                dataset_name=datasetName,
+                table_name=table_name,
+                entity_retrieval_endpoint=os.environ.get("ENTITY_RETRIEVAL_ENDPOINT"),
+                entity_retrieval_token=os.environ.get("ENTITY_RETRIEVAL_TOKEN"),
+                max_workers=8,
+                candidate_retrieval_limit=10,
+                model_path="./crocodile/models/default.h5",
+                save_output_to_csv=False,
+                columns_type=classification,
+                entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT"),
+            )
+            croco.run()
+
+        # Add a separate background task to sync results using the service
+        def sync_results_task():
+            # Create a result sync service and sync results
+            mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
+            sync_service = ResultSyncService(mongo_uri=mongo_uri)
+            sync_service.sync_results(
+                user_id=user_id, dataset_name=datasetName, table_name=table_name
+            )
+
+        # Add both tasks to background processing
+        background_tasks.add_task(run_crocodile_task)
+        background_tasks.add_task(sync_results_task)
+
+        return {
+            "message": "CSV table added successfully.",
+            "tableName": table_name,
+            "datasetName": datasetName,
+            "userId": user_id,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
+
+# DELETE /tables/{table_name}
+@router.delete("/datasets/{dataset_name}/tables/{table_name}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_table(
+    dataset_name: str,
+    table_name: str,
+    token_payload: str = Depends(verify_token),
+    db: Database = Depends(get_db),
+    crocodile_db: Database = Depends(get_crocodile_db),
+):
+    """
+    Delete a table by name within a dataset.
+    """
+    user_id = token_payload.get("email")
+
+    # Ensure dataset exists using uniform dataset key
+    dataset = db.datasets.find_one(
+        {"user_id": user_id, "dataset_name": dataset_name}
+    )  # updated query key
+    if not dataset:
+        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
+
+    table = db.tables.find_one(
+        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+    )
+    if not table:
+        raise HTTPException(
+            status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
+        )
+
+    row_count = table.get("total_rows", 0)
+
+    # Delete table
+    db.tables.delete_one(
+        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+    )
+
+    # Update dataset metadata
+    db.datasets.update_one(
+        {"user_id": user_id, "dataset_name": dataset_name},
+        {"$inc": {"total_tables": -1, "total_rows": -row_count}},
+    )
+
+    # Delete data from crocodile_db
+    crocodile_db.input_data.delete_many(
+        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+    )
+
+    return None
+
+# GET /tables/{table_name}/status
 async def get_table_status(
     dataset_name: str,
     table_name: str,
@@ -666,117 +792,10 @@ async def stream_table_status(
         media_type="text/event-stream",
     )
 
-@router.post("/datasets", status_code=status.HTTP_201_CREATED)
-def create_dataset(
-    dataset_data: dict = Body(..., example={"dataset_name": "test"}),  # updated example key
-    token_payload: str = Depends(verify_token),
-    db: Database = Depends(get_db),
-):
-    """
-    Create a new dataset.
-    """
-    user_id = token_payload.get("email")
+# Annotation Endpoints
+# ------------------
 
-    existing = db.datasets.find_one(
-        {"user_id": user_id, "dataset_name": dataset_data.get("dataset_name")}
-    )  # updated query key
-    if existing:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Dataset with dataset_name {dataset_data.get('dataset_name')} already exists",
-        )
-
-    dataset_data["created_at"] = datetime.now()
-    dataset_data["total_tables"] = 0
-    dataset_data["total_rows"] = 0
-    dataset_data["user_id"] = user_id  # Renamed from client_id to user_id
-
-    try:
-        result = db.datasets.insert_one(dataset_data)
-    except DuplicateKeyError:
-        raise HTTPException(status_code=400, detail="Dataset already exists")
-    dataset_data["_id"] = str(result.inserted_id)
-
-    return {"message": "Dataset created successfully", "dataset": dataset_data}
-
-@router.delete("/datasets/{dataset_name}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_dataset(
-    dataset_name: str,
-    token_payload: str = Depends(verify_token),
-    db: Database = Depends(get_db),
-    crocodile_db: Database = Depends(get_crocodile_db),
-):
-    """
-    Delete a dataset by name.
-    """
-    user_id = token_payload.get("email")
-
-    # Check existence using uniform dataset key
-    existing = db.datasets.find_one(
-        {"user_id": user_id, "dataset_name": dataset_name}
-    )  # updated query key
-    if not existing:
-        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
-
-    # Delete all tables associated with this dataset
-    db.tables.delete_many({"user_id": user_id, "dataset_name": dataset_name})
-
-    # Delete dataset
-    db.datasets.delete_one({"user_id": user_id, "dataset_name": dataset_name})  # updated query key
-
-    # Delete data from crocodile_db
-    crocodile_db.input_data.delete_many({"user_id": user_id, "dataset_name": dataset_name})
-
-    return None
-
-@router.delete("/datasets/{dataset_name}/tables/{table_name}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_table(
-    dataset_name: str,
-    table_name: str,
-    token_payload: str = Depends(verify_token),
-    db: Database = Depends(get_db),
-    crocodile_db: Database = Depends(get_crocodile_db),
-):
-    """
-    Delete a table by name within a dataset.
-    """
-    user_id = token_payload.get("email")
-
-    # Ensure dataset exists using uniform dataset key
-    dataset = db.datasets.find_one(
-        {"user_id": user_id, "dataset_name": dataset_name}
-    )  # updated query key
-    if not dataset:
-        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
-
-    table = db.tables.find_one(
-        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
-    )
-    if not table:
-        raise HTTPException(
-            status_code=404, detail=f"Table {table_name} not found in dataset {dataset_name}"
-        )
-
-    row_count = table.get("total_rows", 0)
-
-    # Delete table
-    db.tables.delete_one(
-        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
-    )
-
-    # Update dataset metadata
-    db.datasets.update_one(
-        {"user_id": user_id, "dataset_name": dataset_name},
-        {"$inc": {"total_tables": -1, "total_rows": -row_count}},
-    )
-
-    # Delete data from crocodile_db
-    crocodile_db.input_data.delete_many(
-        {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
-    )
-
-    return None
-
+# PUT /rows/{row_id}/columns/{column_id}
 @router.put("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}")
 def update_annotation(
     dataset_name: str,
@@ -927,6 +946,7 @@ def update_annotation(
         }
     )
 
+# DELETE /rows/{row_id}/columns/{column_id}/candidates/{entity_id}
 @router.delete("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}")
 def delete_candidate(
     dataset_name: str,

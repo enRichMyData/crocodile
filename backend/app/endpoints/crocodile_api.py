@@ -7,7 +7,7 @@ import base64
 import asyncio
 
 import numpy as np
-import threading
+import concurrent.futures
 import pandas as pd
 from bson import ObjectId
 from dependencies import get_crocodile_db, get_db, verify_token, es, ES_INDEX
@@ -204,10 +204,9 @@ def add_table_csv(
             )
 
         def run_tasks_in_parallel():
-            t1 = threading.Thread(target=run_crocodile_task)
-            t2 = threading.Thread(target=sync_results_task)
-            t1.start()
-            t2.start()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                executor.submit(run_crocodile_task)
+                executor.submit(sync_results_task)
 
         # Add both tasks to background processing
         background_tasks.add_task(run_tasks_in_parallel)

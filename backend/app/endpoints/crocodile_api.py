@@ -22,7 +22,6 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 from pymongo import MongoClient
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
@@ -30,6 +29,7 @@ from pymongo.errors import DuplicateKeyError
 # Import Local Libraries
 from dependencies import get_crocodile_db, get_db, verify_token
 from endpoints.imdb_example import IMDB_EXAMPLE
+from schemas import AnnotationUpdate, TableUpload
 from services.data_service import DataService
 from services.result_sync import ResultSyncService
 from services.utils import sanitize_for_json
@@ -39,15 +39,8 @@ from crocodile import Crocodile
 
 router = APIRouter()
 
-class TableUpload(BaseModel):
-    table_name: str
-    header: List[str]
-    total_rows: int
-    classified_columns: Optional[Dict[str, Dict[str, str]]] = {}
-    data: List[dict]
-
 @router.post("/datasets/{datasetName}/tables/json", status_code=status.HTTP_201_CREATED)
-async def add_table(
+def add_table(
     datasetName: str,
     table_upload: TableUpload = Body(..., example=IMDB_EXAMPLE),
     background_tasks: BackgroundTasks = None,
@@ -783,31 +776,6 @@ def delete_table(
     )
 
     return None
-
-class EntityType(BaseModel):
-    """Type information for an entity"""
-
-    id: str
-    name: str
-
-class EntityCandidate(BaseModel):
-    """Complete entity candidate information without matching status"""
-
-    id: str
-    name: str
-    description: str
-    types: List[EntityType]
-    # Note: score and match are handled at the annotation level
-
-class AnnotationUpdate(BaseModel):
-    """Request model for updating an annotation."""
-
-    entity_id: str
-    match: bool = True  # Whether this is the correct entity
-    score: Optional[float] = 1.0  # Default to 1.0 for user selections
-    notes: Optional[str] = None
-    # If providing a new candidate not in the existing list
-    candidate_info: Optional[EntityCandidate] = None
 
 @router.put("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}")
 def update_annotation(

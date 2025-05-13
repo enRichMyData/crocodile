@@ -3,13 +3,13 @@ import asyncio
 from datetime import datetime
 import json
 import os
-from typing import Dict, List, Optional
+from typing import Optional
 
 # Import Third-party Libraries
-import numpy as np
-import pandas as pd
-from bson import ObjectId
-from fastapi import (
+import numpy as np # type: ignore
+import pandas as pd # type: ignore
+from bson import ObjectId # type: ignore
+from fastapi import ( # type: ignore
     APIRouter,
     BackgroundTasks,
     Body,
@@ -21,15 +21,15 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import StreamingResponse
-from pymongo import MongoClient
-from pymongo.database import Database
-from pymongo.errors import DuplicateKeyError
+from fastapi.responses import StreamingResponse # type: ignore
+from pymongo import MongoClient # type: ignore
+from pymongo.database import Database # type: ignore
+from pymongo.errors import DuplicateKeyError # type: ignore
 
 # Import Local Libraries
 from dependencies import get_crocodile_db, get_db, verify_token
 from endpoints.imdb_example import IMDB_EXAMPLE
-from schemas import AnnotationUpdate, TableUpload
+from schemas import AnnotationUpdate, TableUpload, TableAddResponse
 from services.data_service import DataService
 from services.result_sync import ResultSyncService
 from services.utils import sanitize_for_json
@@ -46,7 +46,7 @@ def add_table(
     background_tasks: BackgroundTasks = None,
     token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
-):
+) -> TableAddResponse:
     """
     Add a new table to an existing dataset and trigger Crocodile processing in the background.
     """
@@ -108,12 +108,12 @@ def add_table(
         background_tasks.add_task(run_crocodile_task)
         background_tasks.add_task(sync_results_task)
 
-        return {
-            "message": "Table added successfully.",
-            "tableName": table_upload.table_name,
-            "datasetName": datasetName,
-            "userId": user_id,
-        }
+        return TableAddResponse(
+            message="Table added successfully.",
+            tableName=table_upload.table_name,
+            datasetName=datasetName,
+            userId=user_id,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

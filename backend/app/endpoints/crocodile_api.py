@@ -3,7 +3,6 @@ import asyncio
 from datetime import datetime
 import json
 import os
-import time
 from typing import Dict, List, Optional
 
 # Import Third-party Libraries
@@ -48,7 +47,7 @@ class TableUpload(BaseModel):
     data: List[dict]
 
 @router.post("/datasets/{datasetName}/tables/json", status_code=status.HTTP_201_CREATED)
-def add_table(
+async def add_table(
     datasetName: str,
     table_upload: TableUpload = Body(..., example=IMDB_EXAMPLE),
     background_tasks: BackgroundTasks = None,
@@ -105,9 +104,6 @@ def add_table(
 
         # Add a separate background task to sync results using the service
         def sync_results_task():
-            # Wait a moment before starting sync to allow initial processing
-            time.sleep(5)
-
             # Create a result sync service and sync results
             mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
             sync_service = ResultSyncService(mongo_uri=mongo_uri)

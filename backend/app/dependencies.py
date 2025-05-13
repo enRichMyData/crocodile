@@ -84,6 +84,34 @@ def get_db():
         unique=True,
     )
 
+    db.input_data.create_index(
+        [
+            ("user_id", ASCENDING),
+            ("dataset_name", ASCENDING),
+            ("table_name", ASCENDING),
+            ("status", ASCENDING),
+        ],
+    )
+
+    db.input_data.create_index(
+        [
+            ("user_id", ASCENDING),
+            ("dataset_name", ASCENDING),
+            ("table_name", ASCENDING),
+            ("ml_status", ASCENDING),
+        ],
+    )
+
+    db.input_data.create_index(
+        [
+            ("user_id", ASCENDING),
+            ("dataset_name", ASCENDING),
+            ("table_name", ASCENDING),
+            ("status", ASCENDING),
+            ("ml_status", ASCENDING),
+        ],
+    )
+
     try:
         yield db
     finally:

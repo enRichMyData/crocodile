@@ -1484,7 +1484,7 @@ async def get_table_status_stream(
 ):
     """
     Get the current status of a specific table (streaming).
-    Manages its own DB connection for the stream duration.
+    Provides distinct progress for the prediction and ML phases with a 'phase' attribute.
     """
     user_id = token_payload.get("email")
     client = None  # Initialize client to None
@@ -1509,17 +1509,6 @@ async def get_table_status_stream(
             yield f"data: {json.dumps({'status': 'ERROR', 'detail': f'Table {table_name} not found in dataset {dataset_name}'})}\n\n"
             return  # Stop the generator
 
-        # Check if there are documents with status or ml_status = TODO or DOING
-        table_status_filter = {
-            "user_id": user_id,
-            "dataset_name": dataset_name,
-            "table_name": table_name,
-            "$or": [
-                {"status": {"$in": ["TODO", "DOING"]}},
-                {"ml_status": {"$in": ["TODO", "DOING"]}},
-            ],
-        }
-
         total_rows = table.get("total_rows", 0)
         
         # Initial response with current state
@@ -1529,38 +1518,53 @@ async def get_table_status_stream(
             last_synced = last_synced.isoformat()
 
         while True:  # Loop until processing is complete
-            # Check both databases for pending documents
-            pending_docs_count = db.input_data.count_documents(table_status_filter)
-            if pending_docs_count == 0:
-                pending_docs_count = crocodile_db.input_data.count_documents(table_status_filter)
+            # Check both databases for pending documents in the prediction phase
+            prediction_filter = {
+                "user_id": user_id,
+                "dataset_name": dataset_name,
+                "table_name": table_name,
+                "status": {"$in": ["TODO", "DOING"]},
+            }
+            pending_prediction_count = db.input_data.count_documents(prediction_filter)
+            if pending_prediction_count == 0:
+                pending_prediction_count = crocodile_db.input_data.count_documents(prediction_filter)
 
-            # Calculate completion percentage
-            if total_rows == 0:
-                completion_percentage = 100  # If no rows, consider it complete
-            else:
-                remaining_percentage = (pending_docs_count / total_rows) * 100
-                completion_percentage = 100 - remaining_percentage
+            # Check both databases for pending documents in the ML phase
+            ml_filter = {
+                "user_id": user_id,
+                "dataset_name": dataset_name,
+                "table_name": table_name,
+                "ml_status": {"$in": ["TODO", "DOING"]},
+            }
+            pending_ml_count = db.input_data.count_documents(ml_filter)
+            if pending_ml_count == 0:
+                pending_ml_count = crocodile_db.input_data.count_documents(ml_filter)
 
-            # If the table record has a completion percentage and we're not fully done,
-            # use the stored value as it's likely more accurate (from the sync process)
-            if stored_completion is not None and pending_docs_count > 0:
-                completion_percentage = stored_completion
+            # Calculate completion percentages
+            prediction_completion = 100 - ((pending_prediction_count / total_rows) * 100) if total_rows > 0 else 100
+            ml_completion = 100 - ((pending_ml_count / total_rows) * 100) if total_rows > 0 else 100
 
-            # Determine overall status
-            if pending_docs_count == 0:
-                status = "DONE"
-            else:
+            # Determine overall phase and status
+            if pending_prediction_count > 0:
+                phase = "PREDICTION"
                 status = "PROCESSING"
+            elif pending_ml_count > 0:
+                phase = "ML_PREDICTION"
+                status = "PROCESSING"
+            else:
+                phase = "DONE"
+                status = "DONE"
 
             # Send status update
             response = {
                 "dataset_name": dataset_name,
                 "table_name": table_name,
                 "status": status,
+                "phase": phase,
                 "total_rows": total_rows,
-                "pending_rows": pending_docs_count,
-                "completed_rows": total_rows - pending_docs_count,
-                "completion_percentage": round(completion_percentage, 2),
+                "pending_rows": pending_prediction_count if phase == "PREDICTION" else pending_ml_count,
+                "completed_rows": total_rows - (pending_prediction_count if phase == "PREDICTION" else pending_ml_count),
+                "completion_percentage": round(prediction_completion if phase == "PREDICTION" else ml_completion, 2),
                 "last_synced": last_synced,
             }
             
@@ -1572,10 +1576,6 @@ async def get_table_status_stream(
 
             # If processing is complete, exit the stream
             if status == "DONE":
-                # db.tables.update_one(
-                #     {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name},
-                #     {"$set": {"status": "DONE", "completion_percentage": 100, "last_synced": datetime.now()}}
-                # )
                 break
                 
             # Wait before checking again

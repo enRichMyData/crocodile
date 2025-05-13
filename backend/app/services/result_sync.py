@@ -263,7 +263,7 @@ class ResultSyncService:
                         frequency = count / total_count if total_count > 0 else 0
                         
                         # Filter out types with very low frequency
-                        if frequency < 0.01:
+                        if frequency < 0.05:
                             continue
                         
                         # Get the full type info from our mapping

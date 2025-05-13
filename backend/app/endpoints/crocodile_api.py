@@ -43,7 +43,7 @@ router = APIRouter()
 # -----------------
 
 # GET /datasets
-@router.get("/datasets")
+@router.get("/datasets", tags=["datasets"])
 def get_datasets(
     limit: int = Query(10),
     next_cursor: Optional[str] = Query(None),
@@ -134,7 +134,7 @@ def get_datasets(
     }
 
 # POST /datasets
-@router.post("/datasets", status_code=status.HTTP_201_CREATED)
+@router.post("/datasets", status_code=status.HTTP_201_CREATED, tags=["datasets"])
 def create_dataset(
     dataset_data: dict = Body(..., example={"dataset_name": "test"}),  # updated example key
     token_payload: str = Depends(verify_token),
@@ -168,7 +168,7 @@ def create_dataset(
     return {"message": "Dataset created successfully", "dataset": dataset_data}
 
 # DELETE /datasets/{dataset_name}
-@router.delete("/datasets/{dataset_name}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/datasets/{dataset_name}", status_code=status.HTTP_204_NO_CONTENT, tags=["datasets"])
 def delete_dataset(
     dataset_name: str,
     token_payload: str = Depends(verify_token),
@@ -202,7 +202,7 @@ def delete_dataset(
 # ---------------
 
 # GET /tables
-@router.get("/datasets/{dataset_name}/tables")
+@router.get("/datasets/{dataset_name}/tables", tags=["tables"])
 def get_tables(
     dataset_name: str,
     limit: int = Query(10),
@@ -309,7 +309,7 @@ def get_tables(
     }
 
 # GET /tables/{table_name}
-@router.get("/datasets/{dataset_name}/tables/{table_name}")
+@router.get("/datasets/{dataset_name}/tables/{table_name}", tags=["tables"])
 def get_table(
     dataset_name: str,
     table_name: str,
@@ -495,8 +495,88 @@ def get_table(
 
     return response_data
 
+# GET /tables/{table_name}/status
+async def get_table_status(
+    dataset_name: str,
+    table_name: str,
+    token_payload: str,
+):
+    """
+    Get the current status of a specific table (streaming).
+    Manages its own DB connection for the stream duration.
+    """
+    user_id = token_payload.get("email")
+    client = None  # Initialize client to None
+    try:
+        # Create a new client specifically for this stream
+        client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
+        db = client["crocodile_backend_db"]
+
+        # Check dataset
+        if not db.datasets.find_one(
+            {"user_id": user_id, "dataset_name": dataset_name}
+        ):
+            yield f"data: {json.dumps({'status': 'ERROR', 'detail': f'Dataset {dataset_name} not found'})}\n\n"
+            return  # Stop the generator
+
+        # Check table
+        table = db.tables.find_one(
+            {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+        )
+        if not table:
+            yield f"data: {json.dumps({'status': 'ERROR', 'detail': f'Table {table_name} not found in dataset {dataset_name}'})}\n\n"
+            return  # Stop the generator
+
+        # Check if there are documents with status or ml_status = TODO or DOING
+        table_status_filter = {
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "$or": [
+                {"status": {"$in": ["TODO", "DOING"]}},
+                {"ml_status": {"$in": ["TODO", "DOING"]}},
+            ],
+        }
+
+        rows = table.get("total_rows", 0)
+
+        while True:  # Loop indefinitely until explicitly broken or returned
+            # Check databases for pending documents
+            pending_docs_count = db.input_data.count_documents(table_status_filter)
+
+            # Send the current status
+            pending_percent = (pending_docs_count / rows) * 100
+            done_percent = f"{100 - pending_percent:.2f}%"
+            pending_percent = f"{pending_percent:.2f}%"
+            yield f"data: {json.dumps({'rows': rows, 'pending': pending_docs_count, 'pending_percent': pending_percent, 'done_percent': done_percent})}\n\n"
+
+            if pending_docs_count == 0:
+                break  # Exit the loop and finish the stream
+            
+            await asyncio.sleep(1)  # Check every second
+
+    except Exception as e:
+        yield f"data: {json.dumps({'status': 'ERROR', 'detail': str(e)})}\n\n"
+    finally:
+        if client:
+            client.close()
+
+@router.get("/datasets/{dataset_name}/tables/{table_name}/status", tags=["tables"])
+async def stream_table_status(
+    dataset_name: str,
+    table_name: str,
+    token_payload: str = Depends(verify_token),
+):
+    """
+    Stream the current status of a specific table (streaming).
+    """
+    return StreamingResponse(
+        get_table_status(dataset_name, table_name, token_payload),
+        media_type="text/event-stream",
+    )
+
 # POST /tables/json
-@router.post("/datasets/{datasetName}/tables/json", status_code=status.HTTP_201_CREATED)
+@router.post("/datasets/{datasetName}/tables/json", status_code=status.HTTP_201_CREATED, tags=["tables"])
 def add_table(
     datasetName: str,
     table_upload: TableUpload = Body(..., example=IMDB_EXAMPLE),
@@ -581,7 +661,7 @@ def parse_json_column_classification(column_classification: str = Form("")) -> O
         return None
     return json.loads(column_classification)
 
-@router.post("/datasets/{datasetName}/tables/csv", status_code=status.HTTP_201_CREATED)
+@router.post("/datasets/{datasetName}/tables/csv", status_code=status.HTTP_201_CREATED, tags=["tables"])
 def add_table_csv(
     datasetName: str,
     table_name: str,
@@ -664,7 +744,7 @@ def add_table_csv(
         raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
 
 # DELETE /tables/{table_name}
-@router.delete("/datasets/{dataset_name}/tables/{table_name}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/datasets/{dataset_name}/tables/{table_name}", status_code=status.HTTP_204_NO_CONTENT, tags=["tables"])
 def delete_table(
     dataset_name: str,
     table_name: str,
@@ -712,91 +792,11 @@ def delete_table(
 
     return None
 
-# GET /tables/{table_name}/status
-async def get_table_status(
-    dataset_name: str,
-    table_name: str,
-    token_payload: str,
-):
-    """
-    Get the current status of a specific table (streaming).
-    Manages its own DB connection for the stream duration.
-    """
-    user_id = token_payload.get("email")
-    client = None  # Initialize client to None
-    try:
-        # Create a new client specifically for this stream
-        client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
-        db = client["crocodile_backend_db"]
-
-        # Check dataset
-        if not db.datasets.find_one(
-            {"user_id": user_id, "dataset_name": dataset_name}
-        ):
-            yield f"data: {json.dumps({'status': 'ERROR', 'detail': f'Dataset {dataset_name} not found'})}\n\n"
-            return  # Stop the generator
-
-        # Check table
-        table = db.tables.find_one(
-            {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
-        )
-        if not table:
-            yield f"data: {json.dumps({'status': 'ERROR', 'detail': f'Table {table_name} not found in dataset {dataset_name}'})}\n\n"
-            return  # Stop the generator
-
-        # Check if there are documents with status or ml_status = TODO or DOING
-        table_status_filter = {
-            "user_id": user_id,
-            "dataset_name": dataset_name,
-            "table_name": table_name,
-            "$or": [
-                {"status": {"$in": ["TODO", "DOING"]}},
-                {"ml_status": {"$in": ["TODO", "DOING"]}},
-            ],
-        }
-
-        rows = table.get("total_rows", 0)
-
-        while True:  # Loop indefinitely until explicitly broken or returned
-            # Check databases for pending documents
-            pending_docs_count = db.input_data.count_documents(table_status_filter)
-
-            # Send the current status
-            pending_percent = (pending_docs_count / rows) * 100
-            done_percent = f"{100 - pending_percent:.2f}%"
-            pending_percent = f"{pending_percent:.2f}%"
-            yield f"data: {json.dumps({'rows': rows, 'pending': pending_docs_count, 'pending_percent': pending_percent, 'done_percent': done_percent})}\n\n"
-
-            if pending_docs_count == 0:
-                break  # Exit the loop and finish the stream
-            
-            await asyncio.sleep(1)  # Check every second
-
-    except Exception as e:
-        yield f"data: {json.dumps({'status': 'ERROR', 'detail': str(e)})}\n\n"
-    finally:
-        if client:
-            client.close()
-
-@router.get("/datasets/{dataset_name}/tables/{table_name}/status")
-async def stream_table_status(
-    dataset_name: str,
-    table_name: str,
-    token_payload: str = Depends(verify_token),
-):
-    """
-    Stream the current status of a specific table (streaming).
-    """
-    return StreamingResponse(
-        get_table_status(dataset_name, table_name, token_payload),
-        media_type="text/event-stream",
-    )
-
 # Annotation Endpoints
 # ------------------
 
 # PUT /rows/{row_id}/columns/{column_id}
-@router.put("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}")
+@router.put("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}", tags=["annotation"])
 def update_annotation(
     dataset_name: str,
     table_name: str,
@@ -947,7 +947,7 @@ def update_annotation(
     )
 
 # DELETE /rows/{row_id}/columns/{column_id}/candidates/{entity_id}
-@router.delete("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}")
+@router.delete("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}", tags=["annotation"])
 def delete_candidate(
     dataset_name: str,
     table_name: str,

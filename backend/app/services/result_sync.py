@@ -251,19 +251,20 @@ class ResultSyncService:
 
                 if remaining == 0:
                     break
-
+            
             # After processing all rows, update the table with type frequencies
             if column_type_frequencies:
                 column_type_summary = {}
                 for col_idx, type_counter in column_type_frequencies.items():
-                    # Get the total count of types for this column for normalization
-                    type_total_count = sum(type_counter.values())
-                    
                     # Convert Counter to a sorted list with normalized frequencies and type information
                     type_info = []
                     for type_id, count in type_counter.items():
-                        # Calculate normalized frequency between 0 and 1
-                        frequency = count / type_total_count if type_total_count > 0 else 0
+                        # Calculate normalized frequency by dividing by total_count
+                        frequency = count / total_count if total_count > 0 else 0
+                        
+                        # Filter out types with very low frequency
+                        if frequency < 0.01:
+                            continue
                         
                         # Get the full type info from our mapping
                         type_data = column_type_mapping.get(type_id, {"name": "unknown"})
@@ -281,9 +282,12 @@ class ResultSyncService:
                         
                         type_info.append(type_entry)
                     
+                    # Sort types by frequency in descending order
+                    type_info.sort(key=lambda x: x["frequency"], reverse=True)
+                    
                     column_type_summary[str(col_idx)] = {
                         "types": type_info,
-                        "total_count": type_total_count,
+                        "total_count": total_count,
                     }
                 
                 # Update the table document with type frequencies

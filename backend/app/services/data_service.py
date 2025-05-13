@@ -125,7 +125,7 @@ class DataService:
             "header": header,
             "total_rows": total_rows,
             "created_at": datetime.now(),
-            "status": "processing",
+            "status": "DOING",
             "classified_columns": classification,
         }
 

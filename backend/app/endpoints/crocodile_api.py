@@ -972,7 +972,7 @@ def update_annotation(
     )
 
 # DELETE /rows/{row_id}/columns/{column_id}/candidates/{entity_id}
-@router.delete("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}", tags=["annotation"])
+@router.delete("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}", tags=["annotations"])
 def delete_candidate(
     dataset_name: str,
     table_name: str,

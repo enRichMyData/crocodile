@@ -252,6 +252,7 @@ class ResultSyncService:
                 if remaining == 0:
                     break
             
+            log_info(f"colum type frequencies: {column_type_frequencies}")
             # After processing all rows, update the table with type frequencies
             if column_type_frequencies:
                 column_type_summary = {}
@@ -263,7 +264,7 @@ class ResultSyncService:
                         frequency = count / total_count if total_count > 0 else 0
                         
                         # Filter out types with very low frequency
-                        if frequency < 0.05:
+                        if frequency < 0.01:
                             continue
                         
                         # Get the full type info from our mapping
@@ -388,11 +389,7 @@ class ResultSyncService:
                                     entity_types.append((type_id, type_name))
                                     column_type_frequencies[col_idx][type_id] += 1
                                     column_type_mapping[type_id] = {"id": type_id, "name": type_name}
-                                elif isinstance(type_obj, dict) and "name" in type_obj:
-                                    type_name = type_obj["name"]
-                                    entity_types.append((type_name, type_name))
-                                    column_type_frequencies[col_idx][type_name] += 1
-                                    column_type_mapping[type_name] = {"name": type_name}
+                        
                         if entity_types or confidence is not None:
                             update = {
                                 "col_index": int(col_idx),

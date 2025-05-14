@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Set, Any, Union
 import base64
 import asyncio
+import io
+import csv
 
 import numpy as np
 import concurrent.futures
@@ -32,6 +34,7 @@ from pymongo.errors import DuplicateKeyError
 from services.data_service import DataService
 from services.result_sync import ResultSyncService
 from services.utils import sanitize_for_json
+from typing import Generator
 
 # Import services and utilities
 from crocodile import Crocodile
@@ -1598,4 +1601,74 @@ async def stream_table_status(
     return StreamingResponse(
         get_table_status_stream(dataset_name, table_name, token_payload),
         media_type="text/event-stream",
+    )
+
+@router.get("/datasets/{dataset_name}/tables/{table_name}/export")
+def export_enriched_csv(
+    dataset_name: str,
+    table_name: str,
+    token_payload: str = Depends(verify_token),
+):
+    """
+    Stream an enriched CSV file combining the original data and the top candidate (if any) per column.
+    """
+    user_id = token_payload.get("email")
+    client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
+    input_data = client["crocodile_backend_db"]["input_data"]
+    tables = client["crocodile_backend_db"]["tables"]
+
+    table_doc = tables.find_one({
+        "user_id": user_id,
+        "dataset_name": dataset_name,
+        "table_name": table_name
+    })
+
+    if not table_doc:
+        raise HTTPException(status_code=404, detail="Table not found")
+
+    header = table_doc.get("header", [])
+
+    def csv_generator() -> Generator[bytes, None, None]:
+        buffer = io.StringIO()
+        writer = None
+
+        cursor = input_data.find({
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name
+        }).sort("row_id", 1)
+
+        for doc in cursor:
+            data = doc.get("data", [])
+            enriched = []
+
+            for idx, cell in enumerate(data):
+                candidates = doc.get("el_results", {}).get(str(idx), [])
+                if candidates and len(candidates) > 0:
+                    top = candidates[0]
+                    enriched.append(f"{top.get('name')} ({top.get('id')})")
+                else:
+                    enriched.append("")
+
+            full_row = data + enriched
+
+            if writer is None:
+                full_header = header + [f"{col}_enriched" for col in header]
+                writer = csv.writer(buffer)
+                writer.writerow(full_header)
+                yield buffer.getvalue().encode()
+                buffer.seek(0)
+                buffer.truncate(0)
+
+            writer.writerow(full_row)
+            yield buffer.getvalue().encode()
+            buffer.seek(0)
+            buffer.truncate(0)
+
+    filename = f"{dataset_name}_{table_name}_enriched.csv"
+
+    return StreamingResponse(
+        csv_generator(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )

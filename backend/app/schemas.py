@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator # type: ignore
 
@@ -133,6 +133,63 @@ class EntityCandidate(BaseModel):
     description: str
     types: List[EntityType]
     # Note: score and match are handled at the annotation level
+
+
+# Table Response Schemas
+class TableResponseItem(BaseModel):
+    """Response model for a table item."""
+    
+    id: str = Field(..., alias="_id", description="Unique identifier of the table.")
+    table_name: str = Field(..., description="Name of the table.")
+    dataset_name: str = Field(..., description="Name of the dataset the table belongs to.")
+    user_id: str = Field(..., description="Identifier of the user who owns the table.")
+    total_rows: int = Field(default=0, description="Total number of rows in the table.")
+    header: List[str] = Field(default_factory=list, description="Column headers for the table.")
+    created_at: str = Field(..., description="Timestamp of when the table was created (ISO format).")
+    completed_at: Optional[str] = Field(None, description="Timestamp of when processing was completed (ISO format).")
+
+    class Config:
+        populate_by_name = True # Allows using alias "_id" for "id"
+
+
+class TableListResponse(BaseModel):
+    """Response model for listing tables in a dataset."""
+    
+    dataset: str
+    data: List[TableResponseItem]
+    pagination: Pagination
+
+
+class LinkedEntity(BaseModel):
+    """Model for linked entity information in a table row."""
+    
+    idColumn: int
+    candidates: List[Dict[str, Any]]
+
+
+class TableRowItem(BaseModel):
+    """Model for a row in a table with linked entities."""
+    
+    idRow: int
+    data: List[Any]
+    linked_entities: List[LinkedEntity] = Field(default_factory=list)
+
+
+class TableData(BaseModel):
+    """Model for table data with rows and metadata."""
+    
+    datasetName: str
+    tableName: str
+    status: str
+    header: List[str]
+    rows: List[TableRowItem]
+
+
+class TableRowsResponse(BaseModel):
+    """Response model for getting rows from a specific table."""
+    
+    data: TableData
+    pagination: Pagination
 
 
 class AnnotationUpdate(BaseModel):

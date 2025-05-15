@@ -38,6 +38,8 @@ from schemas import (
     AnnotationUpdate,
     DeleteResponse,
     CSVTableUpload,
+    TableListResponse,
+    TableRowsResponse,
 )
 from services.data_service import DataService
 from services.result_sync import ResultSyncService
@@ -228,7 +230,7 @@ def delete_dataset(
 # ---------------
 
 # GET /tables
-@router.get("/datasets/{dataset_name}/tables", tags=["tables"])
+@router.get("/datasets/{dataset_name}/tables", tags=["tables"], response_model=TableListResponse)
 def get_tables(
     dataset_name: str,
     limit: int = Query(10),
@@ -327,6 +329,12 @@ def get_tables(
             table["created_at"] = table["created_at"].isoformat()
         if "completed_at" in table:
             table["completed_at"] = table["completed_at"].isoformat()
+        # Ensure all fields required by TableResponseItem are present
+        table.setdefault("table_name", table.get("table_name", ""))
+        table.setdefault("dataset_name", dataset_name)
+        table.setdefault("user_id", user_id)
+        table.setdefault("total_rows", 0)
+        table.setdefault("header", [])
 
     return {
         "dataset": dataset_name,
@@ -335,7 +343,7 @@ def get_tables(
     }
 
 # GET /tables/{table_name}
-@router.get("/datasets/{dataset_name}/tables/{table_name}", tags=["tables"])
+@router.get("/datasets/{dataset_name}/tables/{table_name}", tags=["tables"], response_model=TableRowsResponse)
 def get_table(
     dataset_name: str,
     table_name: str,
@@ -505,6 +513,7 @@ def get_table(
             }
         )
 
+    # Structure the response according to TableRowsResponse model
     response_data = {
         "data": {
             "datasetName": dataset_name,

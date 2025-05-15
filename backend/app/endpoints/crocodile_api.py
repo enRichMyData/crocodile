@@ -36,7 +36,7 @@ from schemas import (
     DatasetListResponse,
     DatasetCreateResponse,
     DatasetCreateRequest,
-    DatasetDeleteResponse,
+    DeleteResponse,
 )
 from services.data_service import DataService
 from services.result_sync import ResultSyncService
@@ -193,7 +193,7 @@ def create_dataset(
     return {"message": "Dataset created successfully", "dataset": response_dataset}
 
 # DELETE /datasets/{dataset_name}
-@router.delete("/datasets/{dataset_name}", tags=["datasets"], response_model=DatasetDeleteResponse, status_code=status.HTTP_200_OK)
+@router.delete("/datasets/{dataset_name}", tags=["datasets"], response_model=DeleteResponse, status_code=status.HTTP_200_OK) # Updated response_model
 def delete_dataset(
     dataset_name: str,
     token_payload: str = Depends(verify_token),
@@ -769,7 +769,7 @@ def add_table_csv(
         raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
 
 # DELETE /tables/{table_name}
-@router.delete("/datasets/{dataset_name}/tables/{table_name}", status_code=status.HTTP_204_NO_CONTENT, tags=["tables"])
+@router.delete("/datasets/{dataset_name}/tables/{table_name}", tags=["tables"], response_model=DeleteResponse, status_code=status.HTTP_200_OK) # Updated response_model and status_code
 def delete_table(
     dataset_name: str,
     table_name: str,
@@ -815,7 +815,7 @@ def delete_table(
         {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
     )
 
-    return None
+    return {"message": f"Table {table_name} deleted successfully"} # Added response message
 
 # Annotation Endpoints
 # ------------------
@@ -972,7 +972,7 @@ def update_annotation(
     )
 
 # DELETE /rows/{row_id}/columns/{column_id}/candidates/{entity_id}
-@router.delete("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}", tags=["annotations"])
+@router.delete("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}", tags=["annotations"], response_model=DeleteResponse, status_code=status.HTTP_200_OK) # Updated response_model and status_code
 def delete_candidate(
     dataset_name: str,
     table_name: str,
@@ -1070,11 +1070,11 @@ def delete_candidate(
     return sanitize_for_json(
         {
             "message": "Candidate deleted successfully",
-            "dataset_name": dataset_name,
-            "table_name": table_name,
-            "row_id": row_id,
-            "column_id": column_id,
-            "entity_id": entity_id,
-            "remaining_candidates": len(updated_candidates),
+            # "dataset_name": dataset_name, # Removed for generic response
+            # "table_name": table_name, # Removed for generic response
+            # "row_id": row_id, # Removed for generic response
+            # "column_id": column_id, # Removed for generic response
+            # "entity_id": entity_id, # Removed for generic response
+            # "remaining_candidates": len(updated_candidates), # Removed for generic response
         }
     )

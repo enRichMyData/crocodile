@@ -30,12 +30,12 @@ from pymongo.errors import DuplicateKeyError # type: ignore
 from dependencies import get_crocodile_db, get_db, verify_token
 from endpoints.imdb_example import IMDB_EXAMPLE
 from schemas import (
-    AnnotationUpdate,
     TableUpload,
     TableAddResponse,
     DatasetListResponse,
     DatasetCreateResponse,
     DatasetCreateRequest,
+    AnnotationUpdate,
     DeleteResponse,
 )
 from services.data_service import DataService
@@ -601,14 +601,14 @@ async def stream_table_status(
     )
 
 # POST /tables/json
-@router.post("/datasets/{datasetName}/tables/json", status_code=status.HTTP_201_CREATED, tags=["tables"])
+@router.post("/datasets/{datasetName}/tables/json", response_model=TableAddResponse, status_code=status.HTTP_201_CREATED, tags=["tables"])
 def add_table(
     datasetName: str,
     table_upload: TableUpload = Body(..., example=IMDB_EXAMPLE),
     background_tasks: BackgroundTasks = None,
     token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
-) -> TableAddResponse:
+):
     """
     Add a new table to an existing dataset and trigger Crocodile processing in the background.
     """
@@ -686,7 +686,7 @@ def parse_json_column_classification(column_classification: str = Form("")) -> O
         return None
     return json.loads(column_classification)
 
-@router.post("/datasets/{datasetName}/tables/csv", status_code=status.HTTP_201_CREATED, tags=["tables"])
+@router.post("/datasets/{datasetName}/tables/csv", response_model=TableAddResponse, status_code=status.HTTP_201_CREATED, tags=["tables"])
 def add_table_csv(
     datasetName: str,
     table_name: str,
@@ -757,12 +757,12 @@ def add_table_csv(
         background_tasks.add_task(run_crocodile_task)
         background_tasks.add_task(sync_results_task)
 
-        return {
-            "message": "CSV table added successfully.",
-            "tableName": table_name,
-            "datasetName": datasetName,
-            "userId": user_id,
-        }
+        return TableAddResponse(
+            message="CSV table added successfully.",
+            tableName=table_name,
+            datasetName=datasetName,
+            userId=user_id,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

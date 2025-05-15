@@ -36,6 +36,13 @@ class DatasetListResponse(BaseModel):
 
 class DatasetCreateRequest(BaseModel):
     dataset_name: str = Field(..., min_length=1, description="Name of the dataset, cannot be empty.")
+    
+    @model_validator(mode='after')
+    def check_dataset_name_not_empty(cls, values):
+        dataset_name = values.dataset_name
+        if dataset_name.strip() == '':
+            raise ValueError('Dataset name cannot contain only whitespace')
+        return values
 
 
 # Table Schemas

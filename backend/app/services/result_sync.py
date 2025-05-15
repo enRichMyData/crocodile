@@ -252,7 +252,6 @@ class ResultSyncService:
                 if remaining == 0:
                     break
             
-            log_info(f"colum type frequencies: {column_type_frequencies}")
             # After processing all rows, update the table with type frequencies
             if column_type_frequencies:
                 column_type_summary = {}

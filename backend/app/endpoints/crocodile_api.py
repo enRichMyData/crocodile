@@ -1608,9 +1608,11 @@ def export_enriched_csv(
     dataset_name: str,
     table_name: str,
     token_payload: str = Depends(verify_token),
+    fields: List[str] = Query(default=["id", "name"], description="Fields to include for enriched columns"),
 ):
     """
-    Stream an enriched CSV file combining the original data and the top candidate (if any) per column.
+    Stream an enriched CSV file combining the original data and the selected fields
+    of the top candidate for each NE‐classified column.
     """
     user_id = token_payload.get("email")
     client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
@@ -1626,47 +1628,52 @@ def export_enriched_csv(
     if not table_doc:
         raise HTTPException(status_code=404, detail="Table not found")
 
+    # validate requested fields
+    allowed = {"id", "name", "description", "types", "score"}
+    if any(f not in allowed for f in fields):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid field requested. Allowed fields: {allowed}"
+        )
+
+    # only NE‐classified columns
+    ne_cols = sorted(int(idx) for idx in table_doc.get("classified_columns", {}).get("NE", {}))
     header = table_doc.get("header", [])
 
     def csv_generator() -> Generator[bytes, None, None]:
         buffer = io.StringIO()
         writer = None
-
-        cursor = input_data.find({
-            "user_id": user_id,
-            "dataset_name": dataset_name,
-            "table_name": table_name
-        }).sort("row_id", 1)
+        cursor = input_data.find(
+            {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
+        ).sort("row_id", 1)
 
         for doc in cursor:
             data = doc.get("data", [])
             enriched = []
-
-            for idx, cell in enumerate(data):
-                candidates = doc.get("el_results", {}).get(str(idx), [])
-                if candidates and len(candidates) > 0:
-                    top = candidates[0]
-                    enriched.append(f"{top.get('name')} ({top.get('id')})")
-                else:
-                    enriched.append("")
+            for idx in ne_cols:
+                top = (doc.get("el_results", {}).get(str(idx), []) or [{}])[0]
+                for fld in fields:
+                    if fld == "types":
+                        enriched.append(json.dumps(top.get("types", [])))
+                    else:
+                        enriched.append(top.get(fld, ""))
 
             full_row = data + enriched
 
             if writer is None:
-                full_header = header + [f"{col}_enriched" for col in header]
+                # build header: original + one per NE‐col per field
+                hdr_extra = [f"{header[idx]}_{fld}" for idx in ne_cols for fld in fields]
+                full_header = header + hdr_extra
                 writer = csv.writer(buffer)
                 writer.writerow(full_header)
                 yield buffer.getvalue().encode()
-                buffer.seek(0)
-                buffer.truncate(0)
+                buffer.seek(0); buffer.truncate(0)
 
             writer.writerow(full_row)
             yield buffer.getvalue().encode()
-            buffer.seek(0)
-            buffer.truncate(0)
+            buffer.seek(0); buffer.truncate(0)
 
     filename = f"{dataset_name}_{table_name}_enriched.csv"
-
     return StreamingResponse(
         csv_generator(),
         media_type="text/csv",

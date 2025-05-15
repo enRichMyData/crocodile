@@ -37,6 +37,7 @@ from schemas import (
     DatasetCreateRequest,
     AnnotationUpdate,
     DeleteResponse,
+    CSVTableUpload,
 )
 from services.data_service import DataService
 from services.result_sync import ResultSyncService
@@ -689,7 +690,7 @@ def parse_json_column_classification(column_classification: str = Form("")) -> O
 @router.post("/datasets/{datasetName}/tables/csv", response_model=TableAddResponse, status_code=status.HTTP_201_CREATED, tags=["tables"])
 def add_table_csv(
     datasetName: str,
-    table_name: str,
+    csv_upload: CSVTableUpload = Depends(),  # Using Pydantic model for validation
     file: UploadFile = File(...),
     column_classification: Optional[dict] = Depends(parse_json_column_classification),
     background_tasks: BackgroundTasks = None,
@@ -700,14 +701,47 @@ def add_table_csv(
     Add a new table from CSV file to an existing dataset and trigger Crocodile processing.
     """
     user_id = token_payload.get("email")
+    table_name = csv_upload.table_name  # Using the validated table_name from Pydantic model
+
+    # Validate dataset existence
+    dataset = db.datasets.find_one(
+        {"user_id": user_id, "dataset_name": datasetName}
+    )
+    if not dataset:
+        raise HTTPException(status_code=404, detail=f"Dataset {datasetName} not found")
+    
+    # Validate table name uniqueness
+    existing_table = db.tables.find_one(
+        {"user_id": user_id, "dataset_name": datasetName, "table_name": table_name}
+    )
+    if existing_table:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Table {table_name} already exists in dataset {datasetName}"
+        )
 
     try:
+        # Validate file is a valid CSV
+        if not file.filename.lower().endswith('.csv'):
+            raise HTTPException(status_code=400, detail="Uploaded file must be a CSV file")
+        
         # Read CSV file and convert NaN values to None
-        df = pd.read_csv(file.file)
-        df = df.replace({np.nan: None})  # permanent fix for JSON serialization
+        try:
+            df = pd.read_csv(file.file)
+            df = df.replace({np.nan: None})  # permanent fix for JSON serialization
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Error reading CSV file: {str(e)}")
+
+        # Validate CSV has content
+        if df.empty:
+            raise HTTPException(status_code=400, detail="CSV file cannot be empty")
 
         header = df.columns.tolist()
         total_rows = len(df)
+        
+        # Validate header is not empty
+        if not header:
+            raise HTTPException(status_code=400, detail="CSV file must have column headers")
 
         # Get or create column classification
         classification = DataService.get_or_create_column_classification(
@@ -769,7 +803,7 @@ def add_table_csv(
         raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
 
 # DELETE /tables/{table_name}
-@router.delete("/datasets/{dataset_name}/tables/{table_name}", tags=["tables"], response_model=DeleteResponse, status_code=status.HTTP_200_OK) # Updated response_model and status_code
+@router.delete("/datasets/{dataset_name}/tables/{table_name}", tags=["tables"], response_model=DeleteResponse, status_code=status.HTTP_200_OK)
 def delete_table(
     dataset_name: str,
     table_name: str,
@@ -972,7 +1006,7 @@ def update_annotation(
     )
 
 # DELETE /rows/{row_id}/columns/{column_id}/candidates/{entity_id}
-@router.delete("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}", tags=["annotations"], response_model=DeleteResponse, status_code=status.HTTP_200_OK) # Updated response_model and status_code
+@router.delete("/datasets/{dataset_name}/tables/{table_name}/rows/{row_id}/columns/{column_id}/candidates/{entity_id}", tags=["annotations"], response_model=DeleteResponse, status_code=status.HTTP_200_OK)
 def delete_candidate(
     dataset_name: str,
     table_name: str,

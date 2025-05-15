@@ -3,8 +3,24 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel, Field, model_validator # type: ignore
 
 
+# Common Schemas
+class DeleteResponse(BaseModel):
+    """Response model for delete operations."""
+    
+    message: str
+
+
+class Pagination(BaseModel):
+    """Pagination information for API responses."""
+
+    next_cursor: Optional[str] = None
+    prev_cursor: Optional[str] = None
+
+
 # Dataset Schemas
 class DatasetBase(BaseModel):
+    """Base model for dataset information."""
+
     dataset_name: str = Field(..., description="Name of the dataset.")
     total_tables: int = Field(default=0, description="Total number of tables in the dataset.")
     total_rows: int = Field(default=0, description="Total number of rows across all tables in the dataset.")
@@ -13,6 +29,8 @@ class DatasetBase(BaseModel):
 
 
 class DatasetResponseItem(DatasetBase):
+    """Response model for a dataset item."""
+
     id: str = Field(..., alias="_id", description="Unique identifier of the dataset.")
 
     class Config:
@@ -20,21 +38,22 @@ class DatasetResponseItem(DatasetBase):
 
 
 class DatasetCreateResponse(BaseModel):
+    """Response model for creating a new dataset."""
+
     message: str
     dataset: DatasetResponseItem
 
 
-class Pagination(BaseModel):
-    next_cursor: Optional[str] = None
-    prev_cursor: Optional[str] = None
-
-
 class DatasetListResponse(BaseModel):
+    """Response model for listing datasets."""
+
     data: List[DatasetResponseItem]
     pagination: Pagination
 
 
 class DatasetCreateRequest(BaseModel):
+    """Request model for creating a new dataset."""
+
     dataset_name: str = Field(..., min_length=1, description="Name of the dataset, cannot be empty.")
     
     @model_validator(mode='after')
@@ -47,11 +66,20 @@ class DatasetCreateRequest(BaseModel):
 
 # Table Schemas
 class TableUpload(BaseModel):
+    """Request model for validating table uploads"""
+
     table_name: str = Field(..., min_length=1, description="Name of the table, cannot be empty.")
     header: List[str] = Field(..., min_items=1, description="List of column headers, cannot be empty.")
     total_rows: int = Field(..., ge=0, description="Total number of rows in the data, cannot be negative.")
     classified_columns: Optional[Dict[str, Dict[str, str]]] = Field(default_factory=dict)
     data: List[dict]
+
+    @model_validator(mode='after')
+    def check_table_name_not_empty(cls, values):
+        table_name = values.table_name
+        if table_name.strip() == '':
+            raise ValueError('Table name cannot contain only whitespace')
+        return values
 
     @model_validator(mode='after')
     def check_data_consistency(cls, values):
@@ -67,7 +95,22 @@ class TableUpload(BaseModel):
                 )
         return values
 
+
+class CSVTableUpload(BaseModel):
+    """Request model for validating CSV table uploads"""
+
+    table_name: str = Field(..., min_length=1, description="Name of the table, cannot be empty.")
+    
+    @model_validator(mode='after')
+    def check_table_name_not_empty(cls, values):
+        table_name = values.table_name
+        if table_name.strip() == '':
+            raise ValueError('Table name cannot contain only whitespace')
+        return values
+    
 class TableAddResponse(BaseModel):
+    """Response model for adding a table to a dataset."""
+
     message: str
     tableName: str
     datasetName: str
@@ -101,8 +144,3 @@ class AnnotationUpdate(BaseModel):
     notes: Optional[str] = None
     # If providing a new candidate not in the existing list
     candidate_info: Optional[EntityCandidate] = None
-
-
-# Common Schemas
-class DeleteResponse(BaseModel):
-    message: str

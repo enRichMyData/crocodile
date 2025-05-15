@@ -259,8 +259,9 @@ class ResultSyncService:
                     # Convert Counter to a sorted list with normalized frequencies and type information
                     type_info = []
                     for type_id, count in type_counter.items():
-                        # Calculate normalized frequency by dividing by total_count
-                        frequency = count / total_count if total_count > 0 else 0
+                        # Calculate normalized frequency by dividing by total_count and clamp into [0,1]
+                        raw_freq = count / total_count if total_count > 0 else 0.0
+                        frequency = max(0.0, min(raw_freq, 1.0))
                         
                         # Filter out types with very low frequency
                         if frequency < 0.01:

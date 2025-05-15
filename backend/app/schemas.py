@@ -147,6 +147,7 @@ class TableResponseItem(BaseModel):
     header: List[str] = Field(default_factory=list, description="Column headers for the table.")
     created_at: str = Field(..., description="Timestamp of when the table was created (ISO format).")
     completed_at: Optional[str] = Field(None, description="Timestamp of when processing was completed (ISO format).")
+    status: Optional[str] = Field("DOING", description="Processing status of the table (e.g., 'DOING', 'DONE').")
 
     class Config:
         populate_by_name = True # Allows using alias "_id" for "id"

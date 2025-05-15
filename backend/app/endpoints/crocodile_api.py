@@ -238,6 +238,7 @@ def get_tables(
     prev_cursor: Optional[str] = Query(None),
     token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
+    crocodile_db: Database = Depends(get_crocodile_db),
 ):
     """
     Get tables for a dataset with bi-directional keyset pagination.
@@ -335,7 +336,31 @@ def get_tables(
         table.setdefault("user_id", user_id)
         table.setdefault("total_rows", 0)
         table.setdefault("header", [])
+        
+        # Set default status - will be updated in the next query if needed
+        table.setdefault("status", "DONE")
 
+    # Check status of each table by looking for pending documents
+    for table in tables:
+        table_name = table.get("table_name")
+        table_status_filter = {
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+            "$or": [
+                {"status": {"$in": ["TODO", "DOING"]}},
+                {"ml_status": {"$in": ["TODO", "DOING"]}},
+            ],
+        }
+        
+        # Check both databases for pending documents
+        pending_docs_count = db.input_data.count_documents(table_status_filter)
+        if pending_docs_count == 0:
+            pending_docs_count = crocodile_db.input_data.count_documents(table_status_filter)
+        
+        # Set status based on pending documents
+        table["status"] = "DOING" if pending_docs_count > 0 else "DONE"
+    
     return {
         "dataset": dataset_name,
         "data": tables,

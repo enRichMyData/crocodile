@@ -1,6 +1,6 @@
 import os
 from jose import JWTError, jwt
-from config import settings
+from backend.app.config import settings
 from typing import Dict, Any
 from pymongo import ASCENDING, MongoClient  # added ASCENDING import
 from fastapi import Depends, HTTPException, status

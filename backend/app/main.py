@@ -1,7 +1,8 @@
-from config import settings
-from endpoints.crocodile_api import router
-from fastapi import FastAPI # type: ignore
-from fastapi.middleware.cors import CORSMiddleware # type: ignore
+from backend.app.config import settings 
+from backend.app.endpoints.crocodile_api import router
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware  # Import CORS middleware
+
 
 app = FastAPI(title=settings.FASTAPI_APP_NAME, debug=settings.DEBUG)
 

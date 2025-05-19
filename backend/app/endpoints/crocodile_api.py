@@ -6,10 +6,10 @@ import os
 from typing import Optional
 
 # Import Third-party Libraries
-import numpy as np # type: ignore
-import pandas as pd # type: ignore
-from bson import ObjectId # type: ignore
-from fastapi import ( # type: ignore
+import numpy as np
+import pandas as pd
+from bson import ObjectId
+from fastapi import (
     APIRouter,
     BackgroundTasks,
     Body,
@@ -21,15 +21,15 @@ from fastapi import ( # type: ignore
     UploadFile,
     status,
 )
-from fastapi.responses import StreamingResponse # type: ignore
-from pymongo import MongoClient # type: ignore
-from pymongo.database import Database # type: ignore
-from pymongo.errors import DuplicateKeyError # type: ignore
+from fastapi.responses import StreamingResponse
+from pymongo import MongoClient
+from pymongo.database import Database
+from pymongo.errors import DuplicateKeyError
 
-# Import Local Libraries
-from dependencies import get_crocodile_db, get_db, verify_token
-from endpoints.imdb_example import IMDB_EXAMPLE
-from schemas import (
+# Import Local Libraries (use relative imports)
+from ..dependencies import get_crocodile_db, get_db, verify_token
+from .imdb_example import IMDB_EXAMPLE
+from ..schemas import (
     AnnotationUpdate,
     TableUpload,
     TableAddResponse,
@@ -38,9 +38,9 @@ from schemas import (
     DatasetCreateRequest,
     DatasetDeleteResponse,
 )
-from services.data_service import DataService
-from services.result_sync import ResultSyncService
-from services.utils import sanitize_for_json
+from ..services.data_service import DataService
+from ..services.result_sync import ResultSyncService
+from ..services.utils import sanitize_for_json
 
 # Import Crocodile Library
 from crocodile import Crocodile

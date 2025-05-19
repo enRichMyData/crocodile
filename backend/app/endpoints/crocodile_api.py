@@ -196,7 +196,7 @@ def create_dataset(
     return {"message": "Dataset created successfully", "dataset": response_dataset}
 
 # DELETE /datasets/{dataset_name}
-@router.delete("/datasets/{dataset_name}", tags=["datasets"], response_model=DeleteResponse, status_code=status.HTTP_200_OK) # Updated response_model
+@router.delete("/datasets/{dataset_name}", tags=["datasets"], response_model=DeleteResponse, status_code=status.HTTP_200_OK)
 def delete_dataset(
     dataset_name: str,
     token_payload: str = Depends(verify_token),
@@ -330,37 +330,7 @@ def get_tables(
             table["created_at"] = table["created_at"].isoformat()
         if "completed_at" in table:
             table["completed_at"] = table["completed_at"].isoformat()
-        # Ensure all fields required by TableResponseItem are present
-        table.setdefault("table_name", table.get("table_name", ""))
-        table.setdefault("dataset_name", dataset_name)
-        table.setdefault("user_id", user_id)
-        table.setdefault("total_rows", 0)
-        table.setdefault("header", [])
-        
-        # Set default status - will be updated in the next query if needed
-        table.setdefault("status", "DONE")
 
-    # Check status of each table by looking for pending documents
-    for table in tables:
-        table_name = table.get("table_name")
-        table_status_filter = {
-            "user_id": user_id,
-            "dataset_name": dataset_name,
-            "table_name": table_name,
-            "$or": [
-                {"status": {"$in": ["TODO", "DOING"]}},
-                {"ml_status": {"$in": ["TODO", "DOING"]}},
-            ],
-        }
-        
-        # Check both databases for pending documents
-        pending_docs_count = db.input_data.count_documents(table_status_filter)
-        if pending_docs_count == 0:
-            pending_docs_count = crocodile_db.input_data.count_documents(table_status_filter)
-        
-        # Set status based on pending documents
-        table["status"] = "DOING" if pending_docs_count > 0 else "DONE"
-    
     return {
         "dataset": dataset_name,
         "data": tables,

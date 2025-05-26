@@ -7,6 +7,7 @@ import base64
 import asyncio
 import io
 import csv
+from pymongo import ASCENDING
 
 import numpy as np
 import concurrent.futures
@@ -33,7 +34,7 @@ from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 from services.data_service import DataService
 from services.result_sync import ResultSyncService
-from services.utils import sanitize_for_json
+from services.utils import sanitize_for_json, log_info, log_error
 from typing import Generator
 
 # Import services and utilities
@@ -490,30 +491,41 @@ def get_table(
         search_after = None
         search_before = None
         is_backward = False
+        last_score = None  # For confidence score pagination
         
         if next_cursor:
             try:
                 # Decode the cursor as JSON
-                try:
-                    cursor_data = json.loads(base64.b64decode(next_cursor).decode('utf-8'))
-                    search_after = cursor_data.get("sort")
+                cursor_data = json.loads(base64.b64decode(next_cursor).decode('utf-8'))
+                search_after = cursor_data.get("sort")
+                
+                # Handle different cursor formats based on sort_by
+                if sort_by == "confidence" and column is not None:
+                    # For confidence sorting, cursor contains [score, id]
+                    if search_after and len(search_after) == 2:
+                        last_score = search_after[0]
+                        search_after = ObjectId(search_after[1])
+                    else:
+                        raise HTTPException(status_code=400, detail="Invalid next_cursor format for confidence sorting")
+                else:
+                    # Standard id-based pagination
                     if search_after and len(search_after) == 1:
                         search_after = ObjectId(search_after[0])
-                except (json.JSONDecodeError, ValueError):
-                    raise HTTPException(status_code=400, detail="Invalid next_cursor format")
-            except Exception:
-                raise HTTPException(status_code=400, detail="Invalid next_cursor format")
+                    else:
+                        raise HTTPException(status_code=400, detail="Invalid next_cursor format")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid next_cursor format: {str(e)}")
         
-        elif prev_cursor:
+        elif prev_cursor and sort_by != "confidence":  # Prev cursor not supported for confidence sorting
             is_backward = True
             try:
                 # Decode the cursor as JSON
-                try:
-                    cursor_data = json.loads(base64.b64decode(prev_cursor).decode('utf-8'))
-                    search_before = cursor_data.get("sort")
-                    if search_before and len(search_before) == 1:
-                        search_before = ObjectId(search_before[0])
-                except (json.JSONDecodeError, ValueError):
+                cursor_data = json.loads(base64.b64decode(prev_cursor).decode('utf-8'))
+                search_before = cursor_data.get("sort")
+                
+                if search_before and len(search_before) == 1:
+                    search_before = ObjectId(search_before[0])
+                else:
                     raise HTTPException(status_code=400, detail="Invalid prev_cursor format")
             except Exception:
                 raise HTTPException(status_code=400, detail="Invalid prev_cursor format")
@@ -535,31 +547,31 @@ def get_table(
                     detail="Must specify 'column' parameter when filtering by types"
                 )
                 
+            # Use flattened type field for filtering
+            types_field = f"types_{type_column}"
+                
             # Include specific types (ANY of the specified types must match)
             if include_types:
-                filters["column_meta"] = {
-                    "$elemMatch": {
-                        "col_index": type_column,
-                        "types": {"$in": include_types}
-                    }
-                }
+                filters[types_field] = {"$in": include_types}
             
             # Exclude specific types (NONE of the specified types should match)
             if exclude_types:
-                exclude_filter = {
-                    "column_meta": {
-                        "$not": {
-                            "$elemMatch": {
-                                "col_index": type_column,
-                                "types": {"$in": exclude_types}
-                            }
-                        }
-                    }
-                }
-                filters.update(exclude_filter)
+                filters[types_field] = {"$nin": exclude_types}
+            
+            # Create index on-demand for this types field if it doesn't exist
+            try:
+                # Check if index exists before creating it
+                existing_indexes = [idx["name"] for idx in db.input_data.list_indexes()]
+                index_name = f"types_{type_column}_1"
+                if index_name not in existing_indexes:
+                    db.input_data.create_index([(types_field, ASCENDING)], background=True)
+                    log_info(f"Created index on {types_field}")
+            except Exception as e:
+                log_error(f"Error creating index on {types_field}: {str(e)}")
         
         # Set up sort criteria
         sort_criteria = []
+        use_aggregation = False
         
         # Set up sorting based on confidence if requested
         if sort_by == "confidence":
@@ -570,81 +582,75 @@ def get_table(
                     detail="Must specify 'column' parameter when sorting by column confidence"
                 )
                 
-            # We need a custom aggregation pipeline to sort by nested field with filter
-            use_aggregation = True
-            agg_pipeline = [
-                {"$match": filters},
-                {"$addFields": {
-                    "column_confidence": {
-                        "$ifNull": [
-                            {"$arrayElemAt": [
-                                {"$filter": {
-                                    "input": "$column_meta",
-                                    "as": "cm",
-                                    "cond": {"$eq": ["$$cm.col_index", column]}
-                                }},
-                                0
-                            ]},
-                            {"col_index": column, "confidence": 0}
-                        ]
-                    }
-                }},
-                {"$sort": {
-                    "column_confidence.confidence": -1 if sort_direction == "desc" else 1,
-                    "_id": 1
-                }}
+            # Use flattened confidence field for sorting
+            conf_field = f"conf_{column}"
+            sort_criteria = [
+                (conf_field, -1 if sort_direction == "desc" else 1),
+                ("_id", 1)  # Secondary sort for stable pagination
             ]
+            
+            # Create compound index on-demand for this confidence field if it doesn't exist
+            try:
+                # Check if index exists before creating it
+                existing_indexes = [idx["name"] for idx in db.input_data.list_indexes()]
+                compound_index_name = f"dataset_name_1_table_name_1_{conf_field}_{-1 if sort_direction == 'desc' else 1}__id_1"
+                
+                if compound_index_name not in existing_indexes:
+                    db.input_data.create_index([
+                        ("dataset_name", ASCENDING),
+                        ("table_name", ASCENDING),
+                        (conf_field, -1 if sort_direction == "desc" else 1),
+                        ("_id", ASCENDING)
+                    ], background=True)
+                    log_info(f"Created compound index for {conf_field} pagination")
+            except Exception as e:
+                log_error(f"Error creating index on {conf_field}: {str(e)}")
+                
         elif sort_by == "confidence_avg":
             # Row-level average confidence sort
             sort_criteria = [
                 ("avg_confidence", -1 if sort_direction == "desc" else 1),
-                ("_id", 1)
+                ("_id", 1)  # Secondary sort for stable pagination
             ]
-            use_aggregation = False
         else:
             # Default sort by _id
             sort_criteria = [("_id", 1)]
-            use_aggregation = False
             
-        # Apply pagination filters
-        if search_after:
-            if use_aggregation:
-                agg_pipeline[0]["$match"]["_id"] = {"$gt": search_after}
-            else:
-                filters["_id"] = {"$gt": search_after}
+        # Apply pagination filters based on sort type
+        if sort_by == "confidence" and column is not None:
+            if next_cursor and last_score is not None:
+                # For confidence sorting, use composite key filtering with $or
+                conf_field = f"conf_{column}"
+                sort_dir_multiplier = -1 if sort_direction == "desc" else 1
                 
-        if search_before:
-            if use_aggregation:
-                agg_pipeline[0]["$match"]["_id"] = {"$lt": search_before}
-                # Reverse sort direction for backward pagination
-                if agg_pipeline[2]["$sort"].get("column_confidence.confidence"):
-                    agg_pipeline[2]["$sort"]["column_confidence.confidence"] *= -1
-            else:
+                # Create the $or clause for composite key pagination
+                if sort_dir_multiplier == -1:  # Descending sort
+                    filters["$or"] = [
+                        {conf_field: {"$lt": last_score}},  # Get rows with lower confidence first
+                        {conf_field: last_score, "_id": {"$gt": search_after}}  # Then rows with same confidence but higher _id
+                    ]
+                else:  # Ascending sort
+                    filters["$or"] = [
+                        {conf_field: {"$gt": last_score}},  # Get rows with higher confidence first
+                        {conf_field: last_score, "_id": {"$gt": search_after}}  # Then rows with same confidence but higher _id
+                    ]
+        else:
+            # Standard ObjectId-based pagination
+            if search_after:
+                filters["_id"] = {"$gt": search_after}
+                    
+            if search_before:
                 filters["_id"] = {"$lt": search_before}
                 # Reverse sort direction for backward pagination
                 sort_criteria = [(field, -direction) for field, direction in sort_criteria]
         
-        # Add limit to query (get one extra to check for more results)
-        if use_aggregation:
-            agg_pipeline.append({"$limit": limit + 1})
-        
         # Execute query
-        if use_aggregation:
-            # Use aggregation pipeline for complex sorting
-            cursor = db.input_data.aggregate(agg_pipeline)
+        cursor = db.input_data.find(filters).sort(sort_criteria).limit(limit + 1)
+        raw_rows = list(cursor)
+        if not raw_rows:
+            # Try crocodile_db if no results in main DB
+            cursor = crocodile_db.input_data.find(filters).sort(sort_criteria).limit(limit + 1)
             raw_rows = list(cursor)
-            if not raw_rows:
-                # Try crocodile_db if no results in main DB
-                cursor = crocodile_db.input_data.aggregate(agg_pipeline)
-                raw_rows = list(cursor)
-        else:
-            # Use find with standard sort
-            cursor = db.input_data.find(filters).sort(sort_criteria).limit(limit + 1)
-            raw_rows = list(cursor)
-            if not raw_rows:
-                # Try crocodile_db if no results in main DB
-                cursor = crocodile_db.input_data.find(filters).sort(sort_criteria).limit(limit + 1)
-                raw_rows = list(cursor)
         
         # Determine if there are more results
         has_more = len(raw_rows) > limit
@@ -658,44 +664,58 @@ def get_table(
         # Calculate next_cursor and prev_cursor for pagination
         new_next_cursor = new_prev_cursor = None
         
-        # Helper function to create encoded cursor
-        def create_cursor(doc_id):
+        # Helper functions to create encoded cursors
+        def create_id_cursor(doc_id):
             cursor_data = {"sort": [str(doc_id)]}
             return base64.b64encode(json.dumps(cursor_data).encode('utf-8')).decode('utf-8')
             
-        if len(raw_rows) > 0:
-            # For next_cursor:
-            if has_more:
-                new_next_cursor = create_cursor(raw_rows[-1]["_id"])
-            elif is_backward:
-                # Coming backward and no more results means we're approaching first page
-                # Need to check if this is actually the first page
-                first_check_filter = {
-                    "user_id": user_id,
-                    "dataset_name": dataset_name,
-                    "table_name": table_name,
-                    "_id": {"$lt": raw_rows[0]["_id"]}
-                }
-                if db.input_data.count_documents(first_check_filter) > 0 or crocodile_db.input_data.count_documents(first_check_filter) > 0:
-                    new_next_cursor = create_cursor(raw_rows[0]["_id"])
+        def create_confidence_cursor(doc_id, conf_value):
+            cursor_data = {"sort": [conf_value, str(doc_id)]}
+            return base64.b64encode(json.dumps(cursor_data).encode('utf-8')).decode('utf-8')
             
-            # For prev_cursor:
-            if len(raw_rows) > 0:
-                # Check if we're on the first page
-                first_check_filter = {
-                    "user_id": user_id,
-                    "dataset_name": dataset_name,
-                    "table_name": table_name,
-                    "_id": {"$lt": raw_rows[0]["_id"]}
-                }
+        if len(raw_rows) > 0:
+            if sort_by == "confidence" and column is not None:
+                # For confidence sorting, only support next_cursor
+                if has_more:
+                    last_row = raw_rows[-1]
+                    conf_field = f"conf_{column}"
+                    conf_value = last_row.get(conf_field, 0.0)
+                    new_next_cursor = create_confidence_cursor(last_row["_id"], conf_value)
+                    # prev_cursor is always None for confidence sorting
+            else:
+                # Standard _id-based pagination logic
+                # For next_cursor:
+                if has_more:
+                    new_next_cursor = create_id_cursor(raw_rows[-1]["_id"])
+                elif is_backward:
+                    # Coming backward and no more results means we're approaching first page
+                    # Check if this is actually the first page
+                    first_check_filter = {
+                        "user_id": user_id,
+                        "dataset_name": dataset_name,
+                        "table_name": table_name,
+                        "_id": {"$lt": raw_rows[0]["_id"]}
+                    }
+                    if db.input_data.count_documents(first_check_filter) > 0 or crocodile_db.input_data.count_documents(first_check_filter) > 0:
+                        new_next_cursor = create_id_cursor(raw_rows[0]["_id"])
                 
-                # Check if anything comes before the first item
-                if db.input_data.count_documents(first_check_filter) > 0 or crocodile_db.input_data.count_documents(first_check_filter) > 0:
-                    new_prev_cursor = create_cursor(raw_rows[0]["_id"])
-                
-                # If we came via next_cursor, we definitely have a previous page
-                if next_cursor:
-                    new_prev_cursor = create_cursor(raw_rows[0]["_id"])
+                # For prev_cursor:
+                if len(raw_rows) > 0 and sort_by != "confidence":  # No prev_cursor for confidence sorting
+                    # Check if we're on the first page
+                    first_check_filter = {
+                        "user_id": user_id,
+                        "dataset_name": dataset_name,
+                        "table_name": table_name,
+                        "_id": {"$lt": raw_rows[0]["_id"]}
+                    }
+                    
+                    # Check if anything comes before the first item
+                    if db.input_data.count_documents(first_check_filter) > 0 or crocodile_db.input_data.count_documents(first_check_filter) > 0:
+                        new_prev_cursor = create_id_cursor(raw_rows[0]["_id"])
+                    
+                    # If we came via next_cursor, we definitely have a previous page
+                    if next_cursor:
+                        new_prev_cursor = create_id_cursor(raw_rows[0]["_id"])
 
         # Format rows
         rows_formatted = []
@@ -962,26 +982,6 @@ def delete_dataset(
     # Delete data from crocodile_db
     crocodile_db.input_data.delete_many({"client_id": user_id, "dataset_name": dataset_name})
 
-    # Delete data from Elasticsearch
-    try:
-        es.delete_by_query(
-            index=ES_INDEX,
-            body={
-                "query": {
-                    "bool": {
-                        "filter": [
-                            {"term": {"user_id": user_id}},
-                            {"term": {"dataset_name": dataset_name}}
-                        ]
-                    }
-                }
-            },
-            refresh=True  # Refresh the index immediately
-        )
-    except Exception as e:
-        # Log error but don't fail the operation if ES deletion fails
-        print(f"Error deleting dataset from Elasticsearch: {str(e)}")
-
     return None
 
 @router.delete("/datasets/{dataset_name}/tables/{table_name}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1035,27 +1035,6 @@ def delete_table(
     crocodile_db.input_data.delete_many(
         {"client_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
     )
-
-    # Delete data from Elasticsearch
-    try:
-        es.delete_by_query(
-            index=ES_INDEX,
-            body={
-                "query": {
-                    "bool": {
-                        "filter": [
-                            {"term": {"user_id": user_id}},
-                            {"term": {"dataset_name": dataset_name}},
-                            {"term": {"table_name": table_name}}
-                        ]
-                    }
-                }
-            },
-            refresh=True  # Refresh the index immediately
-        )
-    except Exception as e:
-        # Log error but don't fail the operation if ES deletion fails
-        print(f"Error deleting table from Elasticsearch: {str(e)}")
 
     return None
 

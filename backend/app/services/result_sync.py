@@ -369,6 +369,9 @@ class ResultSyncService:
 
                 confidence_scores = []
                 column_meta = []
+                
+                # Prepare flattened fields
+                flattened_fields = {}
 
                 for col_idx, candidates in el_results.items():
                     if candidates and len(candidates) > 0:
@@ -376,6 +379,8 @@ class ResultSyncService:
                         confidence = top_candidate.get("score", 0.0)
                         if confidence is not None:
                             confidence_scores.append(confidence)
+                            # Add flattened confidence field
+                            flattened_fields[f"conf_{col_idx}"] = confidence
                         
                         # Extract types for the column (use IDs only for filtering)
                         types = []
@@ -389,8 +394,11 @@ class ResultSyncService:
                                     types.append(type_id)
                                     column_type_frequencies[col_idx][type_id] += 1
                                     column_type_mapping[type_id] = {"id": type_id, "name": type_name}
+                            
+                            # Add flattened types field
+                            flattened_fields[f"types_{col_idx}"] = types
                         
-                        # Add to column_meta for MongoDB filtering
+                        # Add to column_meta for backward compatibility
                         column_meta.append({
                             "col_index": int(col_idx),
                             "confidence": confidence,
@@ -399,6 +407,18 @@ class ResultSyncService:
 
                 row_avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
 
+                # Prepare update operation with both column_meta and flattened fields
+                update_dict = {
+                    "status": status,
+                    "ml_status": ml_status,
+                    "el_results": el_results,
+                    "last_updated": datetime.now(),
+                    "avg_confidence": row_avg_confidence,
+                    "column_meta": column_meta,  # Keep for backward compatibility
+                }
+                # Add all flattened fields to the update
+                update_dict.update(flattened_fields)
+
                 db.input_data.update_one(
                     {
                         "user_id": user_id,
@@ -406,17 +426,7 @@ class ResultSyncService:
                         "table_name": table_name,
                         "row_id": row_id,
                     },
-                    {
-                        "$set": {
-                            "status": status,
-                            "ml_status": ml_status,
-                            "el_results": el_results,
-                            "last_updated": datetime.now(),
-                            "avg_confidence": row_avg_confidence,
-                            "column_meta": column_meta  # Add column_meta for MongoDB filtering
-                            # Removed confidence_scores as it's redundant with column_meta
-                        }
-                    },
+                    {"$set": update_dict},
                     upsert=False,
                 )
 

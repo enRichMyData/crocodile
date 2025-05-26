@@ -190,10 +190,6 @@ class DataService:
                 db.input_data.insert_many(input_data)
                 log_info(f"Stored {len(input_data)} rows in database for {dataset_name}/{table_name}")
                 
-                # We no longer need to index data into Elasticsearch
-                # The column_meta field will be populated during the entity linking process
-                # or result sync later
-                
             except Exception as e:
                 log_error(f"Error storing rows in database: {str(e)}", e)
                 # We'll continue anyway since Crocodile will handle processing

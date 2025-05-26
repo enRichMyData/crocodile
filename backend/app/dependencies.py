@@ -7,11 +7,6 @@ from pymongo import ASCENDING, MongoClient
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-# No longer needed but kept as None to avoid breaking imports
-ES_HOSTS = None
-ES_INDEX = None
-es = None
-
 def get_db():
     client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
     db = client["crocodile_backend_db"]
@@ -46,16 +41,7 @@ def get_db():
         ("_id", ASCENDING)
     ])
 
-    db.input_data.create_index([
-        ("column_meta.col_index", ASCENDING),
-        ("column_meta.types", ASCENDING)
-    ])
-
-    db.input_data.create_index([
-        ("column_meta.col_index", ASCENDING),
-        ("column_meta.confidence", ASCENDING)
-    ])
-
+    # Keep index for avg_confidence as it's used for whole-row sorting
     db.input_data.create_index([
         ("avg_confidence", ASCENDING)
     ])

@@ -7,7 +7,6 @@ from column_classifier import ColumnClassifier
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 from services.utils import format_classification, log_error, log_info
-from dependencies import es, ES_INDEX
 
 
 class DataService:
@@ -191,37 +190,9 @@ class DataService:
                 db.input_data.insert_many(input_data)
                 log_info(f"Stored {len(input_data)} rows in database for {dataset_name}/{table_name}")
                 
-                # Index minimal data into Elasticsearch for search only
-                es_operations = []
-                for doc in input_data:
-                    # Create an ES-friendly document ID that ensures uniqueness
-                    doc_id = f"{user_id}_{dataset_name}_{table_name}_{doc['row_id']}"
-                    
-                    # Prepare the document with only search-required fields
-                    # Types will be initially empty and updated when entity linking results arrive
-                    es_doc = {
-                        "user_id": user_id,
-                        "dataset_name": dataset_name,
-                        "table_name": table_name,
-                        "row_id": doc["row_id"],
-                        "data": [
-                            {
-                                "col_index": idx, 
-                                "value": str(val) if val is not None else "",
-                                "types": []  # Initially empty, filled during result sync
-                            } 
-                            for idx, val in enumerate(doc["data"])
-                        ],
-                    }
-                    
-                    # Add to bulk operations list
-                    es_operations.append({"index": {"_index": ES_INDEX, "_id": doc_id}})
-                    es_operations.append(es_doc)
-                
-                if es_operations:
-                    # Execute bulk indexing in ES
-                    es.bulk(index=ES_INDEX, body=es_operations)
-                    log_info(f"Indexed {len(input_data)} rows in Elasticsearch for search")
+                # We no longer need to index data into Elasticsearch
+                # The column_meta field will be populated during the entity linking process
+                # or result sync later
                 
             except Exception as e:
                 log_error(f"Error storing rows in database: {str(e)}", e)

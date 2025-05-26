@@ -12,7 +12,7 @@ import numpy as np
 import concurrent.futures
 import pandas as pd
 from bson import ObjectId
-from dependencies import get_crocodile_db, get_db, verify_token, es, ES_INDEX
+from dependencies import get_crocodile_db, get_db, verify_token
 from endpoints.imdb_example import IMDB_EXAMPLE
 from fastapi import (
     APIRouter,
@@ -428,9 +428,9 @@ def get_table(
     limit: int = Query(10),
     next_cursor: Optional[str] = Query(None),
     prev_cursor: Optional[str] = Query(None),
-    search: Optional[str] = Query(None, description="Text to match in cell values"),
-    column: Optional[int] = Query(None, description="Column index to use for search, types filtering or sorting"),
-    search_columns: Optional[List[int]] = Query(None, description="Restrict search to specific column indices"),
+    search: Optional[str] = Query(None, description="Text to match in cell values (not implemented)"),
+    column: Optional[int] = Query(None, description="Column index to use for types filtering or sorting"),
+    search_columns: Optional[List[int]] = Query(None, description="Restrict search to specific column indices (not implemented)"),
     include_types: Optional[List[str]] = Query(None, description="Include rows with these entity types"),
     exclude_types: Optional[List[str]] = Query(None, description="Exclude rows with these entity types"),
     sort_by: Optional[str] = Query(None, description="Sort by: 'confidence' or 'confidence_avg'"),
@@ -442,7 +442,6 @@ def get_table(
     """
     Get table data with bi-directional pagination.
     
-    - When search is provided, uses Elasticsearch for text search
     - When types are provided, filters by entity types
     - Can sort by confidence scores at column or row level
     - Sorting options:
@@ -454,7 +453,7 @@ def get_table(
     # Check dataset
     if not db.datasets.find_one(
         {"user_id": user_id, "dataset_name": dataset_name}
-    ):  # user_id first
+    ):
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
 
     # Check table
@@ -478,8 +477,8 @@ def get_table(
     if "classified_columns" in table:
         classified_columns = table["classified_columns"]
 
-    # If search, type filters or confidence sorting is requested, use Elasticsearch
-    if search is not None or include_types or exclude_types or sort_by is not None:
+    # If type filters or confidence sorting is requested, use advanced MongoDB query
+    if include_types or exclude_types or sort_by is not None:
         # Ensure mutual exclusivity of pagination cursors
         if next_cursor and prev_cursor:
             raise HTTPException(
@@ -494,82 +493,37 @@ def get_table(
         
         if next_cursor:
             try:
-                # Try to decode the cursor as JSON first
+                # Decode the cursor as JSON
                 try:
                     cursor_data = json.loads(base64.b64decode(next_cursor).decode('utf-8'))
                     search_after = cursor_data.get("sort")
+                    if search_after and len(search_after) == 1:
+                        search_after = ObjectId(search_after[0])
                 except (json.JSONDecodeError, ValueError):
-                    # For backward compatibility, try parsing as a simple row_id
-                    row_id = int(next_cursor)
-                    search_after = [row_id]  # Default to row_id only
+                    raise HTTPException(status_code=400, detail="Invalid next_cursor format")
             except Exception:
                 raise HTTPException(status_code=400, detail="Invalid next_cursor format")
         
         elif prev_cursor:
             is_backward = True
             try:
-                # Try to decode the cursor as JSON first
+                # Decode the cursor as JSON
                 try:
                     cursor_data = json.loads(base64.b64decode(prev_cursor).decode('utf-8'))
                     search_before = cursor_data.get("sort")
+                    if search_before and len(search_before) == 1:
+                        search_before = ObjectId(search_before[0])
                 except (json.JSONDecodeError, ValueError):
-                    # For backward compatibility, try parsing as a simple row_id
-                    row_id = int(prev_cursor)
-                    search_before = [row_id]  # Default to row_id only
+                    raise HTTPException(status_code=400, detail="Invalid prev_cursor format")
             except Exception:
                 raise HTTPException(status_code=400, detail="Invalid prev_cursor format")
             
         # Build base query filters
-        filters = [
-            {"term": {"user_id": user_id}},
-            {"term": {"dataset_name": dataset_name}},
-            {"term": {"table_name": table_name}},
-        ]
-        
-        # Add text search filter if provided
-        if search:
-            if search_columns:
-                # Search in specified columns only (OR condition across columns)
-                nested_queries = []
-                for col_idx in search_columns:
-                    nested_queries.append({
-                        "bool": {
-                            "must": [
-                                {"match": {"data.value": search}},
-                                {"term": {"data.col_index": col_idx}}
-                            ]
-                        }
-                    })
-                
-                filters.append({
-                    "nested": {
-                        "path": "data",
-                        "query": {"bool": {"should": nested_queries, "minimum_should_match": 1}}
-                    }
-                })
-            elif column is not None:
-                # Search in specified column
-                filters.append({
-                    "nested": {
-                        "path": "data",
-                        "query": {
-                            "bool": {
-                                "must": [
-                                    {"match": {"data.value": search}},
-                                    {"term": {"data.col_index": column}}
-                                ]
-                            }
-                        }
-                    }
-                })
-            else:
-                # Search in all columns
-                filters.append({
-                    "nested": {
-                        "path": "data",
-                        "query": {"bool": {"must": [{"match": {"data.value": search}}]}}
-                    }
-                })
+        filters = {
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name,
+        }
         
         # Add type filters if provided - must specify a column
         if (include_types or exclude_types):
@@ -583,44 +537,28 @@ def get_table(
                 
             # Include specific types (ANY of the specified types must match)
             if include_types:
-                type_filter_query = {
-                    "nested": {
-                        "path": "data",
-                        "query": {
-                            "bool": {
-                                "must": [
-                                    {"term": {"data.col_index": type_column}},
-                                    {"bool": {"should": [{"term": {"data.types": type_name}} for type_name in include_types]}}
-                                ]
+                filters["column_meta"] = {
+                    "$elemMatch": {
+                        "col_index": type_column,
+                        "types": {"$in": include_types}
+                    }
+                }
+            
+            # Exclude specific types (NONE of the specified types should match)
+            if exclude_types:
+                exclude_filter = {
+                    "column_meta": {
+                        "$not": {
+                            "$elemMatch": {
+                                "col_index": type_column,
+                                "types": {"$in": exclude_types}
                             }
                         }
                     }
                 }
-                filters.append(type_filter_query)
-            
-            # Exclude specific types (NONE of the specified types should match)
-            if exclude_types:
-                for type_name in exclude_types:
-                    exclude_filter = {
-                        "bool": {
-                            "must_not": {
-                                "nested": {
-                                    "path": "data",
-                                    "query": {
-                                        "bool": {
-                                            "must": [
-                                                {"term": {"data.col_index": type_column}},
-                                                {"term": {"data.types": type_name}}
-                                            ]
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    filters.append(exclude_filter)
+                filters.update(exclude_filter)
         
-        # Build sort criteria
+        # Set up sort criteria
         sort_criteria = []
         
         # Set up sorting based on confidence if requested
@@ -632,166 +570,132 @@ def get_table(
                     detail="Must specify 'column' parameter when sorting by column confidence"
                 )
                 
-            # Use the working format for nested sort
-            sort_criteria.append({
-                "data.confidence": {
-                    "order": "asc" if is_backward else sort_direction,
-                    "nested": {
-                        "path": "data",
-                        "filter": {"term": {"data.col_index": column}}
-                    },
-                    "missing": "_last" if sort_direction == "desc" else "_first"
-                }
-            })
+            # We need a custom aggregation pipeline to sort by nested field with filter
+            use_aggregation = True
+            agg_pipeline = [
+                {"$match": filters},
+                {"$addFields": {
+                    "column_confidence": {
+                        "$ifNull": [
+                            {"$arrayElemAt": [
+                                {"$filter": {
+                                    "input": "$column_meta",
+                                    "as": "cm",
+                                    "cond": {"$eq": ["$$cm.col_index", column]}
+                                }},
+                                0
+                            ]},
+                            {"col_index": column, "confidence": 0}
+                        ]
+                    }
+                }},
+                {"$sort": {
+                    "column_confidence.confidence": -1 if sort_direction == "desc" else 1,
+                    "_id": 1
+                }}
+            ]
         elif sort_by == "confidence_avg":
             # Row-level average confidence sort
-            sort_criteria.append({
-                "avg_confidence": {
-                    "order": "asc" if is_backward else sort_direction,
-                    "missing": "_last" if sort_direction == "desc" else "_first"
-                }
-            })
-        
-        # Always add row_id as secondary sort for stable pagination
-        sort_criteria.append({
-            "row_id": {
-                "order": "asc" if is_backward else "asc"  # always ascending for row_id
-            }
-        })
+            sort_criteria = [
+                ("avg_confidence", -1 if sort_direction == "desc" else 1),
+                ("_id", 1)
+            ]
+            use_aggregation = False
+        else:
+            # Default sort by _id
+            sort_criteria = [("_id", 1)]
+            use_aggregation = False
             
-        # Prepare the search body
-        body = {
-            "query": {"bool": {"filter": filters}},
-            "sort": sort_criteria,
-            "_source": ["row_id", "avg_confidence"],  # Include avg_confidence in results
-            "size": limit + 1,      # Get one extra to check for more results
-            "track_total_hits": True  # Get accurate total hit count
-        }
-        
-        # Add search_after for forward pagination
+        # Apply pagination filters
         if search_after:
-            body["search_after"] = search_after
+            if use_aggregation:
+                agg_pipeline[0]["$match"]["_id"] = {"$gt": search_after}
+            else:
+                filters["_id"] = {"$gt": search_after}
+                
+        if search_before:
+            if use_aggregation:
+                agg_pipeline[0]["$match"]["_id"] = {"$lt": search_before}
+                # Reverse sort direction for backward pagination
+                if agg_pipeline[2]["$sort"].get("column_confidence.confidence"):
+                    agg_pipeline[2]["$sort"]["column_confidence.confidence"] *= -1
+            else:
+                filters["_id"] = {"$lt": search_before}
+                # Reverse sort direction for backward pagination
+                sort_criteria = [(field, -direction) for field, direction in sort_criteria]
         
-        # For backward pagination, we need to reverse the sort order temporarily
-        # and then reverse the results afterward
-        if is_backward and search_before:
-            # Reverse sort orders for backward pagination
-            for sort_item in body["sort"]:
-                for key in sort_item:
-                    if isinstance(sort_item[key], dict) and "order" in sort_item[key]:
-                        sort_item[key]["order"] = "desc" if sort_item[key]["order"] == "asc" else "asc"
-            
-            body["search_after"] = search_before
+        # Add limit to query (get one extra to check for more results)
+        if use_aggregation:
+            agg_pipeline.append({"$limit": limit + 1})
         
-        # Execute search and get results
-        res = es.search(index=ES_INDEX, body=body)
-        hits = res["hits"]["hits"]
-        total_hits = res["hits"]["total"]["value"]
+        # Execute query
+        if use_aggregation:
+            # Use aggregation pipeline for complex sorting
+            cursor = db.input_data.aggregate(agg_pipeline)
+            raw_rows = list(cursor)
+            if not raw_rows:
+                # Try crocodile_db if no results in main DB
+                cursor = crocodile_db.input_data.aggregate(agg_pipeline)
+                raw_rows = list(cursor)
+        else:
+            # Use find with standard sort
+            cursor = db.input_data.find(filters).sort(sort_criteria).limit(limit + 1)
+            raw_rows = list(cursor)
+            if not raw_rows:
+                # Try crocodile_db if no results in main DB
+                cursor = crocodile_db.input_data.find(filters).sort(sort_criteria).limit(limit + 1)
+                raw_rows = list(cursor)
         
         # Determine if there are more results
-        has_more = len(hits) > limit
+        has_more = len(raw_rows) > limit
         if has_more:
-            hits = hits[:limit]  # Remove the extra item
+            raw_rows = raw_rows[:limit]  # Remove the extra item
             
         # If we did backward pagination, we need to reverse the results
-        # to maintain consistent ordering for the user
         if is_backward:
-            hits.reverse()
+            raw_rows.reverse()
             
         # Calculate next_cursor and prev_cursor for pagination
         new_next_cursor = new_prev_cursor = None
         
         # Helper function to create encoded cursor
-        def create_cursor(sort_values: List[Any]) -> str:
-            cursor_data = {"sort": sort_values}
+        def create_cursor(doc_id):
+            cursor_data = {"sort": [str(doc_id)]}
             return base64.b64encode(json.dumps(cursor_data).encode('utf-8')).decode('utf-8')
             
-        if len(hits) > 0:
+        if len(raw_rows) > 0:
             # For next_cursor:
-            # - If we have more results after this page, create next_cursor
-            # - If we came from prev_cursor, create next_cursor unless we're on first page
             if has_more:
-                last_hit = hits[-1]
-                new_next_cursor = create_cursor(last_hit["sort"])
+                new_next_cursor = create_cursor(raw_rows[-1]["_id"])
             elif is_backward:
                 # Coming backward and no more results means we're approaching first page
                 # Need to check if this is actually the first page
-                first_page_check = {
-                    "query": {
-                        "bool": {"filter": filters}
-                    },
-                    "sort": sort_criteria,
-                    "size": 1,
-                    "_source": False
+                first_check_filter = {
+                    "user_id": user_id,
+                    "dataset_name": dataset_name,
+                    "table_name": table_name,
+                    "_id": {"$lt": raw_rows[0]["_id"]}
                 }
-                
-                # Reverse sort directions back to normal
-                for sort_item in first_page_check["sort"]:
-                    for key in sort_item:
-                        if isinstance(sort_item[key], dict) and "order" in sort_item[key]:
-                            sort_item[key]["order"] = "desc" if sort_item[key]["order"] == "asc" else "asc"
-                
-                # Check if there are any documents before this "batch"
-                first_hit = hits[0]
-                first_page_check["search_after"] = first_hit["sort"]
-                
-                check_res = es.search(index=ES_INDEX, body=first_page_check)
-                if len(check_res["hits"]["hits"]) > 0:
-                    # There are results after the first item in our current batch
-                    # So we're not on the first page
-                    new_next_cursor = create_cursor(first_hit["sort"])
+                if db.input_data.count_documents(first_check_filter) > 0 or crocodile_db.input_data.count_documents(first_check_filter) > 0:
+                    new_next_cursor = create_cursor(raw_rows[0]["_id"])
             
             # For prev_cursor:
-            # - If we're not on the first page, create prev_cursor
-            if len(hits) > 0:
-                first_hit = hits[0]
-                
+            if len(raw_rows) > 0:
                 # Check if we're on the first page
-                first_page_check = {
-                    "query": {
-                        "bool": {"filter": filters}
-                    },
-                    "sort": [{key: {"order": "desc" if item[key]["order"] == "asc" else "asc"} 
-                              if isinstance(item[key], dict) and "order" in item[key] else item[key] 
-                              for key in item} 
-                            for item in sort_criteria],
-                    "size": 1,
-                    "_source": False
+                first_check_filter = {
+                    "user_id": user_id,
+                    "dataset_name": dataset_name,
+                    "table_name": table_name,
+                    "_id": {"$lt": raw_rows[0]["_id"]}
                 }
                 
-                # If we have a first hit, check if anything comes before it
-                try:
-                    first_page_check["search_after"] = first_hit["sort"]
-                    check_res = es.search(index=ES_INDEX, body=first_page_check)
-                    if len(check_res["hits"]["hits"]) > 0:
-                        new_prev_cursor = create_cursor(first_hit["sort"])
-                except Exception as e:
-                    # Log the error but don't fail the request
-                    print(f"Error checking for previous page: {str(e)}")
+                # Check if anything comes before the first item
+                if db.input_data.count_documents(first_check_filter) > 0 or crocodile_db.input_data.count_documents(first_check_filter) > 0:
+                    new_prev_cursor = create_cursor(raw_rows[0]["_id"])
                 
                 # If we came via next_cursor, we definitely have a previous page
                 if next_cursor:
-                    new_prev_cursor = create_cursor(first_hit["sort"])
-        
-        # Extract row IDs from search hits
-        row_ids = [hit["_source"]["row_id"] for hit in hits]
-        
-        # Fetch full data from MongoDB using the row_ids
-        mongo_query = {
-            "user_id": user_id,
-            "dataset_name": dataset_name,
-            "table_name": table_name,
-            "row_id": {"$in": row_ids}
-        }
-        
-        # Try backend DB first, then crocodile DB if needed
-        raw_rows = list(db.input_data.find(mongo_query))
-        if not raw_rows:
-            raw_rows = list(crocodile_db.input_data.find(mongo_query))
-            
-        # Sort rows to match the order from ES results
-        row_id_to_idx = {row_id: i for i, row_id in enumerate(row_ids)}
-        raw_rows.sort(key=lambda row: row_id_to_idx.get(row.get("row_id"), float('inf')))
+                    new_prev_cursor = create_cursor(raw_rows[0]["_id"])
 
         # Format rows
         rows_formatted = []
@@ -832,6 +736,19 @@ def get_table(
         if pending_docs_count == 0:
             status = "DONE"
 
+        # Get total count (approximate only if needed)
+        total_count = db.input_data.count_documents({
+            "user_id": user_id,
+            "dataset_name": dataset_name,
+            "table_name": table_name
+        })
+        if total_count == 0:
+            total_count = crocodile_db.input_data.count_documents({
+                "user_id": user_id,
+                "dataset_name": dataset_name,
+                "table_name": table_name
+            })
+
         return {
             "data": {
                 "datasetName": dataset_name,
@@ -839,14 +756,14 @@ def get_table(
                 "status": status,
                 "header": header,
                 "rows": rows_formatted,
-                "total_matches": total_hits,
+                "total_matches": total_count,
                 "column_types": table_types,
                 "classified_columns": classified_columns,
             },
             "pagination": {"next_cursor": new_next_cursor, "prev_cursor": new_prev_cursor},
         }
 
-    # MongoDB-only logic when no search/type filters or special sorting provided
+    # Standard MongoDB query when no filters or special sorting provided
     else:
         query_filter = {
             "user_id": user_id,

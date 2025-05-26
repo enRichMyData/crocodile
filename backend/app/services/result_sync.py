@@ -3,10 +3,9 @@ from datetime import datetime
 from typing import Any, Dict, List
 from collections import defaultdict, Counter
 
-from pymongo import MongoClient
-from pymongo.collection import Collection
+from pymongo import MongoClient, UpdateOne
+from pymongo.errors import BulkWriteError
 from services.utils import log_error, log_info
-from dependencies import es, ES_INDEX
 
 from crocodile import CrocodileResultFetcher
 
@@ -354,7 +353,7 @@ class ResultSyncService:
         column_type_mapping: Any,
     ):
         """
-        Process a batch of row_ids: fetch results, update backend db, and update ES.
+        Process a batch of row_ids: fetch results, update backend db.
         """
         try:
             results = result_fetcher.get_results(batch_ids)
@@ -362,7 +361,6 @@ class ResultSyncService:
                 log_info(f"No results found for batch with {len(batch_ids)} row IDs")
                 return
 
-            es_operations = []
             for result in results:
                 row_id = result.get("row_id")
                 status = result.get("status")
@@ -370,8 +368,7 @@ class ResultSyncService:
                 el_results = result.get("el_results", {})
 
                 confidence_scores = []
-                data_updates = []
-                column_confidence_scores = {}
+                column_meta = []
 
                 for col_idx, candidates in el_results.items():
                     if candidates and len(candidates) > 0:
@@ -379,7 +376,9 @@ class ResultSyncService:
                         confidence = top_candidate.get("score", 0.0)
                         if confidence is not None:
                             confidence_scores.append(confidence)
-                            column_confidence_scores[col_idx] = confidence
+                        
+                        # Extract types for the column (use IDs only for filtering)
+                        types = []
                         entity_types = []
                         if "types" in top_candidate:
                             for type_obj in top_candidate["types"]:
@@ -387,18 +386,16 @@ class ResultSyncService:
                                     type_id = type_obj["id"]
                                     type_name = type_obj["name"]
                                     entity_types.append((type_id, type_name))
+                                    types.append(type_id)
                                     column_type_frequencies[col_idx][type_id] += 1
                                     column_type_mapping[type_id] = {"id": type_id, "name": type_name}
                         
-                        if entity_types or confidence is not None:
-                            update = {
-                                "col_index": int(col_idx),
-                            }
-                            if entity_types:
-                                update["types"] = [type_id for type_id, _ in entity_types]
-                            if confidence is not None:
-                                update["confidence"] = confidence
-                            data_updates.append(update)
+                        # Add to column_meta for MongoDB filtering
+                        column_meta.append({
+                            "col_index": int(col_idx),
+                            "confidence": confidence,
+                            "types": types
+                        })
 
                 row_avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
 
@@ -415,53 +412,13 @@ class ResultSyncService:
                             "ml_status": ml_status,
                             "el_results": el_results,
                             "last_updated": datetime.now(),
-                            "confidence_scores": column_confidence_scores,
-                            "avg_confidence": row_avg_confidence
+                            "avg_confidence": row_avg_confidence,
+                            "column_meta": column_meta  # Add column_meta for MongoDB filtering
+                            # Removed confidence_scores as it's redundant with column_meta
                         }
                     },
                     upsert=False,
                 )
 
-                doc_id = f"{user_id}_{dataset_name}_{table_name}_{row_id}"
-                if data_updates:
-                    update_script = {
-                        "script": {
-                            "source": """
-                            for (def update : params.updates) {
-                                for (int i = 0; i < ctx._source.data.length; i++) {
-                                    if (ctx._source.data[i].col_index == update.col_index) {
-                                        if (update.containsKey('types')) {
-                                            ctx._source.data[i].types = update.types;
-                                        }
-                                        if (update.containsKey('confidence')) {
-                                            ctx._source.data[i].confidence = update.confidence;
-                                        }
-                                    }
-                                }
-                            }
-                            // Add the row's average confidence
-                            if (!ctx._source.containsKey('avg_confidence')) {
-                                ctx._source.avg_confidence = params.avg_confidence;
-                            } else {
-                                ctx._source.avg_confidence = params.avg_confidence;
-                            }
-                            """,
-                            "params": {
-                                "updates": data_updates,
-                                "avg_confidence": row_avg_confidence
-                            }
-                        }
-                    }
-                    es_operations.append({"update": {"_index": ES_INDEX, "_id": doc_id}})
-                    es_operations.append(update_script)
-            if es_operations:
-                try:
-                    resp = es.bulk(body=es_operations, refresh=True)
-                    if resp.get("errors"):
-                        log_error(f"Errors in bulk update: {resp.get('items')}")
-                    else:
-                        log_info(f"Updated {len(es_operations)//2} documents with type information")
-                except Exception as e:
-                    log_error(f"Failed to update ES: {str(e)}", e)
         except Exception as e:
             log_error("Error syncing results for batch", e)

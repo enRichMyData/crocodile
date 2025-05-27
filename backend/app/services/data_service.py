@@ -158,6 +158,21 @@ class DataService:
                     "manually_annotated": False,
                     "created_at": datetime.now(),
                 }
+                
+                # Add flattened data fields and consolidated text field for searching
+                data_text_parts = []
+                for col_idx, value in enumerate(row_values):
+                    # Convert to string if needed and store in individual fields
+                    if value is not None:
+                        str_value = str(value)
+                        input_doc[f"data_{col_idx}"] = str_value
+                        data_text_parts.append(str_value)
+                    else:
+                        input_doc[f"data_{col_idx}"] = ""
+                
+                # Create consolidated text field for full-text search
+                input_doc["data_text_all"] = " ".join(data_text_parts)
+                
                 input_data.append(input_doc)
 
         elif data_list is not None:
@@ -181,6 +196,21 @@ class DataService:
                     "manually_annotated": False,
                     "created_at": datetime.now(),
                 }
+                
+                # Add flattened data fields and consolidated text field for searching
+                data_text_parts = []
+                for col_idx, value in enumerate(row_values):
+                    # Convert to string if needed and store in individual fields
+                    if value is not None:
+                        str_value = str(value)
+                        input_doc[f"data_{col_idx}"] = str_value
+                        data_text_parts.append(str_value)
+                    else:
+                        input_doc[f"data_{col_idx}"] = ""
+                
+                # Create consolidated text field for full-text search
+                input_doc["data_text_all"] = " ".join(data_text_parts)
+                
                 input_data.append(input_doc)
 
         # Store rows in database

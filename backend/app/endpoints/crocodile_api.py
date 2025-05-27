@@ -7,7 +7,7 @@ import base64
 import asyncio
 import io
 import csv
-from pymongo import ASCENDING
+from pymongo import ASCENDING, TEXT
 
 import numpy as np
 import concurrent.futures
@@ -429,11 +429,11 @@ def get_table(
     limit: int = Query(10),
     next_cursor: Optional[str] = Query(None),
     prev_cursor: Optional[str] = Query(None),
-    search: Optional[str] = Query(None, description="Text to match in cell values (not implemented)"),
-    column: Optional[int] = Query(None, description="Column index to use for types filtering or sorting"),
-    search_columns: Optional[List[int]] = Query(None, description="Restrict search to specific column indices (not implemented)"),
+    search: Optional[str] = Query(None, description="Text to match in cell values"),
+    columns: Optional[List[int]] = Query(None, description="Restrict search to specific column indices"),
     include_types: Optional[List[str]] = Query(None, description="Include rows with these entity types"),
     exclude_types: Optional[List[str]] = Query(None, description="Exclude rows with these entity types"),
+    column: Optional[int] = Query(None, description="Column index for type filtering and confidence sorting"),
     sort_by: Optional[str] = Query(None, description="Sort by: 'confidence' or 'confidence_avg'"),
     sort_direction: str = Query("desc", description="Sort direction: 'asc' or 'desc'"),
     token_payload: str = Depends(verify_token),
@@ -443,11 +443,10 @@ def get_table(
     """
     Get table data with bi-directional pagination.
     
-    - When types are provided, filters by entity types
-    - Can sort by confidence scores at column or row level
-    - Sorting options:
-      - 'confidence': Sort by confidence score of a specific column (requires 'column' parameter)
-      - 'confidence_avg': Sort by average confidence across all columns in each row
+    - When search is provided, performs text search across all data columns
+    - When columns is provided with search, restricts search to those columns
+    - When types are provided, filters by entity types (requires 'column' parameter)
+    - Can sort by confidence scores at column level (requires 'column' parameter) or row level
     """
     user_id = token_payload.get("email")
 
@@ -478,8 +477,8 @@ def get_table(
     if "classified_columns" in table:
         classified_columns = table["classified_columns"]
 
-    # If type filters or confidence sorting is requested, use advanced MongoDB query
-    if include_types or exclude_types or sort_by is not None:
+    # If search, type filters, or confidence sorting is requested, use advanced MongoDB query
+    if search or include_types or exclude_types or sort_by is not None:
         # Ensure mutual exclusivity of pagination cursors
         if next_cursor and prev_cursor:
             raise HTTPException(
@@ -537,18 +536,44 @@ def get_table(
             "table_name": table_name,
         }
         
+        # Add text search functionality
+        if search:
+            # Handle text search based on target columns
+            if columns is not None and len(columns) > 0:
+                # Target specific columns for search
+                column_conditions = []
+                for col_idx in columns:
+                    # Search in specific columns using the 'data' array field
+                    # MongoDB $regex provides case-insensitive search with 'i' option
+                    column_conditions.append({f"data.{col_idx}": {"$regex": search, "$options": "i"}})
+                
+                if column_conditions:
+                    # If any column matches, include the row
+                    filters["$or"] = column_conditions
+            else:
+                # Global search across all columns
+                # For global search, we'll use the data array with regex conditions
+                header_length = len(header) if header else 0
+                if header_length > 0:
+                    global_conditions = []
+                    for i in range(header_length):
+                        global_conditions.append({f"data.{i}": {"$regex": search, "$options": "i"}})
+                    filters["$or"] = global_conditions
+                    
+                # Note: We don't create a text index here - this should be done once in dependencies.py
+                # MongoDB only allows one text index per collection
+
         # Add type filters if provided - must specify a column
         if (include_types or exclude_types):
-            type_column = column  # Use the unified column parameter
-            
-            if type_column is None:
+            # Use the column parameter for type filtering
+            if column is None:
                 raise HTTPException(
                     status_code=400,
                     detail="Must specify 'column' parameter when filtering by types"
                 )
                 
             # Use flattened type field for filtering
-            types_field = f"types_{type_column}"
+            types_field = f"types_{column}"
                 
             # Include specific types (ANY of the specified types must match)
             if include_types:
@@ -562,7 +587,7 @@ def get_table(
             try:
                 # Check if index exists before creating it
                 existing_indexes = [idx["name"] for idx in db.input_data.list_indexes()]
-                index_name = f"types_{type_column}_1"
+                index_name = f"types_{column}_1"
                 if index_name not in existing_indexes:
                     db.input_data.create_index([(types_field, ASCENDING)], background=True)
                     log_info(f"Created index on {types_field}")
@@ -571,7 +596,6 @@ def get_table(
         
         # Set up sort criteria
         sort_criteria = []
-        use_aggregation = False
         
         # Set up sorting based on confidence if requested
         if sort_by == "confidence":

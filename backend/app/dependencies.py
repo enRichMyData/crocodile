@@ -3,7 +3,7 @@ import time
 from jose import JWTError, jwt
 from config import settings
 from typing import Dict, Any
-from pymongo import ASCENDING, MongoClient
+from pymongo import ASCENDING, MongoClient, TEXT
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -40,6 +40,36 @@ def get_db():
         ("table_name", ASCENDING),
         ("_id", ASCENDING)
     ])
+    
+    # Create a single text index for global search if needed
+    # MongoDB only allows one text index per collection
+    try:
+        # Check if we already have a text index
+        has_text_index = False
+        for idx in db.input_data.list_indexes():
+            if "textIndexVersion" in idx:
+                has_text_index = True
+                break
+                
+        if not has_text_index:
+            # Create individual field indexes for the first several data columns
+            # which allows MongoDB to use them for regex searches
+            for i in range(10):  # Index first 10 columns for better regex performance
+                field_name = f"data.{i}"
+                db.input_data.create_index([(field_name, ASCENDING)], background=True)
+                
+            print("Created column indexes for better text search performance")
+    except Exception as e:
+        print(f"Error creating indexes: {str(e)}")
+
+    # Create B-tree indexes for commonly queried fields
+    # These are the first few columns which are likely to be filtered by exact values
+    for i in range(5):  # Index commonly accessed columns (0-4)
+        try:
+            field_name = f"data_{i}"
+            db.input_data.create_index([(field_name, ASCENDING)], background=True)
+        except Exception as e:
+            print(f"Error creating index for {field_name}: {str(e)}")
 
     # Keep index for avg_confidence as it's used for whole-row sorting
     db.input_data.create_index([

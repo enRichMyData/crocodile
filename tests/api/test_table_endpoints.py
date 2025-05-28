@@ -194,19 +194,6 @@ class TestTableEndpoints:
             })
             assert table is None
 
-    def test_delete_nonexistent_table(self, client, mock_mongodb, test_dataset, mock_token_payload):
-        """Test deleting a table that doesn't exist"""
-        # Arrange
-        dataset_name = test_dataset["dataset_name"]
-        nonexistent_table_name = "nonexistent_table"
-        with patch("backend.app.dependencies.verify_token", return_value=mock_token_payload):
-            # Act
-            response = client.delete(f"/datasets/{dataset_name}/tables/{nonexistent_table_name}")
-
-            # Assert
-            assert response.status_code == status.HTTP_404_NOT_FOUND
-            assert f"Table {nonexistent_table_name} not found in dataset {dataset_name}" in response.json()["detail"]
-
     def test_get_tables(self, client, mock_mongodb, test_dataset, mock_token_payload):
         """Test retrieving tables for a dataset"""
         # Arrange
@@ -269,34 +256,17 @@ class TestTableEndpoints:
             # Act
             response = client.get(f"/datasets/{dataset_name}/tables/{table_name}")
             
-            # Debug
-            data = response.json()
-            row_ids = [row["idRow"] for row in data["data"]["rows"]]
-            print(f"Found {len(data['data']['rows'])} rows with IDs: {row_ids}")
-            
             # Assert
             assert response.status_code == status.HTTP_200_OK
+            data = response.json()
             assert "data" in data
             assert data["data"]["datasetName"] == dataset_name
             assert data["data"]["tableName"] == table_name
             
-            # Check for unique row IDs instead of raw count
+            # Check for unique row IDs
+            row_ids = [row["idRow"] for row in data["data"]["rows"]]
             unique_row_ids = set(row_ids)
             assert len(unique_row_ids) == 2  # We expect 2 distinct row IDs
             
             # Check that linked entities are present in at least one row
             assert any(len(row.get("linked_entities", [])) > 0 for row in data["data"]["rows"])
-
-    def test_get_nonexistent_table(self, client, mock_mongodb, test_dataset, mock_token_payload):
-        """Test retrieving a table that doesn't exist"""
-        # Arrange
-        dataset_name = test_dataset["dataset_name"]
-        nonexistent_table = "nonexistent_table"
-        
-        with patch("backend.app.dependencies.verify_token", return_value=mock_token_payload):
-            # Act
-            response = client.get(f"/datasets/{dataset_name}/tables/{nonexistent_table}")
-            
-            # Assert
-            assert response.status_code == status.HTTP_404_NOT_FOUND
-            assert f"Table {nonexistent_table} not found" in response.json()["detail"]

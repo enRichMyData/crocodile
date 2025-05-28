@@ -19,8 +19,23 @@ class TestSchemaValidation:
         """Mock token payload for authentication."""
         return {"email": "test@example.com"}
     
+    @pytest.fixture
+    def mock_mongodb(self, test_db):
+        """Provide the test database for MongoDB tests"""
+        return test_db
+    
     def test_dataset_list_schema(self, client, mock_mongodb, mock_token_payload):
-        """Test the dataset list endpoint returns data in the expected schema"""
+        """Test the dataset list endpoint returns data in the expected schema
+    
+        This test verifies that the dataset list endpoint returns data in the expected schema.
+        It checks the structure of the response, including pagination and dataset items.
+        Args:
+            client: FastAPI test client fixture
+            mock_mongodb: Mock MongoDB fixture for testing
+            mock_token_payload: Mock token payload for authentication
+        Returns:
+            None
+        """
         # Create some test datasets
         mock_mongodb.datasets.delete_many({})
         for i in range(3):
@@ -69,7 +84,16 @@ class TestSchemaValidation:
                 assert isinstance(dataset["user_id"], str)
     
     def test_dataset_create_schema(self, client, mock_token_payload):
-        """Test the dataset creation endpoint returns data in the expected schema"""
+        """Test the dataset creation endpoint returns data in the expected schema
+        
+        This test verifies that the dataset creation endpoint returns data in the expected schema.
+        It checks the structure of the response, including the dataset details and types.
+        Args:
+            client: FastAPI test client fixture
+            mock_token_payload: Mock token payload for authentication
+        Returns:
+            None
+        """
         dataset_data = {"dataset_name": "create_schema_test"}
         
         with patch("backend.app.dependencies.verify_token", return_value=mock_token_payload):
@@ -108,7 +132,17 @@ class TestSchemaValidation:
             assert dataset["total_rows"] == 0
     
     def test_tables_list_schema(self, client, test_dataset, mock_token_payload):
-        """Test the tables list endpoint returns data in the expected schema"""
+        """Test the tables list endpoint returns data in the expected schema
+        
+        This test verifies that the tables list endpoint returns data in the expected schema.
+        It checks the structure of the response, including pagination and table items. 
+        Args:
+            client: FastAPI test client fixture
+            test_dataset: Fixture providing a test dataset with sample data
+            mock_token_payload: Mock token payload for authentication
+        Returns:
+            None
+        """
         dataset_name = test_dataset["dataset_name"]
         
         # Add a few tables to the test dataset
@@ -166,7 +200,17 @@ class TestSchemaValidation:
                 assert isinstance(table["user_id"], str)
     
     def test_table_data_schema(self, client, test_table_with_data, mock_token_payload):
-        """Test the table data endpoint returns data in the expected schema"""
+        """Test the table data endpoint returns data in the expected schema
+        
+        This test verifies that the table data endpoint returns data in the expected schema.
+        It checks the structure of the response, including pagination and table data.
+        Args:
+            client: FastAPI test client fixture
+            test_table_with_data: Fixture providing a test table with sample data
+            mock_token_payload: Mock token payload for authentication
+        Returns:
+            None
+        """
         dataset_name = test_table_with_data["dataset_name"]
         table_name = test_table_with_data["table_name"]
         
@@ -238,7 +282,17 @@ class TestSchemaValidation:
                             assert isinstance(candidate["score"], (int, float))
     
     def test_table_add_response_schema(self, client, test_dataset, mock_token_payload):
-        """Test the table add endpoint returns data in the expected schema"""
+        """Test the table add endpoint returns data in the expected schema
+        
+        This test verifies that the table add endpoint returns data in the expected schema.
+        It checks the structure of the response, including the table name and dataset name.
+        Args:
+            client: FastAPI test client fixture
+            test_dataset: Fixture providing a test dataset with sample data
+            mock_token_payload: Mock token payload for authentication
+        Returns:
+            None
+        """
         dataset_name = test_dataset["dataset_name"]
         table_data = {
             "table_name": "add_schema_test",
@@ -270,7 +324,17 @@ class TestSchemaValidation:
             assert response_data["datasetName"] == dataset_name
     
     def test_annotation_update_schema(self, client, test_table_with_data, mock_token_payload):
-        """Test the annotation update endpoint returns data in the expected schema"""
+        """Test the annotation update endpoint returns data in the expected schema
+        
+        This test verifies that the annotation update endpoint returns data in the expected schema.
+        It checks the structure of the response, including the updated entity details.
+        Args:
+            client: FastAPI test client fixture
+            test_table_with_data: Fixture providing a test table with sample data
+            mock_token_payload: Mock token payload for authentication
+        Returns:
+            None
+        """
         dataset_name = test_table_with_data["dataset_name"]
         table_name = test_table_with_data["table_name"]
         

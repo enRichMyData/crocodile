@@ -310,6 +310,11 @@ Adds a new table to the dataset from JSON data and queues it for Crocodile proce
     },
     "IGNORED": []
   },
+  "correct_qids": {
+    "0-1": "Q25191",
+    "1-1": "Q3772",
+    "2-1": "Q41148"
+  },
   "data": [
     {"id": "1", "name": "Christopher Nolan", "birth_year": "1970", "nationality": "British"},
     {"id": "2", "name": "Quentin Tarantino", "birth_year": "1963", "nationality": "American"},
@@ -317,6 +322,14 @@ Adds a new table to the dataset from JSON data and queues it for Crocodile proce
   ]
 }
 ```
+
+**Fields:**
+- `table_name` (string): Name of the table
+- `header` (array): Column headers
+- `total_rows` (integer): Number of data rows
+- `classified_columns` (object): Column classification with "NE", "LIT", and "IGNORED" categories
+- `correct_qids` (object, optional): Mapping of "row-column" positions to correct entity QIDs (e.g., "0-1": "Q25191" means row 0, column 1 should link to entity Q25191). These are passed to the Crocodile processing engine for evaluation and training purposes.
+- `data` (array): Array of row objects
 
 **Example:**
 ```bash
@@ -339,7 +352,7 @@ curl -X POST \
 }
 ```
 
-**Note:** JSON tables are now processed through the same task queue system as CSV files to prevent system overload. Use the table status endpoint to monitor processing progress.
+**Note:** JSON tables are now processed through the same task queue system as CSV files to prevent system overload. The `correct_qids` field allows you to specify ground truth entity mappings that will be passed directly to the Crocodile processing engine for evaluation and training purposes. Use the table status endpoint to monitor processing progress.
 
 ### Add Table from CSV
 

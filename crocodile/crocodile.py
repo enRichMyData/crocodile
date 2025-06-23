@@ -87,6 +87,8 @@ class Crocodile:
         self._mongo_uri = kwargs.pop("mongo_uri", None) or self._DEFAULT_MONGO_URI
         self._save_output_to_csv = kwargs.pop("save_output_to_csv", True)
         self._return_dataframe = kwargs.pop("return_dataframe", False)
+        # Extract correct_qids from kwargs
+        self.correct_qids = kwargs.pop("correct_qids", {})
         self.mongo_wrapper = MongoWrapper(
             self._mongo_uri, self._DB_NAME, self._ERROR_LOG_COLLECTION
         )
@@ -254,6 +256,15 @@ class Crocodile:
             documents = []
             for i, (_, row) in enumerate(chunk.iterrows()):
                 row_id = start_idx + i
+                
+                row_correct_qids = {}
+                if self.correct_qids:   
+                    # Extract correct QIDs for this row
+                    for col_idx, col_type in ne_cols.items():
+                        col_key = f"{row_id}-{col_idx}"
+                        if col_key in self.correct_qids:
+                            row_correct_qids[col_key] = self.correct_qids[col_key]
+
                 document = {
                     "client_id": self.client_id,  # Add client_id to each document
                     "dataset_name": dataset_name,
@@ -266,7 +277,7 @@ class Crocodile:
                         "IGNORED": ignored_cols,
                     },
                     "context_columns": context_cols,
-                    "correct_qids": {},
+                    "correct_qids": row_correct_qids,
                     "status": "TODO",
                 }
                 documents.append(document)

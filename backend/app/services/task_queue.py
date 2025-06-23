@@ -94,6 +94,7 @@ class TaskQueue:
             table_name = task_data['table_name']
             df = task_data['dataframe']
             classification = task_data['classification']
+            correct_qids = task_data.get('correct_qids', {})  # Get correct_qids from task data
             
             # Run Crocodile processing
             croco = Crocodile(
@@ -109,6 +110,7 @@ class TaskQueue:
                 save_output_to_csv=False,
                 columns_type=classification,
                 entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT"),
+                correct_qids=correct_qids,  # Pass correct_qids to Crocodile
             )
             croco.run()
             

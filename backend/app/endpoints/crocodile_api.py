@@ -45,6 +45,7 @@ class TableUpload(BaseModel):
     total_rows: int
     classified_columns: Optional[Dict[str, Dict[str, str]]] = {}
     data: List[dict]
+    correct_qids: Optional[Dict[str, str]] = {}  # New field for correct QIDs
 
 @router.post("/datasets/{datasetName}/tables/json", status_code=status.HTTP_201_CREATED)
 def add_table(
@@ -78,7 +79,7 @@ def add_table(
             provided_classification=table_upload.classified_columns,
         )
 
-        # Create the table and store data
+        # Create the table and store data with correct_qids
         DataService.create_table(
             db=db,
             user_id=user_id,
@@ -87,7 +88,7 @@ def add_table(
             header=table_upload.header,
             total_rows=table_upload.total_rows,
             classification=classification,
-            data_df=df,  # Use data_df instead of data_list for consistency
+            data_df=df,
         )
 
         # Add task to queue instead of running immediately (same as CSV)
@@ -97,6 +98,7 @@ def add_table(
             'table_name': table_upload.table_name,
             'dataframe': df,
             'classification': classification,
+            'correct_qids': table_upload.correct_qids,  # Pass correct_qids to task queue
         }
         
         task_id = task_queue.add_csv_task(task_data)

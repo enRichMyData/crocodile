@@ -41,40 +41,51 @@ def get_db():
         ("_id", ASCENDING)
     ])
     
-    # Create a single text index for global search if needed
-    # MongoDB only allows one text index per collection
-    try:
-        # Check if we already have a text index
-        has_text_index = False
-        for idx in db.input_data.list_indexes():
-            if "textIndexVersion" in idx:
-                has_text_index = True
-                break
-                
-        if not has_text_index:
-            # Create individual field indexes for the first several data columns
-            # which allows MongoDB to use them for regex searches
-            for i in range(10):  # Index first 10 columns for better regex performance
-                field_name = f"data.{i}"
-                db.input_data.create_index([(field_name, ASCENDING)], background=True)
-                
-            print("Created column indexes for better text search performance")
-    except Exception as e:
-        print(f"Error creating indexes: {str(e)}")
-
-    # Create B-tree indexes for commonly queried fields
-    # These are the first few columns which are likely to be filtered by exact values
-    for i in range(5):  # Index commonly accessed columns (0-4)
-        try:
-            field_name = f"data_{i}"
-            db.input_data.create_index([(field_name, ASCENDING)], background=True)
-        except Exception as e:
-            print(f"Error creating index for {field_name}: {str(e)}")
-
+    # Remove old text search logic since we use cell_data for search now
+    
     # Keep index for avg_confidence as it's used for whole-row sorting
     db.input_data.create_index([
+        ("user_id", ASCENDING),
+        ("dataset_name", ASCENDING),
+        ("table_name", ASCENDING),
         ("avg_confidence", ASCENDING)
     ])
+
+    # Create indexes for the new cell_data collection
+    try:
+        # Primary compound index for queries
+        db.cell_data.create_index([
+            ("user_id", ASCENDING),
+            ("dataset_name", ASCENDING),
+            ("table_name", ASCENDING),
+            ("row_id", ASCENDING),
+            ("col_id", ASCENDING),
+        ], unique=True)
+        
+        # Text search index
+        db.cell_data.create_index([("cell_text", TEXT)], background=True)
+        
+        # Confidence sorting index
+        db.cell_data.create_index([
+            ("user_id", ASCENDING),
+            ("dataset_name", ASCENDING),
+            ("table_name", ASCENDING),
+            ("col_id", ASCENDING),
+            ("confidence", ASCENDING),
+        ], background=True)
+        
+        # Types filtering index
+        db.cell_data.create_index([
+            ("user_id", ASCENDING),
+            ("dataset_name", ASCENDING),
+            ("table_name", ASCENDING),
+            ("col_id", ASCENDING),
+            ("types", ASCENDING),
+        ], background=True)
+        
+        print("Created cell_data collection indexes")
+    except Exception as e:
+        print(f"Error creating cell_data indexes: {str(e)}")
 
     # Keep existing indexes
     db.input_data.create_index(

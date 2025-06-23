@@ -159,20 +159,6 @@ class DataService:
                     "created_at": datetime.now(),
                 }
                 
-                # Add flattened data fields and consolidated text field for searching
-                data_text_parts = []
-                for col_idx, value in enumerate(row_values):
-                    # Convert to string if needed and store in individual fields
-                    if value is not None:
-                        str_value = str(value)
-                        input_doc[f"data_{col_idx}"] = str_value
-                        data_text_parts.append(str_value)
-                    else:
-                        input_doc[f"data_{col_idx}"] = ""
-                
-                # Create consolidated text field for full-text search
-                input_doc["data_text_all"] = " ".join(data_text_parts)
-                
                 input_data.append(input_doc)
 
         elif data_list is not None:
@@ -197,20 +183,6 @@ class DataService:
                     "created_at": datetime.now(),
                 }
                 
-                # Add flattened data fields and consolidated text field for searching
-                data_text_parts = []
-                for col_idx, value in enumerate(row_values):
-                    # Convert to string if needed and store in individual fields
-                    if value is not None:
-                        str_value = str(value)
-                        input_doc[f"data_{col_idx}"] = str_value
-                        data_text_parts.append(str_value)
-                    else:
-                        input_doc[f"data_{col_idx}"] = ""
-                
-                # Create consolidated text field for full-text search
-                input_doc["data_text_all"] = " ".join(data_text_parts)
-                
                 input_data.append(input_doc)
 
         # Store rows in database
@@ -219,6 +191,32 @@ class DataService:
                 # Insert into MongoDB
                 db.input_data.insert_many(input_data)
                 log_info(f"Stored {len(input_data)} rows in database for {dataset_name}/{table_name}")
+                
+                # Initialize cell_data documents for efficient filtering
+                cell_data_docs = []
+                for row_doc in input_data:
+                    row_id = row_doc["row_id"]
+                    row_values = row_doc["data"]
+                    
+                    for col_idx, value in enumerate(row_values):
+                        cell_text = str(value) if value is not None else ""
+                        
+                        cell_doc = {
+                            "user_id": user_id,
+                            "dataset_name": dataset_name,
+                            "table_name": table_name,
+                            "row_id": row_id,
+                            "col_id": col_idx,
+                            "cell_text": cell_text,
+                            "confidence": 0.0,  # Will be updated during sync
+                            "types": [],  # Will be updated during sync
+                            "last_updated": datetime.now(),
+                        }
+                        cell_data_docs.append(cell_doc)
+                
+                if cell_data_docs:
+                    db.cell_data.insert_many(cell_data_docs)
+                    log_info(f"Initialized {len(cell_data_docs)} cells in cell_data collection")
                 
             except Exception as e:
                 log_error(f"Error storing rows in database: {str(e)}", e)

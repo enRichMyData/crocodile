@@ -170,9 +170,9 @@ Retrieves table data with rows, columns and linked entities with pagination.
 - `columns` (array of integers, optional): Restrict text search to specific column indices
 - `include_types` (array of strings, optional): Only include rows with specified entity types
 - `exclude_types` (array of strings, optional): Exclude rows with specified entity types
-- `type_column` (integer, optional): Column to apply type filters to
-- `sort_by` (string, optional): Column name to sort by
-- `sort_order` (string, optional): Sort order, either `asc` for ascending or `desc` for descending
+- `column` (integer, optional): Column to apply type filters to and confidence sorting
+- `sort_by` (string, optional): Sort by 'confidence' (requires column parameter) or 'confidence_avg'
+- `sort_direction` (string, optional): Sort direction, either `asc` for ascending or `desc` for descending
 
 **Example:**
 ```bash
@@ -336,11 +336,11 @@ curl -X POST \
 POST /datasets/{datasetName}/tables/csv
 ```
 
-Adds a new table to the dataset from a CSV file and triggers Crocodile processing.
+Adds a new table to the dataset from a CSV file and queues it for Crocodile processing. To prevent resource exhaustion from concurrent uploads, CSV files are processed sequentially through a task queue system.
 
 **Form Data:**
 - `table_name` (string): Name of the table
-- `file` (file): CSV file to upload
+- `file` (file): CSV file to upload (max 10MB)
 - `column_classification` (string, optional): JSON string of column classifications
 
 **Example:**
@@ -356,12 +356,17 @@ curl -X POST \
 **Response:**
 ```json
 {
-  "message": "CSV table added successfully.",
+  "message": "CSV table queued for processing successfully.",
   "tableName": "actors",
   "datasetName": "my_dataset",
-  "userId": "user@example.com"
+  "userId": "user@example.com",
+  "taskId": "csv_1234567890_user123",
+  "status": "queued",
+  "fileSize": "2.5MB"
 }
 ```
+
+**Note:** CSV files are now processed through a task queue to prevent system overload when multiple files are uploaded simultaneously. Files are limited to 10MB in size. Use the table status endpoint to monitor processing progress.
 
 ### Delete Table
 

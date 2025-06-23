@@ -50,7 +50,6 @@ class TableUpload(BaseModel):
 def add_table(
     datasetName: str,
     table_upload: TableUpload = Body(..., example=IMDB_EXAMPLE),
-    background_tasks: BackgroundTasks = None,
     token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
 ):
@@ -61,10 +60,18 @@ def add_table(
     user_id = token_payload.get("email")
 
     try:
+        # Check if dataset exists first
+        if not db.datasets.find_one({"user_id": user_id, "dataset_name": datasetName}):
+            raise HTTPException(status_code=404, detail=f"Dataset {datasetName} not found")
+
+        # Check if table already exists
+        if db.tables.find_one({"user_id": user_id, "dataset_name": datasetName, "table_name": table_upload.table_name}):
+            raise HTTPException(status_code=400, detail=f"Table {table_upload.table_name} already exists in dataset {datasetName}")
+
         # Convert data to DataFrame for classification if needed
         df = pd.DataFrame(table_upload.data)
 
-        # Get or create column classification
+        # Get or create column classification using the same logic as CSV endpoint
         classification = DataService.get_or_create_column_classification(
             data=df,
             header=table_upload.header,
@@ -80,56 +87,33 @@ def add_table(
             header=table_upload.header,
             total_rows=table_upload.total_rows,
             classification=classification,
-            data_list=table_upload.data,
+            data_df=df,  # Use data_df instead of data_list for consistency
         )
 
-        # Trigger background task with classification passed to Crocodile
-        def run_crocodile_task():
-            croco = Crocodile(
-                input_csv=df,
-                client_id=user_id,
-                dataset_name=datasetName,
-                table_name=table_upload.table_name,
-                max_candidates=3,
-                entity_retrieval_endpoint=os.environ.get("ENTITY_RETRIEVAL_ENDPOINT"),
-                entity_bow_endpoint=os.environ.get("ENTITY_BOW_ENDPOINT"),
-                entity_retrieval_token=os.environ.get("ENTITY_RETRIEVAL_TOKEN"),
-                max_workers=8,
-                candidate_retrieval_limit=10,
-                model_path="./crocodile/models/default.h5",
-                save_output_to_csv=False,
-                columns_type=classification,
-            )
-            croco.run()
-
-        # Add a separate background task to sync results using the service
-        def sync_results_task():
-            # Wait a moment before starting sync to allow initial processing
-            time.sleep(5)
-
-            # Create a result sync service and sync results
-            mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
-            sync_service = ResultSyncService(mongo_uri=mongo_uri)
-            sync_service.sync_results(
-                user_id=user_id, dataset_name=datasetName, table_name=table_upload.table_name
-            )
+        # Add task to queue instead of running immediately (same as CSV)
+        task_data = {
+            'user_id': user_id,
+            'dataset_name': datasetName,
+            'table_name': table_upload.table_name,
+            'dataframe': df,
+            'classification': classification,
+        }
         
-        def run_tasks_in_parallel():
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                executor.submit(run_crocodile_task)
-                executor.submit(sync_results_task)
+        task_id = task_queue.add_csv_task(task_data)
 
-        # Add both tasks to background processing
-        background_tasks.add_task(run_tasks_in_parallel)
-     
         return {
-            "message": "Table added successfully.",
+            "message": "Table queued for processing successfully.",
             "tableName": table_upload.table_name,
             "datasetName": datasetName,
             "userId": user_id,
+            "taskId": task_id,
+            "status": "queued",
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log_error(f"Error processing JSON upload for {user_id}/{datasetName}/{table_upload.table_name}", e)
+        raise HTTPException(status_code=500, detail=f"Error processing JSON: {str(e)}")
 
 def parse_json_column_classification(column_classification: str = Form("")) -> Optional[dict]:
     # Parse the form field; return None if empty
@@ -143,7 +127,6 @@ def add_table_csv(
     table_name: str,
     file: UploadFile = File(...),
     column_classification: Optional[dict] = Depends(parse_json_column_classification),
-    background_tasks: BackgroundTasks = None,
     token_payload: str = Depends(verify_token),
     db: Database = Depends(get_db),
 ):

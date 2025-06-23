@@ -292,7 +292,7 @@ If there was an error during processing:
 POST /datasets/{datasetName}/tables/json
 ```
 
-Adds a new table to the dataset from JSON data and triggers Crocodile processing.
+Adds a new table to the dataset from JSON data and queues it for Crocodile processing. Like CSV uploads, JSON tables are now processed through a task queue to ensure system stability.
 
 **Request Body:**
 ```json
@@ -301,7 +301,14 @@ Adds a new table to the dataset from JSON data and triggers Crocodile processing
   "header": ["id", "name", "birth_year", "nationality"],
   "total_rows": 3,
   "classified_columns": {
-    "1": {"type": "NE", "subtype": "PERSON"}
+    "NE": {
+      "1": "PERSON"
+    },
+    "LIT": {
+      "2": "STRING",
+      "3": "STRING"
+    },
+    "IGNORED": []
   },
   "data": [
     {"id": "1", "name": "Christopher Nolan", "birth_year": "1970", "nationality": "British"},
@@ -323,12 +330,16 @@ curl -X POST \
 **Response:**
 ```json
 {
-  "message": "Table added successfully.",
+  "message": "Table queued for processing successfully.",
   "tableName": "directors",
   "datasetName": "my_dataset",
-  "userId": "user@example.com"
+  "userId": "user@example.com",
+  "taskId": "csv_1234567890_user123",
+  "status": "queued"
 }
 ```
+
+**Note:** JSON tables are now processed through the same task queue system as CSV files to prevent system overload. Use the table status endpoint to monitor processing progress.
 
 ### Add Table from CSV
 

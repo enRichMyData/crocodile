@@ -31,7 +31,7 @@ class TaskQueue:
             self.task_queue = Queue()
             self.processing = False
             self.worker_thread = None
-            self.max_concurrent_tasks = 2  # Limit concurrent processing
+            self.max_concurrent_tasks = 8  # Limit concurrent processing
             self.current_tasks = 0
             self.initialized = True
             self.start_worker()

@@ -292,7 +292,7 @@ If there was an error during processing:
 POST /datasets/{datasetName}/tables/json
 ```
 
-Adds a new table to the dataset from JSON data and triggers Crocodile processing.
+Adds a new table to the dataset from JSON data and queues it for Crocodile processing. Like CSV uploads, JSON tables are now processed through a task queue to ensure system stability.
 
 **Request Body:**
 ```json
@@ -301,7 +301,19 @@ Adds a new table to the dataset from JSON data and triggers Crocodile processing
   "header": ["id", "name", "birth_year", "nationality"],
   "total_rows": 3,
   "classified_columns": {
-    "1": {"type": "NE", "subtype": "PERSON"}
+    "NE": {
+      "1": "PERSON"
+    },
+    "LIT": {
+      "2": "STRING",
+      "3": "STRING"
+    },
+    "IGNORED": []
+  },
+  "correct_qids": {
+    "0-1": "Q25191",
+    "1-1": "Q3772",
+    "2-1": "Q41148"
   },
   "data": [
     {"id": "1", "name": "Christopher Nolan", "birth_year": "1970", "nationality": "British"},
@@ -310,6 +322,14 @@ Adds a new table to the dataset from JSON data and triggers Crocodile processing
   ]
 }
 ```
+
+**Fields:**
+- `table_name` (string): Name of the table
+- `header` (array): Column headers
+- `total_rows` (integer): Number of data rows
+- `classified_columns` (object): Column classification with "NE", "LIT", and "IGNORED" categories
+- `correct_qids` (object, optional): Mapping of "row-column" positions to correct entity QIDs (e.g., "0-1": "Q25191" means row 0, column 1 should link to entity Q25191). These are passed to the Crocodile processing engine for evaluation and training purposes.
+- `data` (array): Array of row objects
 
 **Example:**
 ```bash
@@ -323,12 +343,16 @@ curl -X POST \
 **Response:**
 ```json
 {
-  "message": "Table added successfully.",
+  "message": "Table queued for processing successfully.",
   "tableName": "directors",
   "datasetName": "my_dataset",
-  "userId": "user@example.com"
+  "userId": "user@example.com",
+  "taskId": "csv_1234567890_user123",
+  "status": "queued"
 }
 ```
+
+**Note:** JSON tables are now processed through the same task queue system as CSV files to prevent system overload. The `correct_qids` field allows you to specify ground truth entity mappings that will be passed directly to the Crocodile processing engine for evaluation and training purposes. Use the table status endpoint to monitor processing progress.
 
 ### Add Table from CSV
 

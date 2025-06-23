@@ -260,7 +260,7 @@ class Crocodile:
                 row_correct_qids = {}
                 if self.correct_qids:   
                     # Extract correct QIDs for this row
-                    for col_idx, col_type in ne_cols.items():
+                    for col_idx in ne_cols.keys():
                         col_key = f"{row_id}-{col_idx}"
                         if col_key in self.correct_qids:
                             row_correct_qids[col_key] = self.correct_qids[col_key]

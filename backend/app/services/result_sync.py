@@ -3,10 +3,9 @@ from datetime import datetime
 from typing import Any, Dict, List
 from collections import defaultdict, Counter
 
-from pymongo import MongoClient
-from pymongo.collection import Collection
+from pymongo import MongoClient, UpdateOne
+from pymongo.errors import BulkWriteError
 from services.utils import log_error, log_info
-from dependencies import es, ES_INDEX
 
 from crocodile import CrocodileResultFetcher
 
@@ -25,7 +24,7 @@ class ResultSyncService:
         self,
         mongo_uri: str = "mongodb://mongodb:27017",
         backend_db_name: str = "crocodile_backend_db",
-        batch_size: int = 100,
+        batch_size: int = 50,  # Reduced from 100 to prevent memory issues
     ):
         """
         Initialize the ResultSyncService.
@@ -40,8 +39,14 @@ class ResultSyncService:
         self.batch_size = batch_size
 
     def _get_client(self) -> MongoClient:
-        """Get a MongoDB client connection."""
-        return MongoClient(self.mongo_uri)
+        """Get a MongoDB client connection with timeout settings."""
+        return MongoClient(
+            self.mongo_uri,
+            serverSelectionTimeoutMS=5000,  # 5 second timeout
+            connectTimeoutMS=5000,
+            socketTimeoutMS=30000,  # 30 second socket timeout
+            maxPoolSize=10,  # Limit connection pool size
+        )
 
     def _update_table_status(
         self,
@@ -125,7 +130,7 @@ class ResultSyncService:
         """
         log_info(f"Starting result sync for {user_id}/{dataset_name}/{table_name}")
 
-        # Dealay to wait a bit before starting the sync
+        # Delay to wait a bit before starting the sync
         time.sleep(10)
 
         # Create a MongoDB connection
@@ -141,6 +146,9 @@ class ResultSyncService:
             if not table:
                 raise ValueError(f"Table {dataset_name}/{table_name} not found")
 
+            # Get table header for cell processing
+            header = table.get("header", [])
+            
             # Count rows in the table for status tracking
             total_count = db.input_data.count_documents(
                 {"user_id": user_id, "dataset_name": dataset_name, "table_name": table_name}
@@ -177,7 +185,7 @@ class ResultSyncService:
 
             last_remaining_count = None
             last_update_time = time.time()
-            update_timeout = 600  # 10 minutes
+            update_timeout = 300  # Reduced from 600 to 5 minutes
 
             while True:
                 cursor = input_collection.find(
@@ -192,7 +200,7 @@ class ResultSyncService:
                     },
                     {"row_id": 1},
                     no_cursor_timeout=True
-                )
+                ).batch_size(self.batch_size)  # Add batch size to cursor
 
                 batch_ids = []
                 for doc in cursor:
@@ -200,7 +208,7 @@ class ResultSyncService:
                     if len(batch_ids) >= batch_size:
                         self._process_batch(
                             batch_ids, result_fetcher, db, user_id, dataset_name, table_name,
-                            column_type_frequencies, column_type_mapping
+                            column_type_frequencies, column_type_mapping, header
                         )
                         last_update_time = time.time()
                         batch_ids = []
@@ -208,7 +216,7 @@ class ResultSyncService:
                 if batch_ids:
                     self._process_batch(
                         batch_ids, result_fetcher, db, user_id, dataset_name, table_name,
-                        column_type_frequencies, column_type_mapping
+                        column_type_frequencies, column_type_mapping, header
                     )
                     last_update_time = time.time()
 
@@ -243,7 +251,7 @@ class ResultSyncService:
                 # Timeout logic based on unchanged remaining count
                 if remaining == last_remaining_count:
                     if time.time() - last_update_time > update_timeout:
-                        log_info("Remaining count hasn't changed in 10 minutes, exiting sync loop")
+                        log_info("Remaining count hasn't changed in 5 minutes, exiting sync loop")
                         break
                 else:
                     last_remaining_count = remaining
@@ -251,7 +259,10 @@ class ResultSyncService:
 
                 if remaining == 0:
                     break
-            
+                    
+                # Add small delay to prevent overwhelming the database
+                time.sleep(0.1)
+
             # After processing all rows, update the table with type frequencies
             if column_type_frequencies:
                 column_type_summary = {}
@@ -352,9 +363,10 @@ class ResultSyncService:
         table_name: str,
         column_type_frequencies: Any,
         column_type_mapping: Any,
+        header: List[str],
     ):
         """
-        Process a batch of row_ids: fetch results, update backend db, and update ES.
+        Process a batch of row_ids: fetch results, update backend db and populate cell_data collection.
         """
         try:
             results = result_fetcher.get_results(batch_ids)
@@ -362,7 +374,10 @@ class ResultSyncService:
                 log_info(f"No results found for batch with {len(batch_ids)} row IDs")
                 return
 
-            es_operations = []
+            # Prepare bulk operations for both collections
+            input_data_updates = []
+            cell_data_operations = []
+
             for result in results:
                 row_id = result.get("row_id")
                 status = result.get("status")
@@ -370,98 +385,105 @@ class ResultSyncService:
                 el_results = result.get("el_results", {})
 
                 confidence_scores = []
-                data_updates = []
-                column_confidence_scores = {}
+                
+                # Get the original row data for cell processing
+                row_doc = db.input_data.find_one({
+                    "user_id": user_id,
+                    "dataset_name": dataset_name,
+                    "table_name": table_name,
+                    "row_id": row_id,
+                })
+                
+                if not row_doc:
+                    continue
+                    
+                row_data = row_doc.get("data", [])
 
                 for col_idx, candidates in el_results.items():
+                    col_index = int(col_idx)
+                    
+                    # Get cell text value
+                    cell_text = ""
+                    if col_index < len(row_data) and row_data[col_index] is not None:
+                        cell_text = str(row_data[col_index])
+                    
+                    # Process candidates for input_data update
                     if candidates and len(candidates) > 0:
                         top_candidate = candidates[0]
                         confidence = top_candidate.get("score", 0.0)
                         if confidence is not None:
                             confidence_scores.append(confidence)
-                            column_confidence_scores[col_idx] = confidence
-                        entity_types = []
+                        
+                        # Extract types for the column
+                        types = []
                         if "types" in top_candidate:
                             for type_obj in top_candidate["types"]:
                                 if isinstance(type_obj, dict) and "name" in type_obj and "id" in type_obj:
                                     type_id = type_obj["id"]
                                     type_name = type_obj["name"]
-                                    entity_types.append((type_id, type_name))
-                                    column_type_frequencies[col_idx][type_id] += 1
+                                    types.append(type_id)
+                                    column_type_frequencies[col_index][type_id] += 1
                                     column_type_mapping[type_id] = {"id": type_id, "name": type_name}
+
+                        # Create cell_data document for this cell
+                        cell_doc = {
+                            "user_id": user_id,
+                            "dataset_name": dataset_name,
+                            "table_name": table_name,
+                            "row_id": row_id,
+                            "col_id": col_index,
+                            "cell_text": cell_text,
+                            "confidence": confidence,
+                            "types": types,
+                            "last_updated": datetime.now(),
+                        }
                         
-                        if entity_types or confidence is not None:
-                            update = {
-                                "col_index": int(col_idx),
-                            }
-                            if entity_types:
-                                update["types"] = [type_id for type_id, _ in entity_types]
-                            if confidence is not None:
-                                update["confidence"] = confidence
-                            data_updates.append(update)
+                        # Use upsert to replace existing cell data
+                        cell_data_operations.append(
+                            UpdateOne(
+                                {
+                                    "user_id": user_id,
+                                    "dataset_name": dataset_name,
+                                    "table_name": table_name,
+                                    "row_id": row_id,
+                                    "col_id": col_index,
+                                },
+                                {"$set": cell_doc},
+                                upsert=True
+                            )
+                        )
 
                 row_avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
 
-                db.input_data.update_one(
-                    {
-                        "user_id": user_id,
-                        "dataset_name": dataset_name,
-                        "table_name": table_name,
-                        "row_id": row_id,
-                    },
-                    {
-                        "$set": {
-                            "status": status,
-                            "ml_status": ml_status,
-                            "el_results": el_results,
-                            "last_updated": datetime.now(),
-                            "confidence_scores": column_confidence_scores,
-                            "avg_confidence": row_avg_confidence
-                        }
-                    },
-                    upsert=False,
+                # Prepare simplified input_data update - remove flattened fields
+                update_dict = {
+                    "status": status,
+                    "ml_status": ml_status,
+                    "el_results": el_results,
+                    "last_updated": datetime.now(),
+                    "avg_confidence": row_avg_confidence,  # Keep this for row-level sorting
+                }
+
+                input_data_updates.append(
+                    UpdateOne(
+                        {
+                            "user_id": user_id,
+                            "dataset_name": dataset_name,
+                            "table_name": table_name,
+                            "row_id": row_id,
+                        },
+                        {"$set": update_dict},
+                        upsert=False,
+                    )
                 )
 
-                doc_id = f"{user_id}_{dataset_name}_{table_name}_{row_id}"
-                if data_updates:
-                    update_script = {
-                        "script": {
-                            "source": """
-                            for (def update : params.updates) {
-                                for (int i = 0; i < ctx._source.data.length; i++) {
-                                    if (ctx._source.data[i].col_index == update.col_index) {
-                                        if (update.containsKey('types')) {
-                                            ctx._source.data[i].types = update.types;
-                                        }
-                                        if (update.containsKey('confidence')) {
-                                            ctx._source.data[i].confidence = update.confidence;
-                                        }
-                                    }
-                                }
-                            }
-                            // Add the row's average confidence
-                            if (!ctx._source.containsKey('avg_confidence')) {
-                                ctx._source.avg_confidence = params.avg_confidence;
-                            } else {
-                                ctx._source.avg_confidence = params.avg_confidence;
-                            }
-                            """,
-                            "params": {
-                                "updates": data_updates,
-                                "avg_confidence": row_avg_confidence
-                            }
-                        }
-                    }
-                    es_operations.append({"update": {"_index": ES_INDEX, "_id": doc_id}})
-                    es_operations.append(update_script)
-            if es_operations:
-                try:
-                    resp = es.bulk(body=es_operations, refresh=True)
-                    if resp.get("errors"):
-                        log_error(f"Errors in bulk update: {resp.get('items')}")
-                    else:
-                        log_info(f"Updated {len(es_operations)//2} documents with type information")
-                except Exception as e:
-                    log_error(f"Failed to update ES: {str(e)}", e)
+            # Execute bulk operations
+            if input_data_updates:
+                db.input_data.bulk_write(input_data_updates)
+                
+            if cell_data_operations:
+                db.cell_data.bulk_write(cell_data_operations)
+                log_info(f"Updated {len(cell_data_operations)} cells in cell_data collection")
+
         except Exception as e:
             log_error("Error syncing results for batch", e)

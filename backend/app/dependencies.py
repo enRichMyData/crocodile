@@ -3,60 +3,9 @@ import time
 from jose import JWTError, jwt
 from config import settings
 from typing import Dict, Any
-from pymongo import ASCENDING, MongoClient
+from pymongo import ASCENDING, MongoClient, TEXT
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from elasticsearch import Elasticsearch
-from elasticsearch.exceptions import NotFoundError
-
-# Elasticsearch configuration
-ES_HOSTS = os.getenv("ES_HOSTS", "http://elastic:9200").split(",")
-ES_INDEX = "table_rows"
-ES_BODY = {
-    "settings": {"number_of_shards": 1, "number_of_replicas": 0},
-    "mappings": {
-        "properties": {
-            "user_id": {"type": "keyword"},
-            "dataset_name": {"type": "keyword"},
-            "table_name": {"type": "keyword"},
-            "row_id": {"type": "integer"},
-            "avg_confidence": {"type": "float"},  # Row-level average confidence
-            "data": {
-                "type": "nested",
-                "properties": {
-                    "col_index": {"type": "integer"},
-                    "value": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
-                    "types": {"type": "keyword"},
-                    "confidence": {"type": "float"}  # Column-level confidence
-                }
-            }
-        }
-    }
-}
-
-# Initialize ES client and ensure index exists
-es = Elasticsearch(hosts=ES_HOSTS, request_timeout=60)
-# Wait for ES to respond and for cluster health green
-for attempt in range(10):
-    try:
-        if es.ping() and es.cluster.health(wait_for_status="green", request_timeout=5):
-            print("Connected to Elasticsearch with green cluster health")
-            break
-    except Exception:
-        pass
-    print(f"Waiting for Elasticsearch ({attempt+1}/10)...")
-    time.sleep(2)
-else:
-    raise RuntimeError("Elasticsearch unavailable or cluster not green after retries")
-
-try:
-    if not es.indices.exists(index=ES_INDEX):
-        es.indices.create(index=ES_INDEX, body=ES_BODY)
-        print(f"Index '{ES_INDEX}' created")
-    else:
-        print(f"Index '{ES_INDEX}' already exists")
-except Exception as e:
-    print(f"Error creating index '{ES_INDEX}': {e}")
 
 def get_db():
     client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
@@ -84,6 +33,61 @@ def get_db():
         unique=True,
     )
 
+    # Add new indexes for efficient type and confidence filtering/sorting
+    db.input_data.create_index([
+        ("user_id", ASCENDING),
+        ("dataset_name", ASCENDING),
+        ("table_name", ASCENDING),
+        ("_id", ASCENDING)
+    ])
+    
+    # Remove old text search logic since we use cell_data for search now
+    
+    # Keep index for avg_confidence as it's used for whole-row sorting
+    db.input_data.create_index([
+        ("user_id", ASCENDING),
+        ("dataset_name", ASCENDING),
+        ("table_name", ASCENDING),
+        ("avg_confidence", ASCENDING)
+    ])
+
+    # Create indexes for the new cell_data collection
+    try:
+        # Primary compound index for queries
+        db.cell_data.create_index([
+            ("user_id", ASCENDING),
+            ("dataset_name", ASCENDING),
+            ("table_name", ASCENDING),
+            ("row_id", ASCENDING),
+            ("col_id", ASCENDING),
+        ], unique=True)
+        
+        # Text search index
+        db.cell_data.create_index([("cell_text", TEXT)], background=True)
+        
+        # Confidence sorting index
+        db.cell_data.create_index([
+            ("user_id", ASCENDING),
+            ("dataset_name", ASCENDING),
+            ("table_name", ASCENDING),
+            ("col_id", ASCENDING),
+            ("confidence", ASCENDING),
+        ], background=True)
+        
+        # Types filtering index
+        db.cell_data.create_index([
+            ("user_id", ASCENDING),
+            ("dataset_name", ASCENDING),
+            ("table_name", ASCENDING),
+            ("col_id", ASCENDING),
+            ("types", ASCENDING),
+        ], background=True)
+        
+        print("Created cell_data collection indexes")
+    except Exception as e:
+        print(f"Error creating cell_data indexes: {str(e)}")
+
+    # Keep existing indexes
     db.input_data.create_index(
         [
             ("user_id", ASCENDING),

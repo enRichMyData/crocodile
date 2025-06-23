@@ -7,7 +7,6 @@ from column_classifier import ColumnClassifier
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 from services.utils import format_classification, log_error, log_info
-from dependencies import es, ES_INDEX
 
 
 class DataService:
@@ -159,6 +158,7 @@ class DataService:
                     "manually_annotated": False,
                     "created_at": datetime.now(),
                 }
+                
                 input_data.append(input_doc)
 
         elif data_list is not None:
@@ -182,6 +182,7 @@ class DataService:
                     "manually_annotated": False,
                     "created_at": datetime.now(),
                 }
+                
                 input_data.append(input_doc)
 
         # Store rows in database
@@ -191,37 +192,31 @@ class DataService:
                 db.input_data.insert_many(input_data)
                 log_info(f"Stored {len(input_data)} rows in database for {dataset_name}/{table_name}")
                 
-                # Index minimal data into Elasticsearch for search only
-                es_operations = []
-                for doc in input_data:
-                    # Create an ES-friendly document ID that ensures uniqueness
-                    doc_id = f"{user_id}_{dataset_name}_{table_name}_{doc['row_id']}"
+                # Initialize cell_data documents for efficient filtering
+                cell_data_docs = []
+                for row_doc in input_data:
+                    row_id = row_doc["row_id"]
+                    row_values = row_doc["data"]
                     
-                    # Prepare the document with only search-required fields
-                    # Types will be initially empty and updated when entity linking results arrive
-                    es_doc = {
-                        "user_id": user_id,
-                        "dataset_name": dataset_name,
-                        "table_name": table_name,
-                        "row_id": doc["row_id"],
-                        "data": [
-                            {
-                                "col_index": idx, 
-                                "value": str(val) if val is not None else "",
-                                "types": []  # Initially empty, filled during result sync
-                            } 
-                            for idx, val in enumerate(doc["data"])
-                        ],
-                    }
-                    
-                    # Add to bulk operations list
-                    es_operations.append({"index": {"_index": ES_INDEX, "_id": doc_id}})
-                    es_operations.append(es_doc)
+                    for col_idx, value in enumerate(row_values):
+                        cell_text = str(value) if value is not None else ""
+                        
+                        cell_doc = {
+                            "user_id": user_id,
+                            "dataset_name": dataset_name,
+                            "table_name": table_name,
+                            "row_id": row_id,
+                            "col_id": col_idx,
+                            "cell_text": cell_text,
+                            "confidence": 0.0,  # Will be updated during sync
+                            "types": [],  # Will be updated during sync
+                            "last_updated": datetime.now(),
+                        }
+                        cell_data_docs.append(cell_doc)
                 
-                if es_operations:
-                    # Execute bulk indexing in ES
-                    es.bulk(index=ES_INDEX, body=es_operations)
-                    log_info(f"Indexed {len(input_data)} rows in Elasticsearch for search")
+                if cell_data_docs:
+                    db.cell_data.insert_many(cell_data_docs)
+                    log_info(f"Initialized {len(cell_data_docs)} cells in cell_data collection")
                 
             except Exception as e:
                 log_error(f"Error storing rows in database: {str(e)}", e)

@@ -1462,7 +1462,6 @@ async def get_table_status_stream(
         total_rows = table.get("total_rows", 0)
         
         # Initial response with current state
-        stored_completion = table.get("completion_percentage")
         last_synced = table.get("last_synced")
         if last_synced:
             last_synced = last_synced.isoformat()
@@ -1470,25 +1469,23 @@ async def get_table_status_stream(
         while True:  # Loop until processing is complete
             # Check both databases for pending documents in the prediction phase
             prediction_filter = {
-                "user_id": user_id,
+                "client_id": user_id,
                 "dataset_name": dataset_name,
                 "table_name": table_name,
                 "status": {"$in": ["TODO", "DOING"]},
             }
-            pending_prediction_count = db.input_data.count_documents(prediction_filter)
-            if pending_prediction_count == 0:
-                pending_prediction_count = crocodile_db.input_data.count_documents(prediction_filter)
+            
+            pending_prediction_count = crocodile_db.input_data.count_documents(prediction_filter)
 
             # Check both databases for pending documents in the ML phase
             ml_filter = {
-                "user_id": user_id,
+                "client_id": user_id,
                 "dataset_name": dataset_name,
                 "table_name": table_name,
                 "ml_status": {"$in": ["TODO", "DOING"]},
             }
-            pending_ml_count = db.input_data.count_documents(ml_filter)
-            if pending_ml_count == 0:
-                pending_ml_count = crocodile_db.input_data.count_documents(ml_filter)
+           
+            pending_ml_count = crocodile_db.input_data.count_documents(ml_filter)
 
             # Calculate completion percentages
             prediction_completion = 100 - ((pending_prediction_count / total_rows) * 100) if total_rows > 0 else 100

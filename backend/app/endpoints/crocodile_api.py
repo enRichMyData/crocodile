@@ -2,22 +2,19 @@ import json
 import os
 import time
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Any, Union
+from typing import Dict, List, Optional, Generator
 import base64
 import asyncio
 import io
 import csv
-from pymongo import ASCENDING, TEXT
 
 import numpy as np
-import concurrent.futures
 import pandas as pd
 from bson import ObjectId
 from dependencies import get_crocodile_db, get_db, verify_token
 from endpoints.imdb_example import IMDB_EXAMPLE
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Body,
     Depends,
     File,
@@ -33,9 +30,9 @@ from pydantic import BaseModel
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 from services.data_service import DataService
-from services.result_sync import ResultSyncService
-from services.utils import sanitize_for_json, log_info, log_error
+from services.utils import sanitize_for_json, log_error
 from services.task_queue import task_queue
+
 
 router = APIRouter()
 

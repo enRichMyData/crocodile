@@ -1438,6 +1438,12 @@ async def get_table_status_stream(
     """
     user_id = token_payload.get("email")
     client = None  # Initialize client to None
+    
+    # Simple progress detection safeguards
+    NO_PROGRESS_LIMIT = 300  # 5 minutes without progress = likely stuck
+    last_progress_time = time.time()
+    last_total_pending = None
+    
     try:
         # Create a new client specifically for this stream
         client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
@@ -1461,68 +1467,95 @@ async def get_table_status_stream(
 
         total_rows = table.get("total_rows", 0)
         
+        # Handle edge case: empty table
+        if total_rows == 0:
+            yield f"data: {json.dumps({'status': 'DONE', 'phase': 'DONE', 'completion_percentage': 100.0})}\n\n"
+            return
+        
         # Initial response with current state
         last_synced = table.get("last_synced")
         if last_synced:
             last_synced = last_synced.isoformat()
 
         while True:  # Loop until processing is complete
-            # Check both databases for pending documents in the prediction phase
-            prediction_filter = {
-                "client_id": user_id,
-                "dataset_name": dataset_name,
-                "table_name": table_name,
-                "status": {"$in": ["TODO", "DOING"]},
-            }
+            current_time = time.time()
             
-            pending_prediction_count = crocodile_db.input_data.count_documents(prediction_filter)
-
-            # Check both databases for pending documents in the ML phase
-            ml_filter = {
-                "client_id": user_id,
-                "dataset_name": dataset_name,
-                "table_name": table_name,
-                "ml_status": {"$in": ["TODO", "DOING"]},
-            }
-           
-            pending_ml_count = crocodile_db.input_data.count_documents(ml_filter)
-
-            # Calculate completion percentages
-            prediction_completion = 100 - ((pending_prediction_count / total_rows) * 100) if total_rows > 0 else 100
-            ml_completion = 100 - ((pending_ml_count / total_rows) * 100) if total_rows > 0 else 100
-
-            # Determine overall phase and status
-            if pending_prediction_count > 0:
-                phase = "PREDICTION"
-                status = "PROCESSING"
-            elif pending_ml_count > 0:
-                phase = "ML_PREDICTION"
-                status = "PROCESSING"
-            else:
-                phase = "DONE"
-                status = "DONE"
-
-            # Send status update
-            response = {
-                "dataset_name": dataset_name,
-                "table_name": table_name,
-                "status": status,
-                "phase": phase,
-                "total_rows": total_rows,
-                "pending_rows": pending_prediction_count if phase == "PREDICTION" else pending_ml_count,
-                "completed_rows": total_rows - (pending_prediction_count if phase == "PREDICTION" else pending_ml_count),
-                "completion_percentage": round(prediction_completion if phase == "PREDICTION" else ml_completion, 2),
-                "last_synced": last_synced,
-            }
-            
-            # Include error if present
-            if "error" in table:
-                response["error"] = table["error"]
+            try:
+                # Check both databases for pending documents in the prediction phase
+                prediction_filter = {
+                    "client_id": user_id,
+                    "dataset_name": dataset_name,
+                    "table_name": table_name,
+                    "status": {"$in": ["TODO", "DOING"]},
+                }
                 
-            yield f"data: {json.dumps(response)}\n\n"
+                pending_prediction_count = crocodile_db.input_data.count_documents(prediction_filter)
 
-            # If processing is complete, exit the stream
-            if status == "DONE":
+                # Check both databases for pending documents in the ML phase
+                ml_filter = {
+                    "client_id": user_id,
+                    "dataset_name": dataset_name,
+                    "table_name": table_name,
+                    "ml_status": {"$in": ["TODO", "DOING"]},
+                }
+               
+                pending_ml_count = crocodile_db.input_data.count_documents(ml_filter)
+
+                # Progress detection - track total pending work
+                current_total_pending = pending_prediction_count + pending_ml_count
+                
+                if last_total_pending is not None:
+                    if current_total_pending < last_total_pending:
+                        # Progress made! Reset the progress timer
+                        last_progress_time = current_time
+                    elif current_total_pending > 0 and current_time - last_progress_time > NO_PROGRESS_LIMIT:
+                        # No progress for too long and still have pending work
+                        yield f"data: {json.dumps({'status': 'STUCK', 'detail': f'No progress detected for {NO_PROGRESS_LIMIT//60} minutes', 'phase': 'STUCK'})}\n\n"
+                        break
+                
+                last_total_pending = current_total_pending
+
+                # Calculate completion percentages
+                prediction_completion = 100 - ((pending_prediction_count / total_rows) * 100) if total_rows > 0 else 100
+                ml_completion = 100 - ((pending_ml_count / total_rows) * 100) if total_rows > 0 else 100
+
+                # Determine overall phase and status
+                if pending_prediction_count > 0:
+                    phase = "PREDICTION"
+                    status = "PROCESSING"
+                elif pending_ml_count > 0:
+                    phase = "ML_PREDICTION"
+                    status = "PROCESSING"
+                else:
+                    phase = "DONE"
+                    status = "DONE"
+
+                # Send status update
+                response = {
+                    "dataset_name": dataset_name,
+                    "table_name": table_name,
+                    "status": status,
+                    "phase": phase,
+                    "total_rows": total_rows,
+                    "pending_rows": pending_prediction_count if phase == "PREDICTION" else pending_ml_count,
+                    "completed_rows": total_rows - (pending_prediction_count if phase == "PREDICTION" else pending_ml_count),
+                    "completion_percentage": round(prediction_completion if phase == "PREDICTION" else ml_completion, 2),
+                    "last_synced": last_synced,
+                }
+                
+                # Include error if present
+                if "error" in table:
+                    response["error"] = table["error"]
+                    
+                yield f"data: {json.dumps(response)}\n\n"
+
+                # If processing is complete, exit the stream
+                if status == "DONE":
+                    break
+                    
+            except Exception as db_error:
+                # Database error occurred, break the loop
+                yield f"data: {json.dumps({'status': 'ERROR', 'detail': f'Database error: {str(db_error)}', 'phase': 'ERROR'})}\n\n"
                 break
                 
             # Wait before checking again

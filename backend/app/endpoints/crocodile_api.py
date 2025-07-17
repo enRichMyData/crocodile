@@ -1445,7 +1445,6 @@ async def get_table_status_stream(
         # Create a new client specifically for this stream
         client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
         db = client["crocodile_backend_db"]
-        crocodile_db = client["crocodile_db"]
         
         # Check dataset
         if not db.datasets.find_one(
@@ -1480,23 +1479,23 @@ async def get_table_status_stream(
             try:
                 # Check both databases for pending documents in the prediction phase
                 prediction_filter = {
-                    "client_id": user_id,
+                    "user_id": user_id,
                     "dataset_name": dataset_name,
                     "table_name": table_name,
                     "status": {"$in": ["TODO", "DOING"]},
                 }
                 
-                pending_prediction_count = crocodile_db.input_data.count_documents(prediction_filter)
+                pending_prediction_count = db.input_data.count_documents(prediction_filter)
 
                 # Check both databases for pending documents in the ML phase
                 ml_filter = {
-                    "client_id": user_id,
+                    "user_id": user_id,
                     "dataset_name": dataset_name,
                     "table_name": table_name,
                     "ml_status": {"$in": ["TODO", "DOING"]},
                 }
                
-                pending_ml_count = crocodile_db.input_data.count_documents(ml_filter)
+                pending_ml_count = db.input_data.count_documents(ml_filter)
 
                 # Progress detection - track total pending work
                 current_total_pending = pending_prediction_count + pending_ml_count

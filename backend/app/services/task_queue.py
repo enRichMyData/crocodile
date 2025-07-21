@@ -71,6 +71,13 @@ class TaskQueue:
                     args=(task,)
                 )
                 processing_thread.start()
+
+                # Syncing the results after processing
+                syncing_thread = threading.Thread(
+                    target=self.sync_results, 
+                    args=(task['user_id'], task['dataset_name'], task['table_name'])
+                )
+                syncing_thread.start()
                 
                 # Don't wait for completion, just track the count
                 self.current_tasks += 1
@@ -113,25 +120,21 @@ class TaskQueue:
                 correct_qids=correct_qids,  # Pass correct_qids to Crocodile
             )
             croco.run()
-            
-            # Small delay before starting sync
-            time.sleep(2)
-            
-            # Sync results
-            mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
-            sync_service = ResultSyncService(mongo_uri=mongo_uri)
-            sync_service.sync_results(
-                user_id=user_id, 
-                dataset_name=dataset_name, 
-                table_name=table_name
-            )
-            
+        
             log_info(f"CSV task {task_id} completed successfully")
             
         except Exception as e:
             log_error(f"CSV task {task_id} failed", e)
         finally:
             self.current_tasks -= 1
+
+    
+    def sync_results(self, user_id: str, dataset_name: str, table_name: str):
+        """Sync results for a specific user and dataset."""
+        mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
+        sync_service = ResultSyncService(mongo_uri=mongo_uri)
+        sync_service.sync_results(user_id=user_id, dataset_name=dataset_name, table_name=table_name)
+        log_info(f"Results synced for {user_id}/{dataset_name}/{table_name}")
 
 # Global instance
 task_queue = TaskQueue()

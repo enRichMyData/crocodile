@@ -77,23 +77,32 @@ You can also run the entity linking process using the `Crocodile` class in Pytho
 
 ```python
 from crocodile import Crocodile
+import pandas as pd
 import os
 
-file_path = './tables/imdb_top_1000.csv'
+# Load the DataFrame (from CSV or other source)
+df = pd.read_csv("./tables/imdb_top_1000.csv")
 
-# Create an instance of the Crocodile class
-crocodile_instance = Crocodile(
-    table_name="imdb",
+# Create and run the Crocodile pipeline
+croco = Crocodile(
+    input_csv=df,  # ✅ Pass the DataFrame directly
     dataset_name="cinema",
-    max_candidates=3,
-    entity_retrieval_token=os.environ["ENTITY_RETRIEVAL_TOKEN"],
+    table_name="imdb",
+    # Entity retrieval settings
     entity_retrieval_endpoint=os.environ["ENTITY_RETRIEVAL_ENDPOINT"],
+    entity_retrieval_token=os.environ["ENTITY_RETRIEVAL_TOKEN"],
+    candidate_retrieval_limit=10,
+    max_workers=4,
+    save_output_to_csv=False,     # Don't save to CSV
+    return_dataframe=True         # ✅ Return a DataFrame instead
 )
 
 # Run the entity linking process
-crocodile_instance.run()
+result_df = croco.run()
 
-print("Entity linking process completed.")
+# Display or process the result
+print("Entity linking completed.")
+print(result_df.head())
 ```
 
 ### Specifying Column Types

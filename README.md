@@ -80,29 +80,22 @@ from crocodile import Crocodile
 import pandas as pd
 import os
 
-# Load the DataFrame (from CSV or other source)
 df = pd.read_csv("./tables/imdb_top_1000.csv")
 
-# Create and run the Crocodile pipeline
 croco = Crocodile(
-    input_csv=df,  # ✅ Pass the DataFrame directly
+    input_csv=df, 
     dataset_name="cinema",
     table_name="imdb",
-    # Entity retrieval settings
     entity_retrieval_endpoint=os.environ["ENTITY_RETRIEVAL_ENDPOINT"],
     entity_retrieval_token=os.environ["ENTITY_RETRIEVAL_TOKEN"],
     candidate_retrieval_limit=10,
     max_workers=4,
-    save_output_to_csv=False,     # Don't save to CSV
-    return_dataframe=True         # ✅ Return a DataFrame instead
+    save_output_to_csv=False,
+    return_dataframe=True         
 )
 
-# Run the entity linking process
 result_df = croco.run()
-
-# Display or process the result
 print("Entity linking completed.")
-print(result_df.head())
 ```
 
 ### Specifying Column Types

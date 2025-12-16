@@ -14,7 +14,19 @@
 
 ## Installation
 
-Crocodile is not yet available on PyPI. To install it, clone the repository and install it manually:
+Crocodile is published on PyPI as the `crocodile-linker` distribution (imports remain `crocodile`):
+
+```bash
+pip install crocodile-linker
+```
+
+For the optional FastAPI app dependencies, install with extras:
+
+```bash
+pip install 'crocodile-linker[app]'
+```
+
+For development installs from source:
 
 ```bash
 git clone https://github.com/your-org/crocodile.git

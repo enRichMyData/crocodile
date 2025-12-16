@@ -3,7 +3,7 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "crocodile"
+name = "crocodile-linker"
 version = "0.1.0"
 description = "A package for entity linking using LionLinker."
 authors = [
@@ -39,7 +39,7 @@ app = [
     "pydantic<3",
     "pydantic-settings==2.8.1",
     "uvicorn==0.34",
-    "python-multipart== 0.0.20",
+    "python-multipart==0.0.20",
     "python-jose==3.4.0",
     "elasticsearch==8.9.0"
 ]

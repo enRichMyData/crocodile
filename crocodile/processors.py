@@ -24,7 +24,7 @@ class RowBatchProcessor:
         self.candidate_fetcher = candidate_fetcher
         self.max_candidates_in_result = max_candidates_in_result
         self.bow_fetcher = bow_fetcher
-        self._db_name = kwargs.get("db_name", "crocodile_db")
+        self._db_name = kwargs.get("db_name", "crocodile")
         self._mongo_uri = kwargs.get("mongo_uri", "mongodb://mongodb:27017")
         self.input_collection = kwargs.get("input_collection", "input_data")
         self.mongo_wrapper = MongoWrapper(self._mongo_uri, self._db_name)

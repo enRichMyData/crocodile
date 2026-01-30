@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 # MongoDB connection
 client = MongoClient("mongodb://mongodb:27017/")
-db = client["crocodile_db"]
+db = client["crocodile"]
 input_collection = db["input_data"]
 table_trace_collection = db["table_trace"]
 dataset_trace_collection = db["dataset_trace"]

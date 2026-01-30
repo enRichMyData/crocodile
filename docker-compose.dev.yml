@@ -25,6 +25,22 @@ services:
     env_file:
       - .env  # Load environment variables from .env file
 
+  el_worker:
+    build:
+      context: .  # Path to the FastAPI backend
+      dockerfile: backend/Dockerfile
+    container_name: crocodile_el_worker
+    volumes:
+      # Mount the app directory to the container
+      - ./backend/app:/app
+      - ./crocodile:/app/crocodile
+      - ./backend/scripts:/app/scripts
+    command: python -m el_jobs.worker
+    env_file:
+      - .env  # Load environment variables from .env file
+    depends_on:
+      - mongodb
+
   # Development-only Jupyter service for debugging
   jupyter:
     build: .

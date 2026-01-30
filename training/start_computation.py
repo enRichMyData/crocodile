@@ -9,14 +9,14 @@ from crocodile import Crocodile
 
 # MongoDB connection
 client = MongoClient("mongodb://mongodb:27017/")
-db = client["crocodile_db"]
+db = client["crocodile"]
 input_data = db["input_data"]
 model_path = "./trained_models/neural_ranker.h5"
 
 # Create an instance of Crocodile
 crocodile_instance = Crocodile(
     mongo_uri="mongodb://mongodb:27017/",
-    db_name="crocodile_db",
+    db_name="crocodile",
     table_trace_collection_name="table_trace",
     dataset_trace_collection_name="dataset_trace",
     max_candidates=3,

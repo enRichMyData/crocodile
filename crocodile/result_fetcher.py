@@ -26,7 +26,7 @@ class CrocodileResultFetcher:
         self.client_id = client_id
         self.dataset_name = dataset_name
         self.table_name = table_name
-        self._db_name = kwargs.get("db_name", "crocodile_db")
+        self._db_name = kwargs.get("db_name", "crocodile")
         self._mongo_uri = kwargs.get("mongo_uri", "mongodb://mongodb:27017/")
         self.input_collection = kwargs.get("input_collection", "input_data")
         self.mongo_wrapper = MongoWrapper(self._mongo_uri, self._db_name)

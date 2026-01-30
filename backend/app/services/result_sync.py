@@ -23,7 +23,7 @@ class ResultSyncService:
     def __init__(
         self,
         mongo_uri: str = "mongodb://mongodb:27017",
-        backend_db_name: str = "crocodile_backend_db",
+        backend_db_name: str = "crocdile_backend",
         batch_size: int = 50,  # Reduced from 100 to prevent memory issues
     ):
         """

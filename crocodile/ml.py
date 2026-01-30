@@ -40,7 +40,7 @@ class MLWorker:
         self.max_candidates_in_result: int = max_candidates_in_result
         self.top_n_for_type_freq: int = top_n_for_type_freq
         self.selected_features = features or DEFAULT_FEATURES
-        self._db_name = kwargs.pop("db_name", "crocodile_db")
+        self._db_name = kwargs.pop("db_name", "crocodile")
         self._mongo_uri = kwargs.pop("mongo_uri", "mongodb://mongodb:27017/")
         self.input_collection = kwargs.get("input_collection", "input_data")
         self.error_logs_collection = kwargs.get("error_collection", "error_logs")

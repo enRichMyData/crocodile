@@ -23,7 +23,7 @@ class Crocodile:
     """
 
     _DEFAULT_MONGO_URI = "mongodb://mongodb:27017/"  # Change this to a class-level default
-    _DB_NAME = "crocodile_db"
+    _DB_NAME = "crocodile"
     _INPUT_COLLECTION = "input_data"
     _ERROR_LOG_COLLECTION = "error_logs"
     _CACHE_COLLECTION = "candidate_cache"

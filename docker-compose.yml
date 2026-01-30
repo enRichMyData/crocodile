@@ -24,3 +24,18 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     env_file:
       - .env  # Load environment variables from .env file
+
+  el_worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: crocodile_el_worker
+    volumes:
+      - ./backend/app:/app
+      - ./crocodile:/app/crocodile
+      - ./backend/scripts:/app/scripts
+    command: python -m el_jobs.worker
+    env_file:
+      - .env
+    depends_on:
+      - mongodb

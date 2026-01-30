@@ -13,9 +13,9 @@ df = pd.read_csv(file_path)
 
 # MongoDB connection
 client = MongoClient("mongodb://mongodb:27017/")
-# Drop the entire crocodile_db database
-# client.drop_database("crocodile_db")
-db = client["crocodile_db"]
+# Drop the entire crocodile database
+# client.drop_database("crocodile")
+db = client["crocodile"]
 
 # Drop all collections except 'bow_cache' and 'candidate_cache'
 collections_to_keep = ["bow_cache", "candidate_cache"]
@@ -29,7 +29,7 @@ for collection in all_collections:
 print("All unwanted collections have been dropped.")
 
 
-db = client["crocodile_db"]
+db = client["crocodile"]
 input_collection = db["input_data"]
 table_trace_collection = db["table_trace"]
 dataset_trace_collection = db["dataset_trace"]

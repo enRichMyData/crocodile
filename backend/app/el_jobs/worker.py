@@ -154,6 +154,7 @@ def process_job(db, job: Dict[str, Any], owner_id: str) -> None:
     link_columns = job["link_columns"]
     top_k = job.get("top_k", 5)
     config = job.get("config", {})
+    match_threshold = float(config.get("match_threshold", 0.9)) if isinstance(config, dict) else 0.9
 
     col_index = {name: idx for idx, name in enumerate(header)}
 
@@ -222,6 +223,7 @@ def process_job(db, job: Dict[str, Any], owner_id: str) -> None:
         candidate_retrieval_limit=(
             int(config.get("candidate_retrieval_limit", 16)) if isinstance(config, dict) else 16
         ),
+        match_threshold=match_threshold,
         max_workers=int(config.get("max_workers", 4)) if isinstance(config, dict) else 4,
         ml_ranking_workers=int(config.get("ml_ranking_workers", 2)) if isinstance(config, dict) else 2,
         model_path=config.get("model_path") if isinstance(config, dict) else None,
@@ -303,14 +305,20 @@ def process_job(db, job: Dict[str, Any], owner_id: str) -> None:
             mention = str(cells[col_idx]) if cells[col_idx] is not None else ""
             candidates_raw = el_results.get(str(col_idx), [])
             candidates: List[Dict[str, Any]] = []
-            for cand in candidates_raw[:top_k]:
+            match_value = None
+            for cand_idx, cand in enumerate(candidates_raw[:top_k]):
                 metadata = {k: v for k, v in cand.items() if k not in {"id", "name", "score"}}
+                score_value = float(cand.get("score", 0.0) or 0.0)
+                if cand_idx == 0:
+                    match_value = cand.get("match_value")
+                is_match = bool(cand.get("is_match", False))
                 candidates.append(
                     {
                         "entity_id": cand.get("id", ""),
                         "label": cand.get("name", ""),
-                        "score": cand.get("score", 0.0),
+                        "score": score_value,
                         "metadata": metadata or None,
+                        "is_match": is_match,
                     }
                 )
 
@@ -321,6 +329,7 @@ def process_job(db, job: Dict[str, Any], owner_id: str) -> None:
                     "col_id": col_name,
                     "mention": mention,
                     "candidates": candidates,
+                    "match_value": match_value,
                     "sort_key": sort_key,
                 }
             )

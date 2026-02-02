@@ -43,6 +43,7 @@ class Crocodile:
         entity_retrieval_token: Optional[str] = None,
         selected_features: Optional[List[str]] = None,
         candidate_retrieval_limit: int = 16,
+        match_threshold: float = 0.9,
         model_path: Optional[str] = None,
         batch_size: int = 1024,
         ml_ranking_workers: int = 2,
@@ -78,6 +79,7 @@ class Crocodile:
         self.entity_retrieval_endpoint = entity_retrieval_endpoint
         self.entity_retrieval_token = entity_retrieval_token
         self.candidate_retrieval_limit = candidate_retrieval_limit
+        self.match_threshold = match_threshold
         self.model_path = model_path
         self.batch_size = batch_size
         self.ml_ranking_workers = ml_ranking_workers
@@ -128,6 +130,7 @@ class Crocodile:
             self._candidate_fetcher,
             self.max_candidates_in_result,
             self._bow_fetcher if self._entity_bow_endpoint else None,
+            match_threshold=self.match_threshold,
             db_name=self._DB_NAME,
             mongo_uri=self._mongo_uri,
             input_collection=self._INPUT_COLLECTION,
@@ -508,6 +511,7 @@ class Crocodile:
             max_candidates_in_result=self.max_candidates_in_result,
             top_n_for_type_freq=self.top_n_for_type_freq,
             features=self.feature.selected_features,
+            match_threshold=self.match_threshold,
             mongo_uri=self._mongo_uri,
             db_name=self._DB_NAME,
         )

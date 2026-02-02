@@ -39,6 +39,7 @@ class MLWorker:
         self.batch_size: int = batch_size
         self.max_candidates_in_result: int = max_candidates_in_result
         self.top_n_for_type_freq: int = top_n_for_type_freq
+        self.match_threshold: float = float(kwargs.pop("match_threshold", 0.9))
         self.selected_features = features or DEFAULT_FEATURES
         self._db_name = kwargs.pop("db_name", "crocodile")
         self._mongo_uri = kwargs.pop("mongo_uri", "mongodb://mongodb:27017/")
@@ -186,6 +187,12 @@ class MLWorker:
                 sorted_cands = sorted(col_cands, key=lambda x: x.get("score", 0.0), reverse=True)[
                     : self.max_candidates_in_result
                 ]
+                top_score = 0.0
+                if sorted_cands:
+                    top_score = float(sorted_cands[0].get("score", 0.0) or 0.0)
+                for idx, cand in enumerate(sorted_cands):
+                    cand["match_value"] = top_score
+                    cand["is_match"] = idx == 0 and top_score >= self.match_threshold
                 el_results[col_idx] = sorted_cands
 
             bulk_updates.append(

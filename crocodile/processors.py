@@ -23,6 +23,7 @@ class RowBatchProcessor:
     ):
         self.candidate_fetcher = candidate_fetcher
         self.max_candidates_in_result = max_candidates_in_result
+        self.match_threshold = float(kwargs.get("match_threshold", 0.9))
         self.bow_fetcher = bow_fetcher
         self._db_name = kwargs.get("db_name", "crocodile")
         self._mongo_uri = kwargs.get("mongo_uri", "mongodb://mongodb:27017")
@@ -313,6 +314,14 @@ class RowBatchProcessor:
                     # Slice final results
                     el_results_candidates = ranked_candidates[: self.max_candidates_in_result]
                     training_candidates = ranked_candidates[:max_training_candidates]
+
+                    # Apply match flag + match value on top candidate
+                    top_score = 0.0
+                    if el_results_candidates:
+                        top_score = float(el_results_candidates[0].get("score", 0.0) or 0.0)
+                    for idx, cand in enumerate(el_results_candidates):
+                        cand["match_value"] = top_score
+                        cand["is_match"] = idx == 0 and top_score >= self.match_threshold
 
                     linked_entities[c] = el_results_candidates
                     training_candidates_by_ne_column[c] = training_candidates

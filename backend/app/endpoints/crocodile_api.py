@@ -66,6 +66,125 @@ def normalize_status(value: str) -> JobStatus:
     return JobStatus(value)
 
 
+def normalize_index(value: Any) -> Any:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return value
+
+
+def normalize_types(raw_types: Any) -> List[Dict[str, str]]:
+    if not isinstance(raw_types, list):
+        return []
+
+    types: List[Dict[str, str]] = []
+    for item in raw_types:
+        if isinstance(item, dict):
+            type_id = item.get("id")
+            type_name = item.get("name")
+            if type_id is None and type_name is None:
+                continue
+            types.append(
+                {
+                    "id": str(type_id or ""),
+                    "name": str(type_name or ""),
+                }
+            )
+    return types
+
+
+def normalize_candidates(raw_candidates: Any) -> List[Dict[str, Any]]:
+    if not isinstance(raw_candidates, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for cand in raw_candidates:
+        if not isinstance(cand, dict):
+            continue
+
+        metadata = cand.get("metadata") if isinstance(cand.get("metadata"), dict) else {}
+        raw_id = cand.get("id", cand.get("entity_id", ""))
+        raw_name = cand.get("name", cand.get("label", ""))
+        raw_description = cand.get("description", metadata.get("description"))
+        raw_types = cand.get("types", metadata.get("types", []))
+        raw_match = cand.get("match")
+        if raw_match is None:
+            raw_match = cand.get("is_match", metadata.get("is_match", False))
+
+        try:
+            score = float(cand.get("score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+
+        additional_metadata: Dict[str, Any] = {}
+        if metadata:
+            for key, value in metadata.items():
+                if key not in {"description", "types", "is_match", "match_value"}:
+                    additional_metadata[key] = value
+
+        for key, value in cand.items():
+            if key not in {
+                "id",
+                "entity_id",
+                "name",
+                "label",
+                "types",
+                "description",
+                "score",
+                "match",
+                "is_match",
+                "match_value",
+                "metadata",
+            }:
+                additional_metadata.setdefault(key, value)
+
+        normalized.append(
+            {
+                "id": str(raw_id or ""),
+                "name": str(raw_name or ""),
+                "types": normalize_types(raw_types),
+                "description": str(raw_description) if raw_description is not None else None,
+                "score": score,
+                "match": bool(raw_match),
+                "metadata": additional_metadata or None,
+            }
+        )
+
+    return normalized
+
+
+def resolve_row(item: Dict[str, Any]) -> Any:
+    if "row" in item:
+        return normalize_index(item.get("row"))
+    if "row_id" in item:
+        return normalize_index(item.get("row_id"))
+
+    sort_key = item.get("sort_key")
+    if isinstance(sort_key, dict) and "row" in sort_key:
+        return normalize_index(sort_key.get("row"))
+    return -1
+
+
+def resolve_col(item: Dict[str, Any], header_index: Dict[str, int]) -> Any:
+    if "col" in item:
+        return normalize_index(item.get("col"))
+
+    sort_key = item.get("sort_key")
+    if isinstance(sort_key, dict) and "col" in sort_key:
+        return normalize_index(sort_key.get("col"))
+
+    col_id = item.get("col_id")
+    if isinstance(col_id, str):
+        if col_id.isdigit():
+            return int(col_id)
+        if col_id in header_index:
+            return header_index[col_id]
+    if col_id is not None:
+        return normalize_index(col_id)
+    return -1
+
+
 @router.post(
     "/jobs",
     response_model=JobCreateResponse,
@@ -144,7 +263,7 @@ def create_job(
                     message="Idempotent replay",
                 )
 
-        job_id = str(uuid.uuid4())
+        job_id = uuid.uuid4().hex
         job_doc = {
             "job_id": job_id,
             "mode": "inline",
@@ -250,7 +369,7 @@ def create_job(
                 ),
             )
 
-    job_id = str(uuid.uuid4())
+    job_id = uuid.uuid4().hex
     job_doc = {
         "job_id": job_id,
         "mode": "multipart",
@@ -493,8 +612,12 @@ def get_results(
     if job_status in [JobStatus.created, JobStatus.ingesting, JobStatus.queued]:
         raise HTTPException(status_code=409, detail="Results not available yet")
 
+    header = job.get("header", [])
+    header_index = {name: idx for idx, name in enumerate(header)}
+
     start_segment = 0
     start_offset = 0
+    input_cursor = cursor
     if cursor:
         try:
             payload = decode_cursor(cursor)
@@ -517,12 +640,19 @@ def get_results(
         offset = start_offset if segment_idx == start_segment else 0
         while offset < len(seg_results) and len(results) < limit:
             item = seg_results[offset]
+            row_value = resolve_row(item)
+            col_value = resolve_col(item, header_index)
+            candidate_ranking = normalize_candidates(
+                item.get("candidate_ranking", item.get("candidates", []))
+            )
+
             results.append(
                 CellResult(
-                    row_id=item["row_id"],
-                    col_id=item["col_id"],
+                    row=row_value,
+                    col=col_value,
+                    cell_id=item.get("cell_id", f"{row_value}:{col_value}"),
                     mention=item.get("mention", ""),
-                    candidates=item.get("candidates", []),
+                    candidate_ranking=candidate_ranking,
                 )
             )
             last_sort_key = item.get("sort_key")
@@ -544,7 +674,13 @@ def get_results(
 
         start_offset = 0
 
-    return ResultsPage(results=results, next_cursor=next_cursor, has_more=has_more, job_status=job_status)
+    return ResultsPage(
+        ok=True,
+        job_id=job_id,
+        cursor=input_cursor,
+        next_cursor=next_cursor,
+        results=results,
+    )
 
 
 @health_router.get("/health", response_model=HealthResponse)

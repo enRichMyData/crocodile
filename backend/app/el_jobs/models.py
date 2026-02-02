@@ -17,18 +17,27 @@ class JobStatus(str, Enum):
     cancelled = "cancelled"
 
 
+class CandidateType(BaseModel):
+    id: str
+    name: str
+
+
 class Candidate(BaseModel):
-    entity_id: str
-    label: str
+    id: str
+    name: str
+    types: List[CandidateType] = Field(default_factory=list)
+    description: Optional[str] = None
     score: float
+    match: bool = False
     metadata: Optional[Dict[str, Any]] = None
 
 
 class CellResult(BaseModel):
-    row_id: Union[int, str]
-    col_id: Union[int, str]
+    row: Union[int, str]
+    col: Union[int, str]
+    cell_id: str
     mention: str
-    candidates: List[Candidate]
+    candidate_ranking: List[Candidate]
 
 
 class RowCells(BaseModel):
@@ -129,10 +138,11 @@ class JobStatusResponse(BaseModel):
 
 
 class ResultsPage(BaseModel):
-    results: List[CellResult]
+    ok: bool = True
+    job_id: str
+    cursor: Optional[str] = None
     next_cursor: Optional[str] = None
-    has_more: bool
-    job_status: JobStatus
+    results: List[CellResult]
 
 
 class HealthResponse(BaseModel):
